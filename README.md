@@ -1,3 +1,5 @@
+<img src="src/pi_assistant/assets/athena.svg" alt="Athena's shield: a bronze hoplite shield bearing an owl on an olive branch" width="128" align="right">
+
 # pi-assistant
 
 A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the assistant (Telegram bot, agent loop, tools and long-term memory) and calls a local model on a Mac through an OpenAI-compatible API such as [oMLX](https://omlx.ai).
@@ -20,10 +22,11 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 
 - **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it.
 - **Tool calling with MCP**: connects to any MCP server, either local (stdio) on the Pi or remote (HTTP) on the Mac. Per-server filters choose which tools the model sees.
-- **Approval before actions**: tools you mark with `confirm` show *Allow / Deny* buttons in Telegram before they run.
+- **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`. Related memories are also added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Your notes as memory**: `pi-assistant ingest ~/notes` indexes Markdown and text files so the assistant can search them.
 - **Fast replies with prompt caching**: the system prompt and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon.
+- **A status board**: with a Pimoroni Display HAT Mini, the Pi's screen shows what the assistant is doing: idle, working on your request, or waiting for your approval.
 - **SSH-friendly tools**: `pi-assistant doctor` checks every connection, `pi-assistant chat` gives you a terminal chat, and `pi-assistant eval` compares models on tool calling.
 
 ## Install on the Pi
@@ -38,7 +41,7 @@ cd ~/pi-assistant
 bash scripts/install.sh
 ```
 
-The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run.
+The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. If you have a Display HAT Mini, run it with `--display` to set up the [status board](#status-board) too.
 
 Then:
 
@@ -78,12 +81,31 @@ Then:
 | `ingest PATH...` | Add `.md`/`.txt` files or folders to memory. Re-running a file replaces its old chunks. |
 | `reindex` | Re-embed everything after changing the embeddings model. |
 | `eval -m MODEL [-m MODEL2]` | Compare models on tool calling (see below). |
+| `display` | Run the [status board](#status-board). `--demo` cycles through example states; `--preview FILE` draws to an image instead of the screen. |
+
+## Status board
+
+With a [Pimoroni Display HAT Mini](https://pinout.xyz/pinout/display_hat_mini) on the Pi, the screen shows what the assistant is doing:
+
+![The status board while idle, thinking, using a tool, waiting for approval, after a failed request, and offline](docs/status-board.png)
+
+- **Idle:** the time, and how your last request went.
+- **Working:** your request, what the assistant is doing now (thinking, or which tool it's using), the tools it has used and how long it's taken. A light runs round the shield.
+- **Needs you:** a tool is waiting for your approval in Telegram. The shield pulses amber, the LED flashes and the clock counts down to when the request is denied automatically.
+- **Offline:** the assistant isn't running.
+
+Press any button to turn the screen off. It comes back on by itself whenever the assistant is working or needs you. In `config.toml`, `[display]` can keep your messages off the screen (`show_task = false`) or turn off the LED.
+
+To set it up, run `bash scripts/install.sh --display`. That turns on SPI, installs the drivers and starts the `pi-assistant-display` service, which shows "offline" until the assistant starts. To test the screen on its own, stop the service and run `uv run pi-assistant display --demo`. On any computer, `uv run pi-assistant display --preview board.png` draws the board into an image instead.
+
+The board runs as a separate service, so it keeps working, and says so, when the assistant isn't running. The assistant writes its status to `data/status.json` as it works, and holds a lock on `data/status.lock` while it runs. The system releases that lock even if the assistant crashes, which is how the board knows it's offline.
 
 ## MCP servers
 
 Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has either `command` (a local server spoken to over stdio) or `url` (a remote server over Streamable HTTP; URLs ending in `/sse` use the older SSE transport). Optional settings:
 
 - `include`, `exclude` and `confirm` take glob patterns matched against the server's tool names.
+- `confirm` lists the tools that ask for your approval before they run. It defaults to `["*"]`, every tool, because any tool might send your data off your network. Set `confirm = []` only for servers that can't, like `time`. If you narrow it to some tools, use `include` too, so tools you haven't checked can't run without asking.
 - `headers` adds HTTP headers, such as an auth token.
 - `env` passes extra environment variables to a local server. Local servers otherwise get only a minimal environment, so your Telegram token isn't exposed to them.
 
@@ -97,11 +119,14 @@ These two work out of the box:
 [mcp_servers.time]
 command = "uvx"
 args = ["mcp-server-time", "--local-timezone=Europe/London"]
+confirm = []
 
 [mcp_servers.fetch]
 command = "uvx"
 args = ["mcp-server-fetch"]
 ```
+
+Every fetch asks for approval first, because a URL can carry your data to any website.
 
 Each local server's stderr is written to `data/logs/mcp-<name>.log`.
 
@@ -118,7 +143,8 @@ uvx mcp-proxy --host=<mac-ip> --port=8765 <your Apple MCP server command>
 # On the Pi
 [mcp_servers.mac]
 url = "http://my-mac.local:8765/sse"
-confirm = ["create_*", "update_*", "delete_*", "send_*"]
+include = ["list_*", "get_*", "search_*", "create_*"]
+confirm = ["create_*"]
 ```
 
 Tips:
@@ -149,8 +175,10 @@ On an M1 Pro with 32 GB, mixture-of-experts models with about 3–4B active para
 ## Updating
 
 ```bash
-cd ~/pi-assistant && git pull && uv sync --no-dev && sudo systemctl restart pi-assistant
+cd ~/pi-assistant && bash scripts/update.sh
 ```
+
+It pulls the latest code, updates the dependencies (keeping the status board's, if you set it up) and restarts the services.
 
 ## Development
 
@@ -158,6 +186,10 @@ cd ~/pi-assistant && git pull && uv sync --no-dev && sudo systemctl restart pi-a
 uv sync          # includes the test dependencies
 uv run pytest    # offline: fake model server, real sqlite-vec, real MCP servers in subprocesses
 ```
+
+uv uses its own Python build for this project (`[tool.uv]` in `pyproject.toml`), because some others, including the python.org installer for macOS, can't load sqlite-vec.
+
+The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the status board's design, run `uv run --with resvg-py scripts/render_images.py` to redraw the PNG the board uses and the picture in this README.
 
 | Path | Purpose |
 |---|---|
@@ -167,9 +199,12 @@ uv run pytest    # offline: fake model server, real sqlite-vec, real MCP servers
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
 | `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
+| `src/pi_assistant/status.py` | What the assistant is doing, published for the status board |
+| `src/pi_assistant/board.py`, `display.py` | Drawing the status board, and the Display HAT Mini |
+| `src/pi_assistant/assets/` | The Athena icon and the board's fonts |
 | `src/pi_assistant/doctor.py`, `evals.py`, `cli.py` | Command-line tools |
 | `prompts/system.md` | System prompt. Point `agent.system_prompt_file` at a `*.local.md` copy to customise it privately. |
-| `scripts/install.sh`, `deploy/pi-assistant.service` | Pi setup |
+| `scripts/install.sh`, `scripts/update.sh`, `deploy/` | Pi setup and updates |
 
 ## Troubleshooting
 
@@ -178,14 +213,17 @@ uv run pytest    # offline: fake model server, real sqlite-vec, real MCP servers
 - **The model answers instead of using tools:** check that tool calling works in `doctor`, then compare models with `eval`.
 - **The bot ignores you:** your ID isn't in `telegram.allowed_user_ids`. Empty the list temporarily to get your ID.
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
+- **The status board stays blank:** check `journalctl -u pi-assistant-display`. Its errors say what to fix, such as SPI being turned off.
 
 ## Security notes
 
 - Only allowlisted Telegram users can use the bot. Messages from anyone else are ignored and logged.
 - Secrets stay in `.env` (mode 600). `config.toml`, `.env` and `data/` are git-ignored.
+- `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
+- Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
-- Treat text from tools, such as fetched web pages, as untrusted. Use `confirm` on anything that writes, sends or deletes.
+- The status board shows the start of your latest message. If other people can see the screen, set `show_task = false` under `[display]`.
 
 ## License
 
-MIT
+MIT. The fonts in `src/pi_assistant/assets/fonts` (Cinzel and Inter) are under the SIL Open Font License; their licence files are next to them.

@@ -26,7 +26,7 @@ allowed_user_ids = []
 confirm_timeout_seconds = 300          # how long an Allow/Deny prompt waits
 
 [agent]
-assistant_name = "Assistant"
+assistant_name = "Athena"
 user_name = "the user"                 # your first name, used in the system prompt
 timezone = "Europe/London"
 system_prompt_file = "prompts/system.md"
@@ -52,6 +52,11 @@ recall_max_distance = 0.55             # cosine distance cut-off for auto-recall
 search_top_k = 8
 chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
 
+[display]
+# The status board on a Pimoroni Display HAT Mini (see README, "Status board").
+show_task = true                       # show your message on the screen (false: just the status)
+led = true                             # LED: blue while working, flashing amber when it needs you
+
 # ---------------------------------------------------------------------------
 # MCP servers. Each one is either local (command = ..., spoken to over stdio)
 # or remote (url = ..., Streamable HTTP; URLs ending in /sse use the older SSE
@@ -59,20 +64,25 @@ chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
 #   include = [...]   only expose these tools (default: all)
 #   exclude = [...]   hide these tools
 #   confirm = [...]   ask for approval in Telegram before running these
+#                     (default: all of them, since any tool might send your data
+#                     off your network; set [] only for servers that can't)
 # Fewer tools = shorter prompts = faster replies, so only enable what you use.
 # ---------------------------------------------------------------------------
 
 [mcp_servers.time]
 command = "uvx"
 args = ["mcp-server-time", "--local-timezone=Europe/London"]
+confirm = []                           # local and read-only, so it needn't ask
 
 [mcp_servers.fetch]
 command = "uvx"
 args = ["mcp-server-fetch"]
+# No `confirm` line, so every fetch asks first: a URL can carry your data to any
+# website, for example if a fetched page tells the model to send it there.
 
-# Example: Apple apps on the Mac, exposed over HTTP (see README, "MCP servers on the Mac").
+# Example: Apple apps on the Mac, exposed over HTTP (see README, "On the Mac").
 # [mcp_servers.mac]
 # url = "http://my-mac.local:8765/mcp"
 # headers = { Authorization = "Bearer ${MAC_MCP_TOKEN}" }
-# exclude = ["*delete*"]
-# confirm = ["create_*", "update_*", "send_*"]
+# include = ["list_*", "get_*", "search_*", "create_*"]   # only tools you've checked
+# confirm = ["create_*"]                                  # reads stay on your network

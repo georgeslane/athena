@@ -1,13 +1,16 @@
 import asyncio
 
+import openai
+import pytest
 from conftest import FakeLLMServer, completion
 
 from pi_assistant.agent import Agent
 from pi_assistant.history import ConversationStore
+from pi_assistant.status import State, StatusTracker
 from pi_assistant.tools import Tool, ToolRegistry
 
 
-def make_agent(config, memory, server: FakeLLMServer, extra_tools=()):
+def make_agent(config, memory, server: FakeLLMServer, extra_tools=(), status=None):
     tools = ToolRegistry()
     for t in memory.tools():
         tools.add(t)
@@ -15,7 +18,9 @@ def make_agent(config, memory, server: FakeLLMServer, extra_tools=()):
         tools.add(t)
     history = ConversationStore(config.db_path, config.agent.max_history_messages)
     prompt = "You are {assistant_name} helping {user_name}. Literal braces stay: {not_a_key} {}"
-    return Agent(config.agent, server.client(config.llm), tools, history, memory, system_prompt_template=prompt)
+    return Agent(
+        config.agent, server.client(config.llm), tools, history, memory, system_prompt_template=prompt, status=status
+    )
 
 
 async def test_plain_answer_is_saved_to_history(config, memory):
@@ -169,3 +174,52 @@ async def test_embeddings_outage_does_not_break_chat(config, memory):
     server = FakeLLMServer([completion("Still here.")])
     agent = make_agent(config, memory, server)
     assert (await agent.respond("c", "hello")).text == "Still here."
+
+
+def recording_tracker():
+    status = StatusTracker()
+    seen = []
+    status.on_change = seen.append
+    return status, seen
+
+
+async def test_status_board_follows_the_agent(config, memory):
+    server = FakeLLMServer(
+        [
+            completion(None, [("remember", {"fact": "George's sister Anna's birthday is 14 March."})]),
+            completion("Got it."),
+        ]
+    )
+    status, seen = recording_tracker()
+    agent = make_agent(config, memory, server, status=status)
+
+    await agent.respond("chat1", "My sister Anna's birthday is 14 March")
+
+    assert [(s.state, s.step, s.tools) for s in seen] == [
+        (State.WORKING, "Thinking", []),
+        (State.WORKING, "Saving a memory", ["remember"]),
+        (State.WORKING, "Thinking", ["remember"]),
+        (State.IDLE, "", []),
+    ]
+    assert seen[0].task == "My sister Anna's birthday is 14 March"
+    assert (seen[-1].last_task, seen[-1].last_error) == ("My sister Anna's birthday is 14 March", "")
+
+
+async def test_status_board_shows_approvals_and_failures(config, memory):
+    await memory.remember("Old fact about the boiler.")
+    server = FakeLLMServer([completion(None, [("forget_memory", {"id": 1})])])  # then the server fails
+    status, seen = recording_tracker()
+    status.channel = "Telegram"
+    agent = make_agent(config, memory, server, status=status)
+
+    async def confirm(tool, args):
+        assert (seen[-1].state, seen[-1].tool, seen[-1].channel) == (State.APPROVAL, "forget_memory", "Telegram")
+        return False
+
+    with pytest.raises(openai.APIStatusError):
+        await agent.respond("chat1", "forget the boiler thing", confirm=confirm)
+
+    assert State.APPROVAL in [s.state for s in seen]
+    assert seen[-1].state is State.IDLE  # never left showing "working"
+    assert seen[-1].last_error == "The model server returned an error"
+    assert all(s.tools == [] for s in seen)  # a declined tool never shows as used

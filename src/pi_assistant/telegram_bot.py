@@ -24,7 +24,7 @@ from telegram.ext import (
 )
 
 from pi_assistant.app import Services
-from pi_assistant.formatting import markdown_to_telegram_html, split_message
+from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_telegram_html, split_message
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -126,9 +126,15 @@ class TelegramBot:
         key = secrets.token_hex(6)
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending[key] = future
+        # Show every argument: approving content you can't see isn't approval. Link previews
+        # stay off, or Telegram's servers would fetch a URL in the arguments before you decide.
         pretty = json.dumps(args, indent=2, ensure_ascii=False)
-        if len(pretty) > 1500:
-            pretty = pretty[:1500] + "\n..."
+        prompt = f"Allow <b>{html.escape(tool)}</b>?\n<pre>{html.escape(pretty)}</pre>"
+        if len(prompt) > TELEGRAM_LIMIT:
+            chunks = split_message(pretty)
+            for chunk in chunks:
+                await ctx.bot.send_message(chat_id, chunk, link_preview_options=NO_PREVIEW)
+            prompt = f"Allow <b>{html.escape(tool)}</b> with the arguments in the {len(chunks)} messages above?"
         buttons = InlineKeyboardMarkup(
             [
                 [
@@ -138,10 +144,7 @@ class TelegramBot:
             ]
         )
         msg = await ctx.bot.send_message(
-            chat_id,
-            f"Allow <b>{html.escape(tool)}</b>?\n<pre>{html.escape(pretty)}</pre>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=buttons,
+            chat_id, prompt, parse_mode=ParseMode.HTML, reply_markup=buttons, link_preview_options=NO_PREVIEW
         )
         try:
             approved = await asyncio.wait_for(future, timeout=self.cfg.confirm_timeout_seconds)

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import signal
 import sys
 from typing import Any
 
@@ -27,7 +28,30 @@ def cmd_run(args: argparse.Namespace) -> int:
     from pi_assistant.telegram_bot import TelegramBot
 
     cfg = load_config(args.config)
-    TelegramBot(build_services(cfg)).run()
+    services = build_services(cfg)
+    services.status.channel = "Telegram"
+    services.status.approval_timeout = cfg.telegram.confirm_timeout_seconds
+    TelegramBot(services).run()
+    return 0
+
+
+def cmd_display(args: argparse.Namespace) -> int:
+    try:
+        from pi_assistant.display import DisplayError, run_display
+    except ModuleNotFoundError as exc:  # Pillow isn't installed
+        print(f"The status board needs packages that aren't installed ({exc.name}).", file=sys.stderr)
+        print("Run: bash scripts/install.sh --display (or: uv sync --extra display)", file=sys.stderr)
+        return 1
+    cfg = load_config(args.config)
+    # `systemctl stop` sends SIGTERM. Leave through the normal path so the screen gets cleared.
+    previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        run_display(cfg, preview=args.preview, demo_mode=args.demo, once=args.once)
+    except DisplayError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     return 0
 
 
@@ -36,6 +60,7 @@ async def _chat(args: argparse.Namespace) -> int:
 
     cfg = load_config(args.config)
     services = build_services(cfg)
+    services.status.channel = "the terminal"
     await services.start()
     name = cfg.agent.assistant_name
     print(f"Chatting with {name} via {cfg.llm.model}. Commands: /reset, /tools, /quit\n")
@@ -162,6 +187,10 @@ def main(argv: list[str] | None = None) -> None:
     p_eval = sub.add_parser("eval", help="compare models on tool calling")
     p_eval.add_argument("--model", "-m", action="append", help="model id (repeatable; default: the configured model)")
     p_eval.add_argument("--repeat", type=int, default=1, help="run each case N times")
+    p_display = sub.add_parser("display", help="run the status board on a Display HAT Mini")
+    p_display.add_argument("--preview", metavar="PNG", help="draw to this PNG file instead of the screen")
+    p_display.add_argument("--demo", action="store_true", help="cycle through example states, to check the screen")
+    p_display.add_argument("--once", action="store_true", help="draw one frame and exit")
 
     args = parser.parse_args(argv)
     command = args.command or "run"
@@ -178,6 +207,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if command == "run":
             code = cmd_run(args)
+        elif command == "display":
+            code = cmd_display(args)
         else:
             code = asyncio.run(handlers[command](args))
     except ConfigError as exc:

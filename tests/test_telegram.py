@@ -1,6 +1,7 @@
 """Offline tests for the Telegram layer using stand-in bot/update objects."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from telegram.ext import CallbackQueryHandler, MessageHandler
@@ -81,6 +82,7 @@ async def test_message_round_trip_with_confirmation(config):
         await asyncio.sleep(0.01)
     prompt = ctx.bot.sent[0]
     assert "delete_note" in prompt.text and "shopping" in prompt.text
+    assert prompt.kwargs["link_preview_options"].is_disabled
     allow = prompt.kwargs["reply_markup"].inline_keyboard[0][0].callback_data
 
     # A stranger can't press the button for us.
@@ -112,6 +114,29 @@ async def test_confirmation_times_out_as_denied(config):
     await bot.on_text(text_update(ME, "do x"), ctx)
     assert ctx.bot.sent[0].edits == ["No answer, so denied: <b>x</b>"]
     assert ctx.bot.sent[-1].text == "Kept it"
+
+
+async def test_confirmation_shows_long_arguments_in_full(config):
+    body = "Hi Sam,\n\n" + "Here's the plan for the weekend. " * 200 + "\nP.S. the door code is 4321."
+    args = {"to": "sam@example.com", "body": body}
+
+    async def respond(chat_id, text, confirm):
+        return AgentResult(text="Sent" if await confirm("send_email", args) else "Not sent")
+
+    bot = make_bot(config, respond)
+    bot.cfg.confirm_timeout_seconds = 0.05
+    ctx = SimpleNamespace(bot=FakeBot())
+    await bot.on_text(text_update(ME, "email Sam the plan"), ctx)
+
+    *shown, prompt, reply = ctx.bot.sent
+    assert len(shown) > 1 and all(len(m.text) <= 4096 for m in shown)
+    # Every character is shown before the buttons, including the end of a long argument.
+    shown_text = "".join(m.text for m in shown)
+    assert shown_text.replace("\n", "") == json.dumps(args, indent=2, ensure_ascii=False).replace("\n", "")
+    assert "door code is 4321" in shown_text
+    assert "send_email" in prompt.text and "reply_markup" in prompt.kwargs
+    assert all(m.kwargs["link_preview_options"].is_disabled for m in [*shown, prompt])
+    assert reply.text == "Not sent"
 
 
 async def test_agent_errors_become_friendly_replies(config):

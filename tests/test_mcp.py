@@ -25,7 +25,7 @@ async def test_stdio_server_tools_filters_and_calls():
     await manager.start()
     try:
         tools = {t.name: t for t in manager.tools()}
-        assert set(tools) == {"add", "delete_note", "explode"}
+        assert set(tools) == {"add", "delete_note", "explode", "get_env"}
         assert tools["delete_note"].needs_confirmation
         assert not tools["add"].needs_confirmation
         assert tools["add"].source == "mcp:demo"
@@ -35,7 +35,7 @@ async def test_stdio_server_tools_filters_and_calls():
         assert (await tools["explode"].handler({})).startswith("Error:")
 
         [status] = manager.status()
-        assert status.connected and status.tools == 3
+        assert status.connected and status.tools == 4
 
         # Reload reconnects (new subprocess) and tools keep working.
         await manager.reload()
@@ -52,7 +52,22 @@ async def test_include_filter_and_name_collisions():
     await manager.start()
     try:
         assert [t.name for t in registry.all()] == ["add", "two__add"]
+        assert all(t.needs_confirmation for t in registry.all())  # no `confirm` set: every tool asks first
         assert await registry.get("two__add").handler({"a": 3, "b": 4}) == "7"
+    finally:
+        await manager.stop()
+
+
+async def test_local_servers_dont_see_our_secrets(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:secret")
+    monkeypatch.setenv("LLM_API_KEY", "sk-secret")
+    manager = MCPManager({"demo": demo_stdio(include=["get_env"], env={"WANTED": "yes"})})
+    await manager.start()
+    try:
+        [get_env] = manager.tools()
+        assert await get_env.handler({"name": "TELEGRAM_BOT_TOKEN"}) == "(unset)"
+        assert await get_env.handler({"name": "LLM_API_KEY"}) == "(unset)"
+        assert await get_env.handler({"name": "WANTED"}) == "yes"  # `env` from the config is passed on
     finally:
         await manager.stop()
 

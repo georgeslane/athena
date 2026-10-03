@@ -17,6 +17,7 @@ from pi_assistant.config import AgentConfig
 from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient, ToolCall
 from pi_assistant.memory import MemoryHit, MemoryService
+from pi_assistant.status import StatusTracker, Task
 from pi_assistant.tools import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -50,12 +51,14 @@ class Agent:
         memory: MemoryService | None = None,
         system_prompt_template: str | None = None,
         auto_recall: bool = True,
+        status: StatusTracker | None = None,
     ):
         self.cfg = cfg
         self.llm = llm
         self.tools = tools
         self.history = history
         self.memory = memory
+        self.status = status or StatusTracker()
         self.auto_recall = auto_recall and memory is not None
         prompt = system_prompt_template or FALLBACK_PROMPT
         for key, value in {
@@ -98,7 +101,7 @@ class Agent:
 
     # -- tools --------------------------------------------------------------------------
 
-    async def _run_tool(self, call: ToolCall, confirm: ConfirmFn | None) -> str:
+    async def _run_tool(self, call: ToolCall, confirm: ConfirmFn | None, task: Task) -> str:
         tool = self.tools.get(call.name)
         if tool is None:
             return f"Error: there is no tool called '{call.name}'."
@@ -108,12 +111,14 @@ class Agent:
             if confirm is None:
                 return "Error: this action needs the user's approval, which can't be requested here."
             try:
-                approved = await confirm(tool.name, call.arguments)
+                with task.approval(tool.name):
+                    approved = await confirm(tool.name, call.arguments)
             except Exception as exc:
                 log.warning("Confirmation request failed: %s", exc)
                 approved = False
             if not approved:
                 return "The user declined this action. Don't retry it unless they ask."
+        task.using(tool.name)
         try:
             result = await asyncio.wait_for(tool.handler(call.arguments), self.cfg.tool_timeout_seconds)
         except TimeoutError:
@@ -138,10 +143,17 @@ class Agent:
         on_tool: ToolEventFn | None = None,
     ) -> AgentResult:
         async with self._locks[chat_id]:
-            return await self._respond(chat_id, text, confirm, on_tool)
+            task = self.status.begin(text)
+            try:
+                result = await self._respond(chat_id, text, task, confirm, on_tool)
+            except BaseException as exc:  # including cancellation, so the board never sticks on "working"
+                task.finish(exc)
+                raise
+            task.finish()
+            return result
 
     async def _respond(
-        self, chat_id: str, text: str, confirm: ConfirmFn | None, on_tool: ToolEventFn | None
+        self, chat_id: str, text: str, task: Task, confirm: ConfirmFn | None, on_tool: ToolEventFn | None
     ) -> AgentResult:
         started = time.monotonic()
         memories = await self._recall(text)
@@ -156,6 +168,7 @@ class Agent:
         result = AgentResult(text="")
 
         for _ in range(self.cfg.max_tool_rounds):
+            task.thinking()
             reply = await self.llm.chat(messages, schemas)
             result.model_calls += 1
             if not reply.tool_calls:
@@ -169,7 +182,7 @@ class Agent:
                 }
             )
             for call in reply.tool_calls:
-                output = await self._run_tool(call, confirm)
+                output = await self._run_tool(call, confirm, task)
                 result.tools_used.append(call.name)
                 log.info("tool %s(%s) -> %s", call.name, call.raw_arguments[:200], output[:200].replace("\n", " "))
                 if on_tool:
@@ -177,6 +190,7 @@ class Agent:
                 messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
         else:
             # Out of tool rounds: ask for a final answer with tools switched off.
+            task.thinking()
             reply = await self.llm.chat(messages, None)
             result.model_calls += 1
             result.text = reply.content
