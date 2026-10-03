@@ -1,0 +1,22 @@
+# systemd unit for pi-assistant. scripts/install.sh fills in the @PLACEHOLDERS@
+# and installs it to /etc/systemd/system/pi-assistant.service.
+
+[Unit]
+Description=pi-assistant (Telegram AI assistant)
+Wants=network-online.target
+After=network-online.target ollama.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@REPO_DIR@/.env
+# ~/.local/bin holds uv/uvx, which local MCP servers are usually launched with.
+Environment=PATH=@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@REPO_DIR@/.venv/bin/pi-assistant run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

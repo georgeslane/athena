@@ -1,0 +1,166 @@
+"""Configuration.
+
+Settings live in a TOML file (``config.toml``, copied from ``config.example.toml``).
+Secrets live in environment variables, normally loaded from a ``.env`` file next to
+the config. Any string in the TOML can reference an environment variable as
+``${NAME}``.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import tomllib
+from pathlib import Path
+from typing import Any, Literal
+
+from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+DEFAULT_CONFIG_PATH = "config.toml"
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+class ConfigError(Exception):
+    """Raised when the config file is missing or invalid."""
+
+
+class _Section(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LLMConfig(_Section):
+    base_url: str = "http://localhost:8000/v1"
+    model: str
+    api_key: str = ""
+    temperature: float = 0.7
+    max_tokens: int = 2048
+    timeout_seconds: float = 300.0
+    # Passed through untouched in the request body, for server-specific options
+    # such as {"chat_template_kwargs": {"enable_thinking": false}}.
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
+class TelegramConfig(_Section):
+    bot_token: str = ""
+    # Only these Telegram user IDs can use the bot. Leave empty to run in setup
+    # mode, where the bot replies to anyone with their user ID and nothing else.
+    allowed_user_ids: list[int] = Field(default_factory=list)
+    confirm_timeout_seconds: float = 300.0
+
+
+class EmbeddingsConfig(_Section):
+    base_url: str = "http://localhost:11434/v1"
+    model: str = "embeddinggemma"
+    api_key: str = "ollama"
+    dimensions: int = 768
+    # EmbeddingGemma expects task prefixes; other models may want "" for both.
+    query_prefix: str = "task: search result | query: "
+    document_prefix: str = "title: {title} | text: "
+    batch_size: int = 16
+
+
+class MemoryConfig(_Section):
+    # Automatically look up memories related to each message and show them to the model.
+    auto_recall: bool = True
+    recall_top_k: int = 4
+    # Cosine distance (0 = identical, 2 = opposite). Hits further away than this are dropped.
+    recall_max_distance: float = 0.55
+    search_top_k: int = 8
+    chunk_chars: int = 1200
+
+
+class AgentConfig(_Section):
+    assistant_name: str = "Assistant"
+    user_name: str = "the user"
+    timezone: str = "UTC"
+    system_prompt_file: str = "prompts/system.md"
+    max_tool_rounds: int = 8
+    tool_timeout_seconds: float = 120.0
+    max_tool_result_chars: int = 6000
+    # When the conversation grows past this many messages, the oldest half is
+    # dropped in one go (rather than one message per turn) so the model server's
+    # prompt cache stays valid most of the time.
+    max_history_messages: int = 40
+
+
+class MCPServerConfig(_Section):
+    enabled: bool = True
+    # Local server, started as a subprocess and spoken to over stdio.
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = None
+    # Remote server, reached over HTTP.
+    url: str | None = None
+    transport: Literal["http", "sse"] | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    # Glob patterns matched against the server's own tool names.
+    include: list[str] = Field(default_factory=list)  # empty = all tools
+    exclude: list[str] = Field(default_factory=list)
+    confirm: list[str] = Field(default_factory=list)  # ask the user before running these
+    timeout_seconds: float = 60.0
+
+    @model_validator(mode="after")
+    def _exactly_one_transport(self) -> MCPServerConfig:
+        if bool(self.command) == bool(self.url):
+            raise ValueError("set exactly one of 'command' (local stdio server) or 'url' (HTTP server)")
+        return self
+
+    @property
+    def http_transport(self) -> Literal["http", "sse"]:
+        if self.transport:
+            return self.transport
+        return "sse" if (self.url or "").rstrip("/").endswith("/sse") else "http"
+
+
+class Config(_Section):
+    data_dir: str = "data"
+    llm: LLMConfig
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+    # Directory containing the config file; relative paths are resolved against it.
+    base_dir: Path = Field(default_factory=Path.cwd, exclude=True)
+
+    def resolve(self, path: str | Path) -> Path:
+        p = Path(path).expanduser()
+        return p if p.is_absolute() else self.base_dir / p
+
+    @property
+    def db_path(self) -> Path:
+        return self.resolve(self.data_dir) / "assistant.db"
+
+    @property
+    def log_dir(self) -> Path:
+        return self.resolve(self.data_dir) / "logs"
+
+
+def expand_env(value: Any) -> Any:
+    """Replace ``${NAME}`` references with environment variables (missing ones become "")."""
+    if isinstance(value, str):
+        return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), ""), value)
+    if isinstance(value, list):
+        return [expand_env(v) for v in value]
+    if isinstance(value, dict):
+        return {k: expand_env(v) for k, v in value.items()}
+    return value
+
+
+def load_config(path: str | Path | None = None) -> Config:
+    path = Path(path or os.environ.get("PI_ASSISTANT_CONFIG") or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    if not path.exists():
+        raise ConfigError(f"Config file not found: {path}\nCopy config.example.toml to config.toml and edit it.")
+    # Secrets: .env next to the config. Real environment variables take precedence.
+    load_dotenv(path.parent / ".env", override=False)
+    try:
+        raw = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
+    try:
+        return Config.model_validate({**expand_env(raw), "base_dir": path.parent})
+    except ValidationError as exc:
+        raise ConfigError(f"Problem in {path}:\n{exc}") from exc

@@ -1,0 +1,78 @@
+# pi-assistant configuration.
+# Copy to config.toml (install.sh does this) and edit. config.toml is git-ignored.
+# Secrets belong in .env; reference them here as ${NAME}.
+
+data_dir = "data"                      # SQLite database (history + memory) lives here
+
+[llm]
+# oMLX (or any OpenAI-compatible server) on the Mac. Use its LAN/Tailscale hostname,
+# e.g. "http://my-mac.local:8000/v1" or "http://my-mac.tailnet-name.ts.net:8000/v1".
+base_url = "http://my-mac.local:8000/v1"
+# Exactly as listed by the server; `pi-assistant doctor` prints the available ids.
+model = "gemma-4-26b-a4b-it-4bit"
+api_key = "${LLM_API_KEY}"
+temperature = 0.7
+max_tokens = 2048
+timeout_seconds = 300
+# Server-specific request options, passed through as-is. For example, to turn off
+# "thinking" on models that support it:
+# extra_body = { chat_template_kwargs = { enable_thinking = false } }
+
+[telegram]
+bot_token = "${TELEGRAM_BOT_TOKEN}"
+# Your numeric Telegram user ID. Leave empty at first: the bot then runs in setup
+# mode and replies to any message with the sender's ID.
+allowed_user_ids = []
+confirm_timeout_seconds = 300          # how long an Allow/Deny prompt waits
+
+[agent]
+assistant_name = "Assistant"
+user_name = "the user"                 # your first name, used in the system prompt
+timezone = "Europe/London"
+system_prompt_file = "prompts/system.md"
+max_tool_rounds = 8                    # tool calls per message before forcing an answer
+tool_timeout_seconds = 120
+max_tool_result_chars = 6000
+max_history_messages = 40
+
+[embeddings]
+# Ollama on the Pi serves the embeddings model (installed by scripts/install.sh).
+base_url = "http://127.0.0.1:11434/v1"
+model = "embeddinggemma"
+api_key = "ollama"
+dimensions = 768                       # EmbeddingGemma also supports 512, 256 or 128
+# Prompt formats EmbeddingGemma was trained with. Set both to "" for other models.
+query_prefix = "task: search result | query: "
+document_prefix = "title: {title} | text: "
+
+[memory]
+auto_recall = true                     # show the model memories related to each message
+recall_top_k = 4
+recall_max_distance = 0.55             # cosine distance cut-off for auto-recall (lower = stricter)
+search_top_k = 8
+chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
+
+# ---------------------------------------------------------------------------
+# MCP servers. Each one is either local (command = ..., spoken to over stdio)
+# or remote (url = ..., Streamable HTTP; URLs ending in /sse use the older SSE
+# transport). Tool filters use glob patterns on the server's own tool names:
+#   include = [...]   only expose these tools (default: all)
+#   exclude = [...]   hide these tools
+#   confirm = [...]   ask for approval in Telegram before running these
+# Fewer tools = shorter prompts = faster replies, so only enable what you use.
+# ---------------------------------------------------------------------------
+
+[mcp_servers.time]
+command = "uvx"
+args = ["mcp-server-time", "--local-timezone=Europe/London"]
+
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+# Example: Apple apps on the Mac, exposed over HTTP (see README, "MCP servers on the Mac").
+# [mcp_servers.mac]
+# url = "http://my-mac.local:8765/mcp"
+# headers = { Authorization = "Bearer ${MAC_MCP_TOKEN}" }
+# exclude = ["*delete*"]
+# confirm = ["create_*", "update_*", "send_*"]
