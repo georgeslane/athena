@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Athena</title>
+  <desc>A bronze hoplite shield (aspis) with a Greek key rim, bearing Athena's owl on an olive branch in black-figure style.</desc>
+  <defs>
+    <linearGradient id="rim" x1="0.15" y1="0.1" x2="0.85" y2="0.9">
+      <stop offset="0" stop-color="#ffe3a3"/>
+      <stop offset="0.3" stop-color="#dca24c"/>
+      <stop offset="0.68" stop-color="#9a5d1d"/>
+      <stop offset="1" stop-color="#4d2a0b"/>
+    </linearGradient>
+    <linearGradient id="groove" x1="0.15" y1="0.1" x2="0.85" y2="0.9">
+      <stop offset="0" stop-color="#4d2a0b"/>
+      <stop offset="1" stop-color="#f3c87c"/>
+    </linearGradient>
+    <radialGradient id="face" cx="0.5" cy="0.5" r="0.5" fx="0.34" fy="0.28">
+      <stop offset="0" stop-color="#fff1c6"/>
+      <stop offset="0.25" stop-color="#f1bf68"/>
+      <stop offset="0.6" stop-color="#c8852f"/>
+      <stop offset="0.88" stop-color="#8b5219"/>
+      <stop offset="1" stop-color="#5a320d"/>
+    </radialGradient>
+    <radialGradient id="eye" cx="0.5" cy="0.5" r="0.5" fx="0.4" fy="0.35">
+      <stop offset="0" stop-color="#fff2b8"/>
+      <stop offset="0.6" stop-color="#f4bb42"/>
+      <stop offset="1" stop-color="#b8741c"/>
+    </radialGradient>
+    <radialGradient id="shine" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- One unit of the Greek key, drawn between radii 213 and 243 and repeated 22 times -->
+    <path id="key" d="M317.0 48.2 L322.6 29.2 A236.4 236.4 0 0 0 270.8 20.1 L270.0 33.8 A222.6 222.6 0 0 1 302.7 38.4 L304.2 31.3 A229.8 229.8 0 0 0 286.8 28.3"/>
+  </defs>
+
+  <!-- Rim (itys) with a Greek key band -->
+  <circle cx="256" cy="256" r="250" fill="url(#rim)"/>
+  <circle cx="256" cy="256" r="248.5" fill="none" stroke="#3a1f07" stroke-width="3"/>
+  <g fill="none" stroke="#2a170a" stroke-width="4" stroke-linecap="square">
+    <circle cx="256" cy="256" r="246" stroke-width="3"/>
+    <circle cx="256" cy="256" r="216.6"/>
+    <use href="#key"/>
+    <use href="#key" transform="rotate(16.3636 256 256)"/>
+    <use href="#key" transform="rotate(32.7273 256 256)"/>
+    <use href="#key" transform="rotate(49.0909 256 256)"/>
+    <use href="#key" transform="rotate(65.4545 256 256)"/>
+    <use href="#key" transform="rotate(81.8182 256 256)"/>
+    <use href="#key" transform="rotate(98.1818 256 256)"/>
+    <use href="#key" transform="rotate(114.5455 256 256)"/>
+    <use href="#key" transform="rotate(130.9091 256 256)"/>
+    <use href="#key" transform="rotate(147.2727 256 256)"/>
+    <use href="#key" transform="rotate(163.6364 256 256)"/>
+    <use href="#key" transform="rotate(180 256 256)"/>
+    <use href="#key" transform="rotate(196.3636 256 256)"/>
+    <use href="#key" transform="rotate(212.7273 256 256)"/>
+    <use href="#key" transform="rotate(229.0909 256 256)"/>
+    <use href="#key" transform="rotate(245.4545 256 256)"/>
+    <use href="#key" transform="rotate(261.8182 256 256)"/>
+    <use href="#key" transform="rotate(278.1818 256 256)"/>
+    <use href="#key" transform="rotate(294.5455 256 256)"/>
+    <use href="#key" transform="rotate(310.9091 256 256)"/>
+    <use href="#key" transform="rotate(327.2727 256 256)"/>
+    <use href="#key" transform="rotate(343.6364 256 256)"/>
+  </g>
+
+  <!-- Domed face, with a groove where it meets the rim -->
+  <circle cx="256" cy="256" r="206.5" fill="url(#groove)"/>
+  <circle cx="256" cy="256" r="203" fill="url(#face)"/>
+  <circle cx="256" cy="256" r="186" fill="none" stroke="#7a4615" stroke-width="2" opacity="0.45"/>
+
+  <!-- Device: Athena's owl on an olive branch, black-figure style -->
+  <g fill="#1d130a">
+    <path d="M160 378 C214 360 298 360 352 378" fill="none" stroke="#1d130a" stroke-width="8" stroke-linecap="round"/>
+    <ellipse cx="174" cy="366" rx="19" ry="6" transform="rotate(-32 174 366)"/>
+    <ellipse cx="186" cy="388" rx="17" ry="5.5" transform="rotate(26 186 388)"/>
+    <ellipse cx="338" cy="366" rx="19" ry="6" transform="rotate(32 338 366)"/>
+    <ellipse cx="326" cy="388" rx="17" ry="5.5" transform="rotate(-26 326 388)"/>
+    <circle cx="208" cy="386" r="6.5"/>
+    <circle cx="304" cy="386" r="6.5"/>
+    <path d="M256 170 C236 170 218 163 199 138 C186 162 174 192 174 228 C168 284 182 334 216 358 C233 370 279 370 296 358 C330 334 344 284 338 228 C338 192 326 162 313 138 C294 163 276 170 256 170 Z"/>
+  </g>
+  <g fill="none" stroke="#d49a4a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M194 196 Q226 204 256 222 Q286 204 318 196"/>
+    <path d="M184 252 C190 292 204 326 228 350"/>
+    <path d="M328 252 C322 292 308 326 284 350"/>
+  </g>
+  <g fill="none" stroke="#d49a4a" stroke-width="3" stroke-linecap="round">
+    <path d="M231 282 Q238 291 245 282 M249 282 Q256 291 263 282 M267 282 Q274 291 281 282"/>
+    <path d="M222 304 Q229 313 236 304 M240 304 Q247 313 254 304 M258 304 Q265 313 272 304 M276 304 Q283 313 290 304"/>
+    <path d="M231 326 Q238 335 245 326 M249 326 Q256 335 263 326 M267 326 Q274 335 281 326"/>
+  </g>
+  <!-- Eyes: the status board makes these glow -->
+  <circle cx="222" cy="232" r="24" fill="url(#eye)"/>
+  <circle cx="290" cy="232" r="24" fill="url(#eye)"/>
+  <circle cx="222" cy="234" r="11" fill="#1d130a"/>
+  <circle cx="290" cy="234" r="11" fill="#1d130a"/>
+  <circle cx="217" cy="228" r="3.5" fill="#fff6d8"/>
+  <circle cx="285" cy="228" r="3.5" fill="#fff6d8"/>
+  <path d="M247 252 L265 252 L256 274 Z" fill="#e3a94f"/>
+
+  <!-- Light catching the bronze -->
+  <ellipse cx="186" cy="150" rx="128" ry="70" transform="rotate(-35 186 150)" fill="url(#shine)"/>
+</svg>

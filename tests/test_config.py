@@ -24,6 +24,9 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
     # A fetched URL can carry data anywhere, so fetching asks first; reading the clock doesn't.
     assert cfg.mcp_servers["fetch"].confirm == ["*"]
     assert cfg.mcp_servers["time"].confirm == []
+    assert cfg.agent.assistant_name == "Athena"
+    assert cfg.display.show_task and cfg.display.led
+    assert cfg.status_path == tmp_path / "data" / "status.json"
 
 
 def test_missing_config_has_helpful_error(tmp_path):

@@ -2,7 +2,8 @@
 # Set up pi-assistant on a Raspberry Pi running 64-bit Raspberry Pi OS (or any
 # Debian-based Linux). Run it from the repo, as your normal user, over SSH:
 #
-#   bash scripts/install.sh
+#   bash scripts/install.sh              # the assistant
+#   bash scripts/install.sh --display    # plus the status board on a Pimoroni Display HAT Mini
 #
 # Safe to re-run: it skips what's already installed and never overwrites your
 # config.toml or .env.
@@ -11,6 +12,22 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EMBED_MODEL="${EMBED_MODEL:-embeddinggemma}"
 SERVICE=/etc/systemd/system/pi-assistant.service
+DISPLAY_SERVICE=/etc/systemd/system/pi-assistant-display.service
+
+WITH_DISPLAY=false
+for arg in "$@"; do
+  case "$arg" in
+    --display) WITH_DISPLAY=true ;;
+    *)
+      echo "Unknown option: $arg (the only option is --display)" >&2
+      exit 2
+      ;;
+  esac
+done
+# Once the status board is set up, re-runs keep it.
+if systemctl cat pi-assistant-display.service >/dev/null 2>&1; then
+  WITH_DISPLAY=true
+fi
 
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*"; }
@@ -24,8 +41,12 @@ if [[ "$(uname -m)" != "aarch64" ]]; then
 fi
 
 step "Installing system packages"
+packages=(git curl ca-certificates sqlite3)
+if $WITH_DISPLAY; then
+  packages+=(gcc libc6-dev) # the display's SPI driver (spidev) is built from source
+fi
 sudo apt-get update -qq
-sudo apt-get install -y -qq git curl ca-certificates sqlite3 >/dev/null
+sudo apt-get install -y -qq "${packages[@]}" >/dev/null
 
 step "Installing uv (Python package manager)"
 if ! command -v uv >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/uv" ]]; then
@@ -53,7 +74,11 @@ ollama pull "$EMBED_MODEL"
 
 step "Installing Python dependencies"
 cd "$REPO_DIR"
-uv sync --no-dev
+if $WITH_DISPLAY; then
+  uv sync --no-dev --extra display
+else
+  uv sync --no-dev
+fi
 
 step "Pre-fetching the example MCP servers"
 uvx mcp-server-time --help >/dev/null 2>&1 || warn "couldn't pre-fetch mcp-server-time"
@@ -81,6 +106,26 @@ sed -e "s|@USER@|$USER|g" -e "s|@REPO_DIR@|$REPO_DIR|g" -e "s|@HOME@|$HOME|g" \
   deploy/pi-assistant.service | sudo tee "$SERVICE" >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable pi-assistant >/dev/null 2>&1
+
+if $WITH_DISPLAY; then
+  step "Setting up the status board (Display HAT Mini)"
+  if command -v raspi-config >/dev/null 2>&1; then
+    sudo raspi-config nonint do_spi 0 # turns SPI on straight away, no reboot needed
+  else
+    warn "raspi-config not found: turn on SPI yourself (dtparam=spi=on)"
+  fi
+  for group in spi gpio; do
+    if getent group "$group" >/dev/null; then
+      sudo usermod -aG "$group" "$USER"
+    fi
+  done
+  sed -e "s|@USER@|$USER|g" -e "s|@REPO_DIR@|$REPO_DIR|g" \
+    deploy/pi-assistant-display.service | sudo tee "$DISPLAY_SERVICE" >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable pi-assistant-display >/dev/null 2>&1
+  sudo systemctl restart pi-assistant-display
+  echo "The status board is running. It shows \"offline\" until the assistant starts."
+fi
 
 cat <<EOF
 

@@ -31,6 +31,7 @@ PRIVATE_PATHS = [
     ".env.local",
     "config.toml",
     "data/assistant.db",
+    "data/status.json",  # what you last asked the assistant, for the status board
     "data/logs/mcp-fetch.log",
     "prompts/system.local.md",
     "other-data-dir/assistant.db",

@@ -71,7 +71,7 @@ class MemoryConfig(_Section):
 
 
 class AgentConfig(_Section):
-    assistant_name: str = "Assistant"
+    assistant_name: str = "Athena"
     user_name: str = "the user"
     timezone: str = "UTC"
     system_prompt_file: str = "prompts/system.md"
@@ -82,6 +82,12 @@ class AgentConfig(_Section):
     # dropped in one go (rather than one message per turn) so the model server's
     # prompt cache stays valid most of the time.
     max_history_messages: int = 40
+
+
+class DisplayConfig(_Section):
+    # The status board on a Pimoroni Display HAT Mini (`pi-assistant display`).
+    show_task: bool = True  # show your message on the screen; False shows only the status
+    led: bool = True  # light the HAT's LED while working (blue) or waiting for you (flashing amber)
 
 
 class MCPServerConfig(_Section):
@@ -123,6 +129,7 @@ class Config(_Section):
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    display: DisplayConfig = Field(default_factory=DisplayConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.
@@ -139,6 +146,10 @@ class Config(_Section):
     @property
     def log_dir(self) -> Path:
         return self.resolve(self.data_dir) / "logs"
+
+    @property
+    def status_path(self) -> Path:
+        return self.resolve(self.data_dir) / "status.json"
 
 
 def expand_env(value: Any) -> Any:

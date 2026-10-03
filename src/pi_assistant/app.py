@@ -11,6 +11,7 @@ from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
+from pi_assistant.status import StatusFile, StatusTracker
 from pi_assistant.tools import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -26,11 +27,15 @@ class Services:
     tools: ToolRegistry
     mcp: MCPManager
     agent: Agent
+    status: StatusTracker
+    status_file: StatusFile
 
     async def start(self) -> None:
         await self.mcp.start()
+        self.status_file.publish(self.status)  # the status board shows "offline" until now
 
     async def close(self) -> None:
+        self.status_file.close()
         await self.mcp.stop()
         await self.llm.close()
         await self.embedder.close()
@@ -62,6 +67,7 @@ def build_services(cfg: Config) -> Services:
     else:
         log.warning("System prompt %s not found; using a minimal built-in prompt", prompt_path)
 
+    status = StatusTracker(show_task=cfg.display.show_task)
     agent = Agent(
         cfg.agent,
         llm,
@@ -70,5 +76,6 @@ def build_services(cfg: Config) -> Services:
         memory,
         system_prompt_template=template,
         auto_recall=cfg.memory.auto_recall,
+        status=status,
     )
-    return Services(cfg, llm, memory.embedder, memory, history, tools, mcp, agent)
+    return Services(cfg, llm, memory.embedder, memory, history, tools, mcp, agent, status, StatusFile(cfg.status_path))

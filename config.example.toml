@@ -26,7 +26,7 @@ allowed_user_ids = []
 confirm_timeout_seconds = 300          # how long an Allow/Deny prompt waits
 
 [agent]
-assistant_name = "Assistant"
+assistant_name = "Athena"
 user_name = "the user"                 # your first name, used in the system prompt
 timezone = "Europe/London"
 system_prompt_file = "prompts/system.md"
@@ -51,6 +51,11 @@ recall_top_k = 4
 recall_max_distance = 0.55             # cosine distance cut-off for auto-recall (lower = stricter)
 search_top_k = 8
 chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
+
+[display]
+# The status board on a Pimoroni Display HAT Mini (see README, "Status board").
+show_task = true                       # show your message on the screen (false: just the status)
+led = true                             # LED: blue while working, flashing amber when it needs you
 
 # ---------------------------------------------------------------------------
 # MCP servers. Each one is either local (command = ..., spoken to over stdio)
