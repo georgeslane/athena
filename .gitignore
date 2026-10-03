@@ -1,0 +1,28 @@
+# Personal config and secrets
+.env
+.env.*
+!.env.example
+config.toml
+prompts/*.local.md
+
+# Runtime data (SQLite history + memory), wherever data_dir points
+data/
+*.db
+*.db-*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
