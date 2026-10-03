@@ -98,7 +98,9 @@ class MCPServerConfig(_Section):
     # Glob patterns matched against the server's own tool names.
     include: list[str] = Field(default_factory=list)  # empty = all tools
     exclude: list[str] = Field(default_factory=list)
-    confirm: list[str] = Field(default_factory=list)  # ask the user before running these
+    # Ask the user before running these. Every tool by default, since any tool might send
+    # data off the local network; set [] only for servers that can't (e.g. local, read-only).
+    confirm: list[str] = Field(default_factory=lambda: ["*"])
     timeout_seconds: float = 60.0
 
     @model_validator(mode="after")

@@ -20,7 +20,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 
 - **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it.
 - **Tool calling with MCP**: connects to any MCP server, either local (stdio) on the Pi or remote (HTTP) on the Mac. Per-server filters choose which tools the model sees.
-- **Approval before actions**: tools you mark with `confirm` show *Allow / Deny* buttons in Telegram before they run.
+- **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`. Related memories are also added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Your notes as memory**: `pi-assistant ingest ~/notes` indexes Markdown and text files so the assistant can search them.
 - **Fast replies with prompt caching**: the system prompt and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon.
@@ -38,7 +38,7 @@ cd ~/pi-assistant
 bash scripts/install.sh
 ```
 
-The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run.
+The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run.
 
 Then:
 
@@ -84,6 +84,7 @@ Then:
 Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has either `command` (a local server spoken to over stdio) or `url` (a remote server over Streamable HTTP; URLs ending in `/sse` use the older SSE transport). Optional settings:
 
 - `include`, `exclude` and `confirm` take glob patterns matched against the server's tool names.
+- `confirm` lists the tools that ask for your approval before they run. It defaults to `["*"]`, every tool, because any tool might send your data off your network. Set `confirm = []` only for servers that can't, like `time`. If you narrow it to some tools, use `include` too, so tools you haven't checked can't run without asking.
 - `headers` adds HTTP headers, such as an auth token.
 - `env` passes extra environment variables to a local server. Local servers otherwise get only a minimal environment, so your Telegram token isn't exposed to them.
 
@@ -97,11 +98,14 @@ These two work out of the box:
 [mcp_servers.time]
 command = "uvx"
 args = ["mcp-server-time", "--local-timezone=Europe/London"]
+confirm = []
 
 [mcp_servers.fetch]
 command = "uvx"
 args = ["mcp-server-fetch"]
 ```
+
+Every fetch asks for approval first, because a URL can carry your data to any website.
 
 Each local server's stderr is written to `data/logs/mcp-<name>.log`.
 
@@ -118,7 +122,8 @@ uvx mcp-proxy --host=<mac-ip> --port=8765 <your Apple MCP server command>
 # On the Pi
 [mcp_servers.mac]
 url = "http://my-mac.local:8765/sse"
-confirm = ["create_*", "update_*", "delete_*", "send_*"]
+include = ["list_*", "get_*", "search_*", "create_*"]
+confirm = ["create_*"]
 ```
 
 Tips:
@@ -159,6 +164,8 @@ uv sync          # includes the test dependencies
 uv run pytest    # offline: fake model server, real sqlite-vec, real MCP servers in subprocesses
 ```
 
+uv uses its own Python build for this project (`[tool.uv]` in `pyproject.toml`), because some others, including the python.org installer for macOS, can't load sqlite-vec.
+
 | Path | Purpose |
 |---|---|
 | `src/pi_assistant/agent.py` | Agent loop: prompt building, tool calls, approvals |
@@ -183,8 +190,9 @@ uv run pytest    # offline: fake model server, real sqlite-vec, real MCP servers
 
 - Only allowlisted Telegram users can use the bot. Messages from anyone else are ignored and logged.
 - Secrets stay in `.env` (mode 600). `config.toml`, `.env` and `data/` are git-ignored.
+- `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
+- Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
-- Treat text from tools, such as fetched web pages, as untrusted. Use `confirm` on anything that writes, sends or deletes.
 
 ## License
 

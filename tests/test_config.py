@@ -21,6 +21,9 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
     assert cfg.db_path == tmp_path / "data" / "assistant.db"
     assert set(cfg.mcp_servers) == {"time", "fetch"}
     assert cfg.mcp_servers["time"].command == "uvx"
+    # A fetched URL can carry data anywhere, so fetching asks first; reading the clock doesn't.
+    assert cfg.mcp_servers["fetch"].confirm == ["*"]
+    assert cfg.mcp_servers["time"].confirm == []
 
 
 def test_missing_config_has_helpful_error(tmp_path):
@@ -42,6 +45,11 @@ def test_unknown_keys_are_rejected(tmp_path):
 def test_mcp_server_needs_exactly_one_transport(kwargs):
     with pytest.raises(ValueError):
         MCPServerConfig(**kwargs)
+
+
+def test_mcp_tools_ask_first_unless_configured_otherwise():
+    assert MCPServerConfig(command="x").confirm == ["*"]
+    assert MCPServerConfig(command="x", confirm=[]).confirm == []
 
 
 def test_mcp_http_transport_detection():

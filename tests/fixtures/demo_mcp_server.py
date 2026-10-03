@@ -1,5 +1,6 @@
 """A tiny MCP server used by the tests. Run with no args for stdio, or `http PORT` for Streamable HTTP."""
 
+import os
 import sys
 
 from mcp.server.mcpserver import MCPServer
@@ -29,6 +30,12 @@ def hidden_tool() -> str:
 def explode() -> str:
     """Always fails."""
     raise RuntimeError("kaboom")
+
+
+@server.tool()
+def get_env(name: str) -> str:
+    """Read an environment variable."""
+    return os.environ.get(name, "(unset)")
 
 
 if __name__ == "__main__":
