@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
+from pi_assistant.app import build_services
 from pi_assistant.config import Config
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryStore
 from pi_assistant.siri import MIN_TOKEN_CHARS
+from pi_assistant.tools import Tool
 
 OK, WARN, FAIL = "\033[32m✓\033[0m", "\033[33m!\033[0m", "\033[31m✗\033[0m"
 
@@ -40,6 +45,7 @@ async def run_doctor(cfg: Config) -> bool:
     # 1. Model server --------------------------------------------------------------------
     print(f"\nModel server ({cfg.llm.base_url})")
     llm = LLMClient(cfg.llm)
+    model_ok = False
     try:
         models = await asyncio.wait_for(llm.list_models(), 15)
         report(OK, f"reachable; {len(models)} model(s) available")
@@ -55,6 +61,7 @@ async def run_doctor(cfg: Config) -> bool:
         if reply.tool_calls and reply.tool_calls[0].name == "get_weather":
             speed = f", {reply.tokens_per_second:.0f} tok/s" if reply.tokens_per_second else ""
             report(OK, f"tool calling works ({took:.1f}s{speed})")
+            model_ok = True
         else:
             report(FAIL, f"model answered without calling the tool: {reply.content[:120]!r}")
     except Exception as exc:
@@ -87,6 +94,7 @@ async def run_doctor(cfg: Config) -> bool:
 
     # 4. MCP servers ---------------------------------------------------------------------------
     print("\nMCP servers")
+    mcp_tools: list[Tool] = []
     if not cfg.mcp_servers:
         report(WARN, "none configured")
     else:
@@ -99,6 +107,7 @@ async def run_doctor(cfg: Config) -> bool:
                     report(OK, f"{st.name}: {st.tools} tool{'' if st.tools == 1 else 's'} ({names})")
                 else:
                     report(FAIL, f"{st.name}: {st.error}")
+            mcp_tools = mcp.tools()
         finally:
             await mcp.stop()
         disabled = [n for n, c in cfg.mcp_servers.items() if not c.enabled]
@@ -128,8 +137,77 @@ async def run_doctor(cfg: Config) -> bool:
         print(f"\nSiri ({cfg.siri.host}:{cfg.siri.port})")
         await check_siri(cfg, report)
 
+    # 7. The prompt ----------------------------------------------------------------------------
+    print("\nThe prompt: what the model reads before every reply")
+    if model_ok:
+        await check_prompt(cfg, mcp_tools, report)
+    else:
+        report(WARN, "skipped, since the model server isn't working")
+
     print("\nAll good." if healthy else "\nSome checks failed (see above).")
     return healthy
+
+
+@dataclass
+class PromptCost:
+    tools: int
+    tool_tokens: int | None  # how many tokens the tools' descriptions add to every request
+    cold_seconds: float  # reading the whole prompt when none of it is cached
+    tool_seconds: float  # how much of that went on the tools
+    cached_seconds: float  # reading the same prompt again, now that it's cached
+
+
+async def measure_prompt(llm: LLMClient, system_prompt: str, schemas: list[dict[str, Any]]) -> PromptCost:
+    """Time the model server reading the prompt: without the tools, with them, then with them again."""
+    run = secrets.token_hex(4)
+
+    def messages(tag: str) -> list[dict[str, Any]]:
+        # A new first line, so none of the prompt is cached from earlier requests.
+        system = {"role": "system", "content": f"[doctor {run}{tag}]\n{system_prompt}"}
+        return [system, {"role": "user", "content": "Hi"}]
+
+    bare = await llm.chat(messages("a"), None, max_tokens=1)
+    cold = await llm.chat(messages("b"), schemas or None, max_tokens=1)
+    cached = await llm.chat(messages("b"), schemas or None, max_tokens=1)
+    tokens = cold.prompt_tokens - bare.prompt_tokens if cold.prompt_tokens and bare.prompt_tokens else None
+    return PromptCost(len(schemas), tokens, cold.elapsed, max(0.0, cold.elapsed - bare.elapsed), cached.elapsed)
+
+
+def report_prompt(cost: PromptCost, report: Callable[[str, str], None]) -> None:
+    tokens = f", adding {cost.tool_tokens:,} tokens to every request" if cost.tool_tokens is not None else ""
+    report(OK, f"{cost.tools} tools{tokens}")
+    speed = ""
+    if cost.tool_tokens and cost.tool_seconds > 0.1:
+        speed = f" (about {cost.tool_tokens / cost.tool_seconds:.0f} tokens a second)"
+    cold = f"with nothing cached, reading it takes {cost.cold_seconds:.1f}s"
+    report(OK, f"{cold}, {cost.tool_seconds:.1f}s of it for the tools{speed}")
+    if cost.cold_seconds < 2:
+        return  # quick enough that caching hardly matters
+    if cost.cached_seconds < cost.cold_seconds / 2:
+        report(OK, f"once it's cached, {cost.cached_seconds:.1f}s")
+    else:
+        report(
+            WARN,
+            f"once it's cached, still {cost.cached_seconds:.1f}s: the model server doesn't seem to reuse "
+            "what it has read, so every message pays the full cost",
+        )
+    if cost.tool_seconds > 15:
+        report(WARN, "the tools are slow to read: switch off servers you rarely use, or narrow their include lists")
+
+
+async def check_prompt(cfg: Config, mcp_tools: list[Tool], report: Callable[[str, str], None]) -> None:
+    try:
+        services = build_services(cfg)  # for the exact system prompt and built-in tools the assistant uses
+    except Exception as exc:
+        report(WARN, f"skipped: {type(exc).__name__}: {exc}")
+        return
+    try:
+        schemas = [tool.schema() for tool in [*services.tools.all(), *mcp_tools]]
+        report_prompt(await measure_prompt(services.llm, services.agent.system_prompt, schemas), report)
+    except Exception as exc:
+        report(FAIL, f"{type(exc).__name__}: {exc}")
+    finally:
+        await services.close()
 
 
 async def check_siri(cfg: Config, report: Callable[[str, str], None]) -> None:

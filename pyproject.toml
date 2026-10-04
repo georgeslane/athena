@@ -12,6 +12,7 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "pydantic>=2.7,<3",
     "python-dotenv>=1.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +23,10 @@ display = [
     "gpiod>=2.2; sys_platform == 'linux'",
     "gpiodevice>=0.1; sys_platform == 'linux'",
 ]
+# The read-only files server that runs on your Mac (scripts/mac/install.sh): reading PDFs.
+mac = [
+    "pypdf>=6",
+]
 
 [project.scripts]
 pi-assistant = "pi_assistant.cli:main"
@@ -31,6 +36,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pillow>=11",  # the status board's tests draw real frames
+    "pypdf>=6",  # the Mac files server's tests read a real PDF
 ]
 
 [build-system]

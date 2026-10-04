@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pi_assistant.config import AgentConfig
 from pi_assistant.history import ConversationStore
-from pi_assistant.llm import LLMClient, ToolCall
+from pi_assistant.llm import LLMClient, LLMReply, ToolCall
 from pi_assistant.memory import MemoryHit, MemoryService
 from pi_assistant.status import StatusTracker, Task
 from pi_assistant.tools import ToolRegistry
@@ -31,6 +31,18 @@ FALLBACK_PROMPT = (
     "You are {assistant_name}, a helpful personal assistant for {user_name}. "
     "Be concise. Use tools when they help, and never invent their results."
 )
+
+
+def render_system_prompt(template: str | None, cfg: AgentConfig) -> str:
+    """The system prompt, with {assistant_name}, {user_name} and {timezone} filled in."""
+    prompt = template or FALLBACK_PROMPT
+    for key, value in {
+        "assistant_name": cfg.assistant_name,
+        "user_name": cfg.user_name,
+        "timezone": cfg.timezone,
+    }.items():
+        prompt = prompt.replace("{" + key + "}", value)
+    return prompt.strip()
 
 
 @dataclass
@@ -60,15 +72,8 @@ class Agent:
         self.memory = memory
         self.status = status or StatusTracker()
         self.auto_recall = auto_recall and memory is not None
-        prompt = system_prompt_template or FALLBACK_PROMPT
-        for key, value in {
-            "assistant_name": cfg.assistant_name,
-            "user_name": cfg.user_name,
-            "timezone": cfg.timezone,
-        }.items():
-            prompt = prompt.replace("{" + key + "}", value)
         # Rendered once and never changed, so the model server can cache it.
-        self.system_prompt = prompt.strip()
+        self.system_prompt = render_system_prompt(system_prompt_template, cfg)
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     # -- prompt construction ----------------------------------------------------------
@@ -135,6 +140,22 @@ class Agent:
         return result or "(no output)"
 
     # -- main entry point -------------------------------------------------------------
+
+    async def warm_up(self, chat_id: str) -> LLMReply | None:
+        """Have the model server read the start of this chat's next request: the system prompt,
+        the tools and the conversation so far. It caches what it reads, so the next message
+        only has to be read itself. Skipped while a message is being answered, which does the same.
+        """
+        lock = self._locks[chat_id]
+        if lock.locked():
+            return None
+        async with lock:
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                *self.history.load(chat_id),
+                {"role": "user", "content": "Hi"},  # the next message goes here; only what's before it is reused
+            ]
+            return await self.llm.chat(messages, self.tools.schemas() or None, max_tokens=1)
 
     async def respond(
         self,

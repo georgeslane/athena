@@ -163,3 +163,44 @@ async def test_setup_mode_tells_stranger_their_id(config):
     ctx2 = SimpleNamespace(bot=FakeBot())
     await locked.on_stranger(text_update(STRANGER, "hello"), ctx2)
     assert ctx2.bot.sent == []  # silently ignored once an allowlist exists
+
+
+async def test_keeps_the_model_server_warm(config):
+    calls = []
+
+    async def warm_up(chat_id):
+        calls.append(chat_id)
+        if len(calls) == 2:
+            raise ConnectionError("the Mac is asleep")  # it tries again later
+
+    bot = make_bot(config, None)
+    bot.s.agent.warm_up = warm_up
+    config.llm.warm_up_minutes = 0.001  # every 60ms
+    task = asyncio.create_task(bot._keep_warm())
+    try:
+        while len(calls) < 3:
+            await asyncio.sleep(0.01)
+        config.llm.warm_up_minutes = 60
+        await asyncio.sleep(0.1)
+        settled = len(calls)
+
+        # /reload may change the tools, so it warms up again straight away.
+        reloaded = []
+
+        async def reload():
+            reloaded.append(True)
+
+        async def reply_text(text):
+            pass
+
+        bot.s.mcp = SimpleNamespace(reload=reload, status=lambda: [])
+        bot.s.tools = SimpleNamespace(all=lambda: [])
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text), effective_chat=SimpleNamespace(id=1)
+        )
+        await bot.cmd_reload(update, SimpleNamespace(bot=FakeBot()))
+        while len(calls) == settled:
+            await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+    assert reloaded and set(calls) == {str(ME)}

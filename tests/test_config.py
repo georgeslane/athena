@@ -19,11 +19,30 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
     assert cfg.telegram.bot_token == "123:abc"
     assert cfg.llm.api_key == "secret"
     assert cfg.db_path == tmp_path / "data" / "assistant.db"
-    assert set(cfg.mcp_servers) == {"time", "fetch"}
-    assert cfg.mcp_servers["time"].command == "uvx"
+    servers = cfg.mcp_servers
+    assert set(servers) == {"time", "fetch", "search", "files", "apple", "github", "sec", "email"}
+    # Only the two that need no setup start switched on.
+    assert {name for name, server in servers.items() if server.enabled} == {"time", "fetch"}
+    assert servers["time"].command == "uvx"
     # A fetched URL can carry data anywhere, so fetching asks first; reading the clock doesn't.
-    assert cfg.mcp_servers["fetch"].confirm == ["*"]
-    assert cfg.mcp_servers["time"].confirm == []
+    assert servers["fetch"].confirm == ["*"]
+    assert servers["time"].confirm == []
+    # Anything that can change things or reach someone else asks first...
+    assert servers["search"].confirm == ["*"]
+    assert servers["email"].confirm == ["send_email"]
+    assert servers["apple"].confirm == ["events_create", "reminders_create"]
+    assert "events_delete" not in servers["apple"].include
+    # ...and the email server itself only sends, and only to addresses you allow.
+    assert servers["email"].env["MCP_EMAIL_SERVER_ALLOWED_MUTATIONS"] == "send"
+    assert servers["email"].env["MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS"]
+    assert servers["github"].url.endswith("/readonly")
+    assert servers["github"].headers["X-MCP-Lockdown"] == "true"
+    # Third-party servers are pinned to a version.
+    for server in servers.values():
+        if server.command == "uvx":
+            assert any("==" in arg for arg in server.args), server.args
+    assert "BBC News" in cfg.news.feeds
+    assert cfg.llm.warm_up_minutes == 10
     assert cfg.agent.assistant_name == "Athena"
     assert cfg.display.show_task and cfg.display.led
     assert cfg.status_path == tmp_path / "data" / "status.json"

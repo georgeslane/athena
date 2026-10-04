@@ -39,6 +39,10 @@ class LLMConfig(_Section):
     # Passed through untouched in the request body, for server-specific options
     # such as {"chat_template_kwargs": {"enable_thinking": false}}.
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    # At startup, after /reload and then every this many minutes, have the model server
+    # read the system prompt, tools and your chat, so its cache is ready before your next
+    # message. When it's already cached this takes a moment. 0 turns it off.
+    warm_up_minutes: float = 10.0
 
 
 class TelegramConfig(_Section):
@@ -88,6 +92,13 @@ class DisplayConfig(_Section):
     # The status board on a Pimoroni Display HAT Mini (`pi-assistant display`).
     show_task: bool = True  # show your message on the screen; False shows only the status
     led: bool = True  # light the HAT's LED while working (blue) or waiting for you (flashing amber)
+
+
+class NewsConfig(_Section):
+    # News feeds (RSS or Atom) the assistant can read, by name. Only these are ever
+    # fetched, so reading them doesn't need your approval (see README, "News").
+    feeds: dict[str, str] = Field(default_factory=dict)
+    cache_minutes: float = 10.0
 
 
 class SiriConfig(_Section):
@@ -142,6 +153,7 @@ class Config(_Section):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     siri: SiriConfig = Field(default_factory=SiriConfig)
+    news: NewsConfig = Field(default_factory=NewsConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.
