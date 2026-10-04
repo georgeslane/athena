@@ -1,0 +1,38 @@
+# Scans and tests every push and pull request. main only accepts changes that pass both
+# jobs, so the Pi, which installs main, only ever gets code that's been through them.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Read-only, with no secrets: nothing here needs to change the repo or reach anything private.
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      # Actions from elsewhere are pinned to an exact commit, so a new release can't change what runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # every commit, not just the latest
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gitleaks
+      - run: bash scripts/check-secrets.sh history
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-24.04-arm # the same kind of processor as the Pi
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gitleaks # the tests try the commit and push checks for real
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --locked # fails if uv.lock is out of date
+      - run: uv run python -m pytest

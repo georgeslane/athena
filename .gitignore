@@ -4,6 +4,7 @@
 !.env.example
 config.toml
 prompts/*.local.md
+.personal-blocklist
 
 # Runtime data (SQLite history + memory), wherever data_dir points
 data/

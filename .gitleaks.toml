@@ -1,0 +1,13 @@
+# Settings for gitleaks, the secret scanner that scripts/check-secrets.sh and CI run.
+# It keeps all of gitleaks' built-in rules and adds the ones below.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "telegram-bot-token-anywhere"
+# The built-in Telegram rule only looks for tokens near the word "telegram", so a token
+# pasted on its own would get through.
+description = "Telegram bot token"
+regex = '''(?:^|[^0-9A-Za-z_-])([0-9]{8,12}:[A-Za-z0-9_-]{35})(?:[^0-9A-Za-z_-]|$)'''
+secretGroup = 1
