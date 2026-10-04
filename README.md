@@ -189,6 +189,25 @@ uv run pytest    # offline: fake model server, real sqlite-vec, real MCP servers
 
 uv uses its own Python build for this project (`[tool.uv]` in `pyproject.toml`), because some others, including the python.org installer for macOS, can't load sqlite-vec.
 
+### Keeping secrets out of GitHub
+
+This repo is public, so anything pushed is public at once. On the computer you develop on, run this once:
+
+```bash
+brew install gitleaks
+bash scripts/install-git-hooks.sh
+```
+
+From then on, every commit and push from that clone is checked by `scripts/check-secrets.sh`, and stopped if it contains:
+
+- **a secret**, found by [gitleaks](https://github.com/gitleaks/gitleaks) with the rules in `.gitleaks.toml`
+- **a git-ignored file added anyway** with `git add -f`, such as `.env`, `config.toml` or anything in `data/`
+- **a personal detail** listed in `.personal-blocklist`, such as your Telegram user ID or address. The installer creates this file. It's git-ignored, so it stays on your computer.
+
+The push check covers commit messages too, and commits made with `--no-verify`. To check every commit already made, run `bash scripts/check-secrets.sh history`.
+
+On GitHub, CI (`.github/workflows/ci.yml`) scans every push and pull request for secrets and runs the tests on an ARM64 Linux machine like the Pi. `main` only accepts pull requests that pass both, so the Pi only installs code that has.
+
 The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the status board's design, run `uv run --with resvg-py scripts/render_images.py` to redraw the PNG the board uses and the picture in this README.
 
 | Path | Purpose |
