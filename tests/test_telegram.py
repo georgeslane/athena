@@ -17,6 +17,7 @@ STRANGER = 999
 class FakeMessage:
     def __init__(self, bot, text, kwargs):
         self.bot, self.text, self.kwargs, self.edits = bot, text, kwargs, []
+        self.message_id = len(bot.sent) + 1
 
     async def edit_text(self, text, **kwargs):
         self.edits.append(text)
@@ -70,7 +71,7 @@ def test_handlers_depend_on_allowlist(config):
 
 
 async def test_message_round_trip_with_confirmation(config):
-    async def respond(chat_id, text, confirm):
+    async def respond(chat_id, text, confirm, note=None):
         approved = await confirm("delete_note", {"name": "shopping"})
         return AgentResult(text=f"**{'Deleted' if approved else 'Kept'}** it")
 
@@ -105,7 +106,7 @@ async def test_message_round_trip_with_confirmation(config):
 
 
 async def test_confirmation_times_out_as_denied(config):
-    async def respond(chat_id, text, confirm):
+    async def respond(chat_id, text, confirm, note=None):
         return AgentResult(text="Kept it" if not await confirm("x", {}) else "Did it")
 
     bot = make_bot(config, respond)
@@ -120,7 +121,7 @@ async def test_confirmation_shows_long_arguments_in_full(config):
     body = "Hi Sam,\n\n" + "Here's the plan for the weekend. " * 200 + "\nP.S. the door code is 4321."
     args = {"to": "sam@example.com", "body": body}
 
-    async def respond(chat_id, text, confirm):
+    async def respond(chat_id, text, confirm, note=None):
         return AgentResult(text="Sent" if await confirm("send_email", args) else "Not sent")
 
     bot = make_bot(config, respond)
@@ -143,7 +144,7 @@ async def test_agent_errors_become_friendly_replies(config):
     import httpx
     import openai
 
-    async def respond(chat_id, text, confirm):
+    async def respond(chat_id, text, confirm, note=None):
         raise openai.APIConnectionError(request=httpx.Request("POST", "http://mac/v1/chat/completions"))
 
     bot = make_bot(config, respond)

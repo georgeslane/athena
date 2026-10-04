@@ -1,4 +1,4 @@
-"""Convert the model's Markdown into the small HTML subset Telegram accepts."""
+"""Convert the model's Markdown into the small HTML subset Telegram accepts, or plain text for Siri."""
 
 from __future__ import annotations
 
@@ -44,6 +44,19 @@ def markdown_to_telegram_html(text: str) -> str:
     text = _BULLET.sub(lambda m: f"{m.group(1)}• ", text)
 
     return re.sub(r"\x00(\d+)\x00", lambda m: placeholders[int(m.group(1))], text)
+
+
+def markdown_to_speech(text: str) -> str:
+    """Plain text for Siri to read out: no Markdown symbols, and links reduced to their text."""
+    text = _CODE_BLOCK.sub(lambda m: m.group(2), text)
+    text = _INLINE_CODE.sub(r"\1", text)
+    text = _LINK.sub(r"\1", text)
+    text = _HEADING.sub(r"\1", text)
+    text = _BOLD.sub(lambda m: m.group(1) or m.group(2), text)
+    text = _ITALIC.sub(r"\1", text)
+    text = _STRIKE.sub(r"\1", text)
+    text = _BULLET.sub(r"\1", text)
+    return text.strip()
 
 
 def split_message(text: str, limit: int = _CHUNK_TARGET) -> list[str]:

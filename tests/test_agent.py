@@ -223,3 +223,17 @@ async def test_status_board_shows_approvals_and_failures(config, memory):
     assert seen[-1].state is State.IDLE  # never left showing "working"
     assert seen[-1].last_error == "The model server returned an error"
     assert all(s.tools == [] for s in seen)  # a declined tool never shows as used
+
+
+async def test_note_is_only_in_the_context_of_its_own_message(config, memory):
+    server = FakeLLMServer([completion("Sunny."), completion("Yes, all day.")])
+    agent = make_agent(config, memory, server)
+
+    await agent.respond("chat1", "What's the weather?", note="This message was spoken to Siri.")
+    await agent.respond("chat1", "All day?")
+
+    first, second = server.requests
+    assert first["messages"][-1]["content"].startswith("<context>\nCurrent time:")
+    assert "This message was spoken to Siri." in first["messages"][-1]["content"]
+    assert all("spoken to Siri" not in m["content"] for m in second["messages"])  # not in history either
+    assert agent.history.load("chat1")[0] == {"role": "user", "content": "What's the weather?"}

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
+
+import httpx
 
 from pi_assistant.config import Config
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryStore
+from pi_assistant.siri import MIN_TOKEN_CHARS
 
 OK, WARN, FAIL = "\033[32m✓\033[0m", "\033[33m!\033[0m", "\033[31m✗\033[0m"
 
@@ -119,5 +123,24 @@ async def run_doctor(cfg: Config) -> bool:
     else:
         report(WARN, "no allowed_user_ids yet: the bot will run in setup mode and tell you your ID")
 
+    # 6. Siri ----------------------------------------------------------------------------------
+    if cfg.siri.enabled:
+        print(f"\nSiri ({cfg.siri.host}:{cfg.siri.port})")
+        await check_siri(cfg, report)
+
     print("\nAll good." if healthy else "\nSome checks failed (see above).")
     return healthy
+
+
+async def check_siri(cfg: Config, report: Callable[[str, str], None]) -> None:
+    if len(cfg.siri.token) < MIN_TOKEN_CHARS:
+        report(FAIL, f"SIRI_TOKEN is missing or shorter than {MIN_TOKEN_CHARS} characters (.env)")
+    if not cfg.telegram.allowed_user_ids:
+        report(FAIL, "needs telegram.allowed_user_ids: questions from Siri and their answers go to your chat")
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"http://{cfg.siri.host}:{cfg.siri.port}/health")
+        response.raise_for_status()
+        report(OK, "listening")
+    except httpx.HTTPError:
+        report(WARN, "not answering. It runs inside the bot: is the pi-assistant service running?")

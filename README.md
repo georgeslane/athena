@@ -21,6 +21,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 ## What it does
 
 - **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it.
+- **Ask by voice**: say "Hey Siri, Ask Athena" on your iPhone or Mac. Siri reads the answer out, and your question and the answer also appear in the Telegram chat.
 - **Tool calling with MCP**: connects to any MCP server, either local (stdio) on the Pi or remote (HTTP) on the Mac. Per-server filters choose which tools the model sees.
 - **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`. Related memories are also added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
@@ -99,6 +100,55 @@ Press any button to turn the screen off. It comes back on by itself whenever the
 To set it up, run `bash scripts/install.sh --display`. That turns on SPI, installs the drivers and starts the `pi-assistant-display` service, which shows "offline" until the assistant starts. To test the screen on its own, stop the service and run `uv run pi-assistant display --demo`. On any computer, `uv run pi-assistant display --preview board.png` draws the board into an image instead.
 
 The board runs as a separate service, so it keeps working, and says so, when the assistant isn't running. The assistant writes its status to `data/status.json` as it works, and holds a lock on `data/status.lock` while it runs. The system releases that lock even if the assistant crashes, which is how the board knows it's offline.
+
+## Siri
+
+Say **"Hey Siri, Ask Athena"** on your iPhone or Mac, then ask your question. Siri reads the answer out. Your question and the answer also go to the Telegram chat, so you can follow up there.
+
+An Apple Shortcut sends what you said to the Pi over [Tailscale](https://tailscale.com), with a token. Athena answers just as if you'd typed it in Telegram, with the same memory, tools and approvals.
+
+- **Approvals still happen in Telegram.** If a tool needs your OK, Siri tells you to look there.
+- **Siri waits about 25 seconds at most.** If the answer takes longer, Siri says it'll be in Telegram, where it arrives when it's ready.
+- **In Telegram, the bot posts your question** as "🎙️ You, via Siri", because a bot can't post messages as you.
+- **Say the shortcut's name first, then your question.** Siri doesn't take the question in the same breath for a shortcut you made yourself.
+
+Your iPhone and Mac need Tailscale, on the same tailnet as the Pi.
+
+### Set it up
+
+1. **On the Pi**, make a token and add it to `.env`:
+
+   ```bash
+   cd ~/pi-assistant
+   echo "SIRI_TOKEN=$(openssl rand -hex 24)" >> .env
+   grep SIRI_TOKEN .env   # you'll need it for the shortcut
+   ```
+
+   In `config.toml`, set `enabled = true` under `[siri]`. Then:
+
+   ```bash
+   sudo tailscale serve --bg --http=80 localhost:8090
+   sudo systemctl restart pi-assistant
+   uv run pi-assistant doctor   # the Siri section should say "listening"
+   tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'
+   ```
+
+   The last command prints the Pi's name on your tailnet, such as `pi.tail1234.ts.net`. Athena's endpoint only listens on the Pi itself, and Tailscale Serve passes requests to it from devices on your tailnet, and from nowhere else. Plain HTTP is fine, because Tailscale encrypts the connection. `--bg` keeps it on after restarts; `sudo tailscale serve reset` turns it off.
+
+2. **In the Shortcuts app** on your iPhone or Mac (iCloud syncs it to the other), make a shortcut called **Ask Athena** with three actions:
+
+   1. **Ask for Input**: type *Text*, prompt *What do you want to ask?* When Siri runs the shortcut, you answer by voice.
+   2. **Get Contents of URL**: `http://<the Pi's tailnet name>/ask`. Under *Show More*, set *Method* to *POST*. Add a header named `Authorization` with the value `Bearer <your SIRI_TOKEN>`. Set *Request Body* to *JSON* and add a *Text* field named `prompt`, set to *Provided Input*.
+   3. **Show Result**, showing *Contents of URL*. Siri reads it out.
+
+3. **Try it:** "Hey Siri, Ask Athena". To test from a Mac's terminal instead:
+
+   ```bash
+   curl -H "Authorization: Bearer <your SIRI_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"prompt": "What time is it?"}' http://<the Pi's tailnet name>/ask
+   ```
+
+The token is stored in the shortcut, which iCloud syncs between your devices. Take it out before sharing the shortcut with anyone. To change it, update `.env` and the shortcut, then restart the service.
 
 ## MCP servers
 
@@ -218,6 +268,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
 | `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
+| `src/pi_assistant/siri.py` | The endpoint the Siri shortcut calls |
 | `src/pi_assistant/status.py` | What the assistant is doing, published for the status board |
 | `src/pi_assistant/board.py`, `display.py` | Drawing the status board, and the Display HAT Mini |
 | `src/pi_assistant/assets/` | The Athena icon and the board's fonts |
@@ -233,6 +284,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 - **The bot ignores you:** your ID isn't in `telegram.allowed_user_ids`. Empty the list temporarily to get your ID.
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
 - **The status board stays blank:** check `journalctl -u pi-assistant-display`. Its errors say what to fix, such as SPI being turned off.
+- **The Siri shortcut fails:** check `doctor` says Siri is "listening", and that Tailscale is connected on the device you're asking from. Try the `curl` command from the Siri section. A 401 means the token in the shortcut doesn't match `SIRI_TOKEN`.
 
 ## Security notes
 
@@ -241,6 +293,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 - `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
+- The Siri endpoint is off unless you turn it on. It listens only on the Pi itself, Tailscale Serve passes on requests from your tailnet, and each request needs the token. Anyone with both can ask Athena anything you could, so keep the token private.
 - The status board shows the start of your latest message. If other people can see the screen, set `show_task = false` under `[display]`.
 
 ## License

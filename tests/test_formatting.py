@@ -1,4 +1,4 @@
-from pi_assistant.formatting import markdown_to_telegram_html, split_message
+from pi_assistant.formatting import markdown_to_speech, markdown_to_telegram_html, split_message
 
 
 def test_basic_markdown():
@@ -37,3 +37,8 @@ def test_split_long_message_on_lines():
     chunks = split_message(text, limit=1000)
     assert all(len(c) <= 1150 for c in chunks)
     assert "".join(c.replace("\n", "") for c in chunks) == text.replace("\n", "")
+
+
+def test_speech_drops_markdown():
+    text = "## Tomorrow\n- **9am** dentist\n- Call [Anna](https://example.com) about `the plan`\n\n*Rain* later."
+    assert markdown_to_speech(text) == "Tomorrow\n9am dentist\nCall Anna about the plan\n\nRain later."

@@ -10,7 +10,15 @@ import secrets
 from typing import Any
 
 import openai
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
+from telegram import (
+    Bot,
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    ReplyParameters,
+    Update,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
@@ -24,7 +32,9 @@ from telegram.ext import (
 )
 
 from pi_assistant.app import Services
-from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_telegram_html, split_message
+from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
+from pi_assistant.siri import VOICE_NOTE, SiriServer
+from pi_assistant.status import State
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -46,6 +56,7 @@ class TelegramBot:
         self.cfg = services.config.telegram
         self.allowed = set(self.cfg.allowed_user_ids)
         self._pending: dict[str, asyncio.Future[bool]] = {}
+        self._siri: SiriServer | None = None
 
     # -- setup ----------------------------------------------------------------------------
 
@@ -91,38 +102,59 @@ class TelegramBot:
             log.info("Telegram bot @%s ready for user(s) %s", me.username, sorted(self.allowed))
         else:
             log.warning("@%s is in setup mode: message it to get your user ID.", me.username)
+        if self.s.config.siri.enabled:
+            await self._start_siri(app.bot)
 
     async def _post_shutdown(self, app: Application) -> None:
+        if self._siri:
+            await self._siri.stop()
         await self.s.close()
+
+    async def _start_siri(self, bot: Bot) -> None:
+        if not self.allowed:
+            log.warning("Siri is turned on, but it needs telegram.allowed_user_ids to know which chat to use")
+            return
+        try:
+            self._siri = SiriServer(
+                self.s.config.siri, lambda prompt: self.ask_from_siri(bot, prompt), self._still_working
+            )
+            await self._siri.start()
+        except (ValueError, OSError) as exc:
+            self._siri = None
+            log.error("Siri is turned on, but its endpoint couldn't start: %s", exc)
 
     def run(self) -> None:
         self.build().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
 
     # -- helpers ----------------------------------------------------------------------------
 
-    async def _send(self, ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, markdown: str) -> None:
+    async def _send(self, bot: Bot, chat_id: int, markdown: str, reply_to: int | None = None) -> None:
         for chunk in split_message(markdown):
+            # Only the first part is shown as a reply.
+            reply = ReplyParameters(reply_to, allow_sending_without_reply=True) if reply_to else None
+            reply_to = None
             try:
-                await ctx.bot.send_message(
+                await bot.send_message(
                     chat_id,
                     markdown_to_telegram_html(chunk),
                     parse_mode=ParseMode.HTML,
                     link_preview_options=NO_PREVIEW,
+                    reply_parameters=reply,
                 )
             except BadRequest:  # our HTML conversion produced something Telegram rejects
-                await ctx.bot.send_message(chat_id, chunk, link_preview_options=NO_PREVIEW)
+                await bot.send_message(chat_id, chunk, link_preview_options=NO_PREVIEW, reply_parameters=reply)
 
-    async def _keep_typing(self, ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    async def _keep_typing(self, bot: Bot, chat_id: int) -> None:
         try:
             while True:
-                await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+                await bot.send_chat_action(chat_id, ChatAction.TYPING)
                 await asyncio.sleep(4.5)
         except asyncio.CancelledError:
             pass
         except TelegramError:
             pass
 
-    async def _confirm(self, ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, tool: str, args: dict[str, Any]) -> bool:
+    async def _confirm(self, bot: Bot, chat_id: int, tool: str, args: dict[str, Any]) -> bool:
         key = secrets.token_hex(6)
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending[key] = future
@@ -133,7 +165,7 @@ class TelegramBot:
         if len(prompt) > TELEGRAM_LIMIT:
             chunks = split_message(pretty)
             for chunk in chunks:
-                await ctx.bot.send_message(chat_id, chunk, link_preview_options=NO_PREVIEW)
+                await bot.send_message(chat_id, chunk, link_preview_options=NO_PREVIEW)
             prompt = f"Allow <b>{html.escape(tool)}</b> with the arguments in the {len(chunks)} messages above?"
         buttons = InlineKeyboardMarkup(
             [
@@ -143,7 +175,7 @@ class TelegramBot:
                 ]
             ]
         )
-        msg = await ctx.bot.send_message(
+        msg = await bot.send_message(
             chat_id, prompt, parse_mode=ParseMode.HTML, reply_markup=buttons, link_preview_options=NO_PREVIEW
         )
         try:
@@ -164,13 +196,42 @@ class TelegramBot:
     async def on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         assert update.effective_chat and update.message and update.message.text
         chat_id = update.effective_chat.id
-        typing = asyncio.create_task(self._keep_typing(ctx, chat_id))
+        reply = await self._reply(ctx.bot, chat_id, update.message.text)
+        await self._send(ctx.bot, chat_id, reply)
+
+    async def ask_from_siri(self, bot: Bot, prompt: str) -> str:
+        """Answer a question asked through Siri. Both are posted to the chat; the answer is returned as speech."""
+        chat_id = self.cfg.allowed_user_ids[0]  # a private chat with the bot has the user's ID
+        question: int | None = None
+        try:
+            msg = await bot.send_message(
+                chat_id, f"🎙️ <b>You, via Siri</b>\n{html.escape(prompt, quote=False)}", parse_mode=ParseMode.HTML
+            )
+            question = msg.message_id
+        except TelegramError as exc:
+            log.warning("Couldn't post the question from Siri to Telegram: %s", exc)
+        reply = await self._reply(bot, chat_id, prompt, note=VOICE_NOTE)
+        try:
+            await self._send(bot, chat_id, reply, reply_to=question)
+        except TelegramError as exc:  # Siri still gets the answer
+            log.warning("Couldn't post the answer for Siri to Telegram: %s", exc)
+        return markdown_to_speech(reply)
+
+    def _still_working(self) -> str:
+        """What Siri says when the answer isn't ready in time."""
+        if self.s.status.snapshot().state is State.APPROVAL:
+            return "I need your OK in Telegram first, and I'll answer there."
+        return "That's taking a while, so I'll send the answer to Telegram."
+
+    async def _reply(self, bot: Bot, chat_id: int, text: str, note: str | None = None) -> str:
+        """The agent's reply to ``text``, showing "typing..." and asking for approvals in the chat meanwhile."""
+        typing = asyncio.create_task(self._keep_typing(bot, chat_id))
 
         async def confirm(tool: str, args: dict[str, Any]) -> bool:
-            return await self._confirm(ctx, chat_id, tool, args)
+            return await self._confirm(bot, chat_id, tool, args)
 
         try:
-            result = await self.s.agent.respond(str(chat_id), update.message.text, confirm=confirm)
+            result = await self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note)
             reply = result.text
             log.info(
                 "Replied in %.1fs (%d model calls, tools: %s)",
@@ -191,7 +252,7 @@ class TelegramBot:
             reply = f"Something went wrong: {type(exc).__name__}: {exc}"
         finally:
             typing.cancel()
-        await self._send(ctx, chat_id, reply)
+        return reply
 
     async def on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -258,7 +319,7 @@ class TelegramBot:
             text = h.text if len(h.text) < 300 else h.text[:300] + "..."
             score = f" ({1 - h.distance:.2f})" if query else ""
             lines.append(f"#{h.id}{score} {text}")
-        await self._send(ctx, update.effective_chat.id, "\n".join(lines))  # type: ignore[union-attr]
+        await self._send(ctx.bot, update.effective_chat.id, "\n".join(lines))  # type: ignore[union-attr]
 
     async def cmd_forget(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:

@@ -90,6 +90,17 @@ class DisplayConfig(_Section):
     led: bool = True  # light the HAT's LED while working (blue) or waiting for you (flashing amber)
 
 
+class SiriConfig(_Section):
+    # Lets an Apple Shortcut ask the assistant, so you can ask by voice (see README, "Siri").
+    enabled: bool = False
+    # Tailscale Serve passes requests from your own devices on to this address.
+    host: str = "127.0.0.1"
+    port: int = 8090
+    token: str = ""  # the shortcut sends this to show the request is yours
+    # Siri gives up after about 25 seconds. Slower answers go to Telegram instead.
+    reply_timeout_seconds: float = 20.0
+
+
 class MCPServerConfig(_Section):
     enabled: bool = True
     # Local server, started as a subprocess and spoken to over stdio.
@@ -130,6 +141,7 @@ class Config(_Section):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
+    siri: SiriConfig = Field(default_factory=SiriConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.
