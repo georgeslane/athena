@@ -21,7 +21,7 @@ APP_DIR="$HOME/Library/Application Support/Athena"
 LOG_DIR="$HOME/Library/Logs/Athena"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 LABEL=local.athena
-KEY_PATTERN='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9@._-]+)?$'
+KEY='(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9@._-]+)?'
 
 # The servers the Pi can reach, as "name|the command that runs it". To add one, add a
 # line, run this script again, and on the Pi add an MCP server with command = "ssh" and
@@ -79,11 +79,13 @@ if $uninstall; then
   exit 0
 fi
 
-if [[ -n "$pi_key" ]]; then
-  [[ "$pi_key" =~ $KEY_PATTERN ]] || die "That doesn't look like a public key. Copy the whole line connect-mac.sh printed."
-elif ! grep -qsF "$APP_DIR/ssh-command" "$keys"; then
-  die "The first time, give the Pi's key with --pi-key (connect-mac.sh on the Pi prints it)."
+if [[ -z "$pi_key" ]]; then
+  # Without --pi-key, keep the key that's already allowed.
+  pi_key="$(grep -sF "$APP_DIR/ssh-command" "$keys" | tail -1 | grep -oE "$KEY\$" || true)"
+  [[ -n "$pi_key" ]] || die "The first time, give the Pi's key with --pi-key (connect-mac.sh on the Pi prints it)."
 fi
+[[ "$pi_key" =~ ^$KEY$ ]] || die "That doesn't look like a public key. Copy the whole line connect-mac.sh printed."
+[[ "$APP_DIR" != *"'"* ]] || die "Your home folder's path has a ' in it, which this script can't handle."
 
 step "Choosing folders"
 mkdir -p "$APP_DIR" "$LOG_DIR"
@@ -182,10 +184,9 @@ step "Letting the Pi's key in, for these servers only"
 mkdir -p "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
 touch "$keys"
-if [[ -n "$pi_key" ]]; then
-  forget_pi_key # one Pi at a time: a new key replaces the old one
-  echo "restrict,command=\"$APP_DIR/ssh-command\" $pi_key" >>"$keys"
-fi
+forget_pi_key # one Pi at a time: a new key replaces the old one
+# sshd runs the command through your login shell, so the path is quoted: it has a space in it.
+echo "restrict,command=\"'$APP_DIR/ssh-command'\" $pi_key" >>"$keys"
 chmod 600 "$keys"
 
 ready=true
