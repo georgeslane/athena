@@ -79,9 +79,11 @@ class Agent:
         except Exception:  # unknown timezone name
             return datetime.now().astimezone()
 
-    def build_context(self, memories: list[MemoryHit]) -> str:
+    def build_context(self, memories: list[MemoryHit], note: str | None = None) -> str:
         now = self._now()
         lines = ["<context>", f"Current time: {now:%A %-d %B %Y, %H:%M} ({self.cfg.timezone})"]
+        if note:
+            lines.append(note)
         if memories:
             lines.append("Possibly relevant memories:")
             for m in memories:
@@ -141,11 +143,13 @@ class Agent:
         *,
         confirm: ConfirmFn | None = None,
         on_tool: ToolEventFn | None = None,
+        note: str | None = None,
     ) -> AgentResult:
+        """Answer ``text``. ``note`` goes in the context block for this message only, e.g. how it was sent."""
         async with self._locks[chat_id]:
             task = self.status.begin(text)
             try:
-                result = await self._respond(chat_id, text, task, confirm, on_tool)
+                result = await self._respond(chat_id, text, task, confirm, on_tool, note)
             except BaseException as exc:  # including cancellation, so the board never sticks on "working"
                 task.finish(exc)
                 raise
@@ -153,7 +157,13 @@ class Agent:
             return result
 
     async def _respond(
-        self, chat_id: str, text: str, task: Task, confirm: ConfirmFn | None, on_tool: ToolEventFn | None
+        self,
+        chat_id: str,
+        text: str,
+        task: Task,
+        confirm: ConfirmFn | None,
+        on_tool: ToolEventFn | None,
+        note: str | None,
     ) -> AgentResult:
         started = time.monotonic()
         memories = await self._recall(text)
@@ -162,7 +172,7 @@ class Agent:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt},
             *self.history.load(chat_id),
-            {"role": "user", "content": f"{self.build_context(memories)}\n\n{text}"},
+            {"role": "user", "content": f"{self.build_context(memories, note)}\n\n{text}"},
         ]
         schemas = self.tools.schemas() or None
         result = AgentResult(text="")

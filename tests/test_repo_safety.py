@@ -156,7 +156,9 @@ def install_hooks(clone: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def commit(clone: Path, files: dict[str, str], message: str = "change", *flags: str) -> subprocess.CompletedProcess[str]:
+def commit(
+    clone: Path, files: dict[str, str], message: str = "change", *flags: str
+) -> subprocess.CompletedProcess[str]:
     for name, text in files.items():
         (clone / name).write_text(text)
     git("add", "--force", *files, cwd=clone)

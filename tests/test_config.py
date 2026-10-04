@@ -10,9 +10,9 @@ REPO = Path(__file__).resolve().parents[1]
 def test_example_config_loads_with_env(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.toml"
     cfg_path.write_text((REPO / "config.example.toml").read_text())
-    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=123:abc\nLLM_API_KEY=secret\n")
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=123:abc\nLLM_API_KEY=secret\nSIRI_TOKEN=for-the-shortcut\n")
+    for name in ["TELEGRAM_BOT_TOKEN", "LLM_API_KEY", "SIRI_TOKEN"]:
+        monkeypatch.delenv(name, raising=False)
 
     cfg = load_config(cfg_path)
 
@@ -27,6 +27,9 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
     assert cfg.agent.assistant_name == "Athena"
     assert cfg.display.show_task and cfg.display.led
     assert cfg.status_path == tmp_path / "data" / "status.json"
+    # Siri is off until you set it up, and only listens on this machine.
+    assert not cfg.siri.enabled and cfg.siri.host == "127.0.0.1"
+    assert cfg.siri.token == "for-the-shortcut"
 
 
 def test_missing_config_has_helpful_error(tmp_path):

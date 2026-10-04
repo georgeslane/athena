@@ -57,6 +57,15 @@ chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
 show_task = true                       # show your message on the screen (false: just the status)
 led = true                             # LED: blue while working, flashing amber when it needs you
 
+[siri]
+# Ask by voice: "Hey Siri, Ask Athena" on your iPhone or Mac (see README, "Siri").
+# Your question and the answer also appear in the Telegram chat.
+enabled = false
+host = "127.0.0.1"                     # Tailscale Serve passes requests from your devices to this
+port = 8090
+token = "${SIRI_TOKEN}"                # the shortcut sends this to show it's yours; set it in .env
+reply_timeout_seconds = 20             # Siri gives up after about 25s; slower answers go to Telegram
+
 # ---------------------------------------------------------------------------
 # MCP servers. Each one is either local (command = ..., spoken to over stdio)
 # or remote (url = ..., Streamable HTTP; URLs ending in /sse use the older SSE
