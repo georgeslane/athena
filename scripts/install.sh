@@ -81,8 +81,8 @@ else
 fi
 
 step "Pre-fetching the example MCP servers"
-uvx mcp-server-time --help >/dev/null 2>&1 || warn "couldn't pre-fetch mcp-server-time"
-uvx mcp-server-fetch --help >/dev/null 2>&1 || warn "couldn't pre-fetch mcp-server-fetch"
+uvx mcp-server-time==2026.8.18 --help >/dev/null 2>&1 || warn "couldn't pre-fetch mcp-server-time"
+uvx mcp-server-fetch==2026.8.18 --help >/dev/null 2>&1 || warn "couldn't pre-fetch mcp-server-fetch"
 
 step "Disabling git push (secrets and memories live in this folder)"
 bash scripts/disable-git-push.sh

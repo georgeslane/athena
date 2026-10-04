@@ -237,3 +237,27 @@ async def test_note_is_only_in_the_context_of_its_own_message(config, memory):
     assert "This message was spoken to Siri." in first["messages"][-1]["content"]
     assert all("spoken to Siri" not in m["content"] for m in second["messages"])  # not in history either
     assert agent.history.load("chat1")[0] == {"role": "user", "content": "What's the weather?"}
+
+
+async def test_warm_up_reads_the_start_of_the_next_request_without_answering(config, memory):
+    server = FakeLLMServer([completion("Hello George!"), completion("."), completion("Still here.")])
+    agent = make_agent(config, memory, server)
+    await agent.respond("chat1", "hi")
+
+    reply = await agent.warm_up("chat1")
+    assert reply is not None and agent.status.snapshot().last_task == "hi"  # nothing to show on the board
+    await agent.respond("chat1", "are you there?")
+
+    _, warm, after = server.requests
+    assert warm["max_tokens"] == 1 and warm["tools"] == after["tools"]
+    # Everything before the new message is what the next request starts with, so it's cached.
+    assert warm["messages"][:-1] == after["messages"][:-1]
+    assert len(agent.history.load("chat1")) == 4  # the warm-up isn't saved
+
+
+async def test_warm_up_is_skipped_while_a_message_is_being_answered(config, memory):
+    server = FakeLLMServer([])
+    agent = make_agent(config, memory, server)
+    async with agent._locks["chat1"]:
+        assert await agent.warm_up("chat1") is None
+    assert server.requests == []

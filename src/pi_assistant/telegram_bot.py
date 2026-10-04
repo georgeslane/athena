@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import json
 import logging
@@ -57,6 +58,8 @@ class TelegramBot:
         self.allowed = set(self.cfg.allowed_user_ids)
         self._pending: dict[str, asyncio.Future[bool]] = {}
         self._siri: SiriServer | None = None
+        self._warming: asyncio.Task[None] | None = None
+        self._rewarm = asyncio.Event()  # set to warm up again straight away, e.g. after /reload
 
     # -- setup ----------------------------------------------------------------------------
 
@@ -104,11 +107,35 @@ class TelegramBot:
             log.warning("@%s is in setup mode: message it to get your user ID.", me.username)
         if self.s.config.siri.enabled:
             await self._start_siri(app.bot)
+        if self.s.config.llm.warm_up_minutes > 0:
+            self._warming = asyncio.create_task(self._keep_warm(), name="keep-warm")
 
     async def _post_shutdown(self, app: Application) -> None:
+        if self._warming:
+            self._warming.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._warming
         if self._siri:
             await self._siri.stop()
         await self.s.close()
+
+    async def _keep_warm(self) -> None:
+        """Keep the model server's prompt cache ready for your chat (llm.warm_up_minutes)."""
+        chat_id = str(self.cfg.allowed_user_ids[0]) if self.cfg.allowed_user_ids else "warm-up"
+        while True:
+            try:
+                reply = await self.s.agent.warm_up(chat_id)
+                if reply and reply.elapsed > 5:
+                    log.info(
+                        "The model server had to read the prompt afresh (%s tokens, %.0fs)",
+                        reply.prompt_tokens,
+                        reply.elapsed,
+                    )
+            except Exception as exc:  # the Mac might be asleep: try again next time
+                log.debug("Couldn't warm up the model server: %s", exc)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._rewarm.wait(), self.s.config.llm.warm_up_minutes * 60)
+            self._rewarm.clear()
 
     async def _start_siri(self, bot: Bot) -> None:
         if not self.allowed:
@@ -348,6 +375,7 @@ class TelegramBot:
     async def cmd_reload(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Reconnecting to MCP servers...")  # type: ignore[union-attr]
         await self.s.mcp.reload()
+        self._rewarm.set()  # the tools may have changed, and the model server's cache with them
         await self.cmd_tools(update, ctx)
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

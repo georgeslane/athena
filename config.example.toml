@@ -17,6 +17,10 @@ timeout_seconds = 300
 # Server-specific request options, passed through as-is. For example, to turn off
 # "thinking" on models that support it:
 # extra_body = { chat_template_kwargs = { enable_thinking = false } }
+# At startup, after /reload and every this many minutes, have the model server read the
+# prompt, tools and your chat so far, so your next message doesn't wait while it does.
+# It only takes a moment when they're already cached. 0 turns it off.
+warm_up_minutes = 10
 
 [telegram]
 bot_token = "${TELEGRAM_BOT_TOKEN}"
@@ -57,6 +61,14 @@ chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
 show_task = true                       # show your message on the screen (false: just the status)
 led = true                             # LED: blue while working, flashing amber when it needs you
 
+[news.feeds]
+# News feeds (RSS or Atom) the assistant can read without asking: only these are ever
+# fetched. Add your own; most news sites have one.
+"BBC News" = "https://feeds.bbci.co.uk/news/rss.xml"
+"The Guardian" = "https://www.theguardian.com/uk/rss"
+"Financial Times" = "https://www.ft.com/rss/home"
+"Hacker News" = "https://hnrss.org/frontpage"
+
 [siri]
 # Ask by voice: "Hey Siri, Ask Athena" on your iPhone or Mac (see README, "Siri").
 # Your question and the answer also appear in the Telegram chat.
@@ -80,18 +92,82 @@ reply_timeout_seconds = 20             # Siri gives up after about 25s; slower a
 
 [mcp_servers.time]
 command = "uvx"
-args = ["mcp-server-time", "--local-timezone=Europe/London"]
+args = ["mcp-server-time==2026.8.18", "--local-timezone=Europe/London"]
 confirm = []                           # local and read-only, so it needn't ask
 
 [mcp_servers.fetch]
 command = "uvx"
-args = ["mcp-server-fetch"]
+args = ["mcp-server-fetch==2026.8.18"]
 # No `confirm` line, so every fetch asks first: a URL can carry your data to any
 # website, for example if a fetched page tells the model to send it there.
 
-# Example: Apple apps on the Mac, exposed over HTTP (see README, "On the Mac").
-# [mcp_servers.mac]
-# url = "http://my-mac.local:8765/mcp"
-# headers = { Authorization = "Bearer ${MAC_MCP_TOKEN}" }
-# include = ["list_*", "get_*", "search_*", "create_*"]   # only tools you've checked
-# confirm = ["create_*"]                                  # reads stay on your network
+# The servers below are switched off until you set them up (see README, "MCP servers").
+# Copy any you want into your config.toml, fill them in and set enabled = true.
+
+# Web search through DuckDuckGo, with no account. Each search asks first, because
+# what you search for leaves your network.
+[mcp_servers.search]
+enabled = false
+command = "uvx"
+args = ["duckduckgo-mcp-server==0.7.0"]
+include = ["search"]
+
+# Your Mac: search and read the folders you choose (read-only), over SSH. Set up with
+# scripts/connect-mac.sh on the Pi and scripts/mac/install.sh on the Mac.
+[mcp_servers.files]
+enabled = false
+command = "ssh"
+args = ["athena-mac", "files"]
+confirm = []                           # read-only, and only the folders you chose
+
+# Your Mac: Calendar and Reminders, through iMCP, set up with the files server.
+[mcp_servers.apple]
+enabled = false
+command = "ssh"
+args = ["athena-mac", "apple"]
+include = ["calendars_list", "events_fetch", "events_create", "reminders_lists", "reminders_fetch", "reminders_create"]
+confirm = ["events_create", "reminders_create"]   # adding things asks first; deleting isn't possible
+
+# GitHub, read-only, through GitHub's own hosted server. GITHUB_TOKEN in .env should be
+# a fine-grained token with only "Public repositories (read-only)" access. Lockdown
+# hides text in issues from people without push access, which could carry instructions.
+[mcp_servers.github]
+enabled = false
+url = "https://api.githubcopilot.com/mcp/readonly"
+headers = { Authorization = "Bearer ${GITHUB_TOKEN}", "X-MCP-Lockdown" = "true", "X-MCP-Tools" = "search_repositories,get_file_contents,get_latest_release,list_commits,search_issues" }
+include = ["search_repositories", "get_file_contents", "get_latest_release", "list_commits", "search_issues"]
+confirm = []                           # public repos only; lookups go only to GitHub
+
+# Company filings and financial statements from the SEC's EDGAR, with EdgarTools.
+[mcp_servers.sec]
+enabled = false
+command = "uvx"
+args = ["--from", "edgartools[ai]==5.60.0", "edgartools-mcp"]
+env = { EDGAR_IDENTITY = "${EDGAR_IDENTITY}" }   # the SEC asks who's asking: set it in .env
+include = ["edgar_company", "edgar_search", "edgar_filing", "edgar_read", "edgar_text_search"]
+confirm = []                           # public filings; lookups go only to the SEC
+
+# Email: an address of the assistant's own. It reads that inbox, and sends only with
+# your OK. The server itself also refuses to do anything but send, or to send to anyone
+# not in ALLOWED_RECIPIENTS, even if you approve.
+[mcp_servers.email]
+enabled = false
+command = "uvx"
+args = ["mcp-email-server==1.11.0", "stdio"]
+include = ["list_available_accounts", "list_emails_metadata", "get_emails_content", "send_email"]
+confirm = ["send_email"]
+
+[mcp_servers.email.env]
+MCP_EMAIL_SERVER_ACCOUNT_NAME = "athena"
+MCP_EMAIL_SERVER_FULL_NAME = "Athena"
+MCP_EMAIL_SERVER_EMAIL_ADDRESS = "athena@example.com"
+MCP_EMAIL_SERVER_USER_NAME = "athena@example.com"
+MCP_EMAIL_SERVER_PASSWORD = "${EMAIL_PASSWORD}"           # an app password, in .env
+MCP_EMAIL_SERVER_IMAP_HOST = "imap.example.com"
+MCP_EMAIL_SERVER_IMAP_PORT = "993"
+MCP_EMAIL_SERVER_IMAP_SSL = "true"
+MCP_EMAIL_SERVER_SMTP_HOST = "smtp.example.com"
+MCP_EMAIL_SERVER_SMTP_PORT = "465"
+MCP_EMAIL_SERVER_SMTP_SSL = "true"
+MCP_EMAIL_SERVER_ALLOWED_MUTATIONS = "send"               # never delete, move, flag or draft
+MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS = "you@example.com"   # comma-separated; * matches anything

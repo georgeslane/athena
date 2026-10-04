@@ -11,10 +11,10 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
        long poll   │   Telegram bot ─► agent loop ────────────┼─────►│   Gemma 4 26B A4B (4-bit)   │
                    │                   │  tool calls          │ HTTP │   OpenAI-compatible /v1     │
                    │   memory ◄────────┤                      │      │                             │
-                   │   (SQLite + vec)  │  MCP client ─────────┼─────►│ MCP servers for Apple apps  │
-                   │                   │      │               │ HTTP │   (optional, see below)     │
-                   │ Ollama: embeddinggemma   ▼               │      └─────────────────────────────┘
-                   │ MCP servers (stdio): time, fetch, ...    │
+                   │   (SQLite + vec)  │  MCP client ─────────┼─────►│ MCP servers: your files     │
+                   │                   │      │               │ SSH  │   (read-only), Calendar and │
+                   │ Ollama: embeddinggemma   ▼               │      │   Reminders (iMCP)          │
+                   │ MCP servers: time, fetch, email, SEC ... │      └─────────────────────────────┘
                    └──────────────────────────────────────────┘
 ```
 
@@ -22,11 +22,12 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 
 - **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it.
 - **Ask by voice**: say "Hey Siri, Ask Athena" on your iPhone or Mac. Siri reads the answer out, and your question and the answer also appear in the Telegram chat.
-- **Tool calling with MCP**: connects to any MCP server, either local (stdio) on the Pi or remote (HTTP) on the Mac. Per-server filters choose which tools the model sees.
+- **Tool calling with MCP**: connects to any MCP server, on the Pi, on your Mac over SSH, or remote over HTTP. Per-server filters choose which tools the model sees.
+- **A general assistant**: [recommended servers](#mcp-servers) let it search and read files on your Mac, use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own.
 - **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`. Related memories are also added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Your notes as memory**: `pi-assistant ingest ~/notes` indexes Markdown and text files so the assistant can search them.
-- **Fast replies with prompt caching**: the system prompt and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon.
+- **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
 - **A status board**: with a Pimoroni Display HAT Mini, the Pi's screen shows what the assistant is doing: idle, working on your request, or waiting for your approval.
 - **SSH-friendly tools**: `pi-assistant doctor` checks every connection, `pi-assistant chat` gives you a terminal chat, and `pi-assistant eval` compares models on tool calling.
 
@@ -155,53 +156,121 @@ The token is stored in the shortcut, which iCloud syncs between your devices. Ta
 Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has either `command` (a local server spoken to over stdio) or `url` (a remote server over Streamable HTTP; URLs ending in `/sse` use the older SSE transport). Optional settings:
 
 - `include`, `exclude` and `confirm` take glob patterns matched against the server's tool names.
-- `confirm` lists the tools that ask for your approval before they run. It defaults to `["*"]`, every tool, because any tool might send your data off your network. Set `confirm = []` only for servers that can't, like `time`. If you narrow it to some tools, use `include` too, so tools you haven't checked can't run without asking.
+- `confirm` lists the tools that ask for your approval before they run. It defaults to `["*"]`, every tool, because any tool might send your data off your network. If you narrow it to some tools, use `include` too, so tools you haven't checked can't run without asking.
 - `headers` adds HTTP headers, such as an auth token.
 - `env` passes extra environment variables to a local server. Local servers otherwise get only a minimal environment, so your Telegram token isn't exposed to them.
+- `enabled = false` keeps a server's settings without starting it.
 
-Keep the tool list short. Every tool's description goes into every prompt, and a long prompt is the slowest part of a request on a Mac.
+After changing servers, restart the service (`sudo systemctl restart pi-assistant`) and check them with `uv run pi-assistant doctor`. Each local server's stderr is written to `data/logs/mcp-<name>.log`. If a server on the Mac stops answering, for example after the Mac restarts, send `/reload`.
 
-### On the Pi
+### Recommended servers
 
-These two work out of the box:
+`config.example.toml` has each of these ready to copy into your `config.toml`, switched off until you set it up. To add others, see [Adding a server](#adding-a-server).
 
-```toml
-[mcp_servers.time]
-command = "uvx"
-args = ["mcp-server-time", "--local-timezone=Europe/London"]
-confirm = []
+| For | Server | Runs on | Asks first |
+|---|---|---|---|
+| The time | `mcp-server-time` | Pi | Never |
+| Web pages | `mcp-server-fetch` | Pi | Every fetch |
+| Web search | [DuckDuckGo](https://github.com/nickclyde/duckduckgo-mcp-server) | Pi | Every search |
+| [Files on your Mac](#your-mac-files-calendar-and-reminders) | `mac_files`, in this repo: read-only | Mac, over SSH | Never |
+| [Calendar and Reminders](#your-mac-files-calendar-and-reminders) | [iMCP](https://github.com/mattt/iMCP) | Mac, over SSH | Adding events and reminders |
+| [News](#news) | `read_news`, built in | Pi | Never |
+| [Company filings](#company-filings) | [EdgarTools](https://github.com/dgunning/edgartools) | Pi | Never |
+| [GitHub](#github) | [GitHub's own server](https://github.com/github/github-mcp-server): read-only | GitHub | Never |
+| [Email](#email) | [mcp-email-server](https://github.com/Wh1isper/mcp-email-server) | Pi | Sending |
 
-[mcp_servers.fetch]
-command = "uvx"
-args = ["mcp-server-fetch"]
-```
+What asks first follows one rule: a tool asks if it can change something, or can send what's in the conversation somewhere someone else could read it. Reading your own files and calendar keeps everything on your network. Looking things up in public sources (your news feeds, the SEC, GitHub's public repos) sends only the lookup itself, to that service. Fetching a URL, searching the web and sending email can reach anyone, and adding a calendar event can email an alarm to any address, so those ask. To make any server ask first, set `confirm = ["*"]` on it.
 
-Every fetch asks for approval first, because a URL can carry your data to any website.
+Versions are pinned, as in `mcp-email-server==1.11.0`, so a new release can't change what runs on your Pi until you choose to update.
 
-Each local server's stderr is written to `data/logs/mcp-<name>.log`.
+Tools only run when the model uses them, but every tool's description is part of every prompt, so the model knows what it can use. With everything above switched on, the descriptions come to about 9,000 tokens, against about 1,300 for the system prompt and the first three servers. Email, SEC filings and GitHub account for three-quarters of that.
 
-### On the Mac (Apple apps)
+On most messages that costs almost nothing, because oMLX caches the part of the prompt it has already read, and the assistant keeps the cache warm: at startup, after `/reload`, and every 10 minutes (`llm.warm_up_minutes`). But when the cache is cold, for example just after the Mac restarts, the next message waits while the Mac reads the whole prompt again. On an M1 Pro that could be a minute with every server on. To see what yours costs, run `doctor`: its last section measures how many tokens the tools add, how long your Mac takes to read them, and whether oMLX's cache is working. If it's slow, switch off servers you rarely use, or narrow their `include` lists.
 
-Calendar, Reminders, Notes and Messages servers have to run on the Mac itself. Most of them speak stdio, so put a small proxy in front to expose them over HTTP. [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) is one option:
+### Your Mac: files, Calendar and Reminders
+
+Two servers run on your Mac: `mac_files` from this repo, which can search folders you choose with Spotlight and read text, PDF, Word, RTF and HTML files in them, and [iMCP](https://github.com/mattt/iMCP), for Calendar and Reminders. The Pi connects to them over SSH, with a key that can only reach those two servers: no shell, no port forwarding, nothing else. On the Mac, launchd starts a server for each connection inside your login session, so macOS asks for access to your folders and calendars as it would for any app.
+
+`mac_files` can't change, move or delete anything. It can't see outside the folders you choose, even through a symlink, or hidden files and folders inside them, such as `.env` or `.git`.
+
+1. **On the Pi**, make the key and the `athena-mac` SSH entry, using the Mac's name on your tailnet and your user name on the Mac:
+
+   ```bash
+   bash scripts/connect-mac.sh my-mac.tail1234.ts.net georges
+   ```
+
+   It prints the command for step 3, with the Pi's public key in it.
+2. **On the Mac**, clone this repo, install iMCP with `brew install --cask mattt/tap/iMCP`, and turn on Remote Login: System Settings > General > Sharing > Remote Login, allowing only your user.
+3. **On the Mac**, in the repo, run the command step 1 printed, with the folders the assistant may read. For iCloud Drive, add `--folder "$HOME/Library/Mobile Documents/com~apple~CloudDocs"`:
+
+   ```bash
+   bash scripts/mac/install.sh --pi-key "ssh-ed25519 AAAA... athena@pi" --folder ~/Documents
+   ```
+
+4. **On the Mac**, open iMCP. Turn on Calendar and Reminders only, allow access when macOS asks, and turn on "Start at login" in its settings.
+5. **On the Pi**, run `ssh athena-mac hello`. It should say there's no server called 'hello', which means the key works. Then set `enabled = true` on `files` and `apple` in `config.toml`, restart the service and run `doctor`.
+6. **On the Mac**, the first time the Pi uses each server, macOS asks for access to your folders (for "python3") and to the local network (for "imcp-server"). Allow them, over Screen Sharing if the Mac has no screen.
+
+The Mac needs to stay on and logged in. After updating the repo on the Mac, run `scripts/mac/install.sh` again, without options to keep the same folders. `bash scripts/mac/install.sh --uninstall` removes it all, including the Pi's key.
+
+### News
+
+`read_news` reads the news feeds (RSS or Atom) listed under `[news.feeds]` in `config.toml`, and only those. All the model chooses is which feed to read and how many items, so it can't be used to send anything anywhere, and doesn't ask first. Most news sites have a feed: add their address with any name you like. To read a whole article, the model uses `fetch`, which asks first.
+
+### Company filings
+
+[EdgarTools](https://github.com/dgunning/edgartools) searches and reads filings to the US Securities and Exchange Commission: annual and quarterly reports, financial statements, insider trades and fund holdings. The SEC asks callers to say who they are, so set `EDGAR_IDENTITY` in `.env` to your name and email, like `Jane Doe jane@example.com`.
+
+It needs about 300 MB of Python packages, mostly data libraries, which take longer to install on a Pi than the assistant waits for a server to start. So install them before switching it on:
 
 ```bash
-# On the Mac. Bind to its LAN or Tailscale address, not 0.0.0.0.
-uvx mcp-proxy --host=<mac-ip> --port=8765 <your Apple MCP server command>
+uvx --from "edgartools[ai]==5.60.0" edgartools-mcp --help
 ```
 
-```toml
-# On the Pi
-[mcp_servers.mac]
-url = "http://my-mac.local:8765/sse"
-include = ["list_*", "get_*", "search_*", "create_*"]
-confirm = ["create_*"]
-```
+### GitHub
 
-Tips:
+This uses the server GitHub hosts, in read-only mode with lockdown on. Lockdown hides text in issues and pull requests from people without push access to the repo, which is where instructions aimed at an assistant would most likely be hidden.
 
-- The first time a server touches Calendar or Contacts, macOS shows a permission prompt. On a headless Mac, approve it over Screen Sharing.
-- mcp-proxy has no authentication, so only expose it on a network you trust, such as Tailscale.
-- If the Mac restarts, send `/reload` to reconnect.
+Make a [fine-grained token](https://github.com/settings/personal-access-tokens/new) with **Public repositories (read-only)** access and an expiry date, and set it as `GITHUB_TOKEN` in `.env`. It can't see your private repositories or change anything, even if someone got hold of it.
+
+### Email
+
+Give the assistant an email address of its own, with any provider that offers IMAP, SMTP and app passwords, such as Fastmail, iCloud Mail or Gmail with 2-Step Verification. Then it can't read your own mail, and its password only opens its own mailbox. Forward it anything you'd like it to read.
+
+Put the app password in `.env` as `EMAIL_PASSWORD`, and the address and your provider's IMAP and SMTP servers in the `email` block. Two settings in that block are enforced by the email server itself, whatever the model asks for and whatever you approve:
+
+- `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`: who it may email, comma-separated, with `*` as a wildcard. Start with just your own address.
+- `MCP_EMAIL_SERVER_ALLOWED_MUTATIONS = "send"`: it can send, but never delete, move, flag or draft.
+
+Sending always asks first. Check the recipients, and the `attachments` list: it can attach any file the Pi can read. To have it only see mail from you, also set `MCP_EMAIL_SERVER_ALLOWED_SENDERS` to your own addresses.
+
+### Adding a server
+
+To give the assistant a new ability, look for an MCP server that provides it. Most are listed in the [MCP Registry](https://registry.modelcontextprotocol.io), and the assistant can search it for you: ask it to fetch `https://registry.modelcontextprotocol.io/v0/servers?search=<topic>`.
+
+1. **Choose carefully.** A server sees whatever the assistant passes it and can act on your behalf. Prefer one from the service's own makers, or one that's widely used and recently updated, and read what each of its tools does.
+2. **Give it as little as possible.** Use its read-only mode if it has one, and give it a token or account that can only do what you need. Use any limits the server itself enforces, like the email server's allowed recipients.
+3. **Add it to `config.toml`:**
+
+   ```toml
+   [mcp_servers.weather]
+   command = "uvx"                                   # a Python server from PyPI
+   args = ["some-weather-mcp==1.2.3"]                # pinned to a version you've checked
+   env = { WEATHER_API_KEY = "${WEATHER_API_KEY}" }  # secrets go in .env
+   include = ["get_forecast"]                        # only the tools you need
+   confirm = []                                      # see below
+   ```
+
+   - **npm servers:** these need Node.js on the Pi (`sudo apt install nodejs npm`). Use `command = "npx"` and `args = ["-y", "some-server@1.2.3"]`.
+   - **Hosted servers:** these take `url` and `headers` instead, like the GitHub one.
+   - **Servers that need your Mac's apps or files** run on the Mac. Add a line to `SERVERS` at the top of `scripts/mac/install.sh` and run it again on the Mac. Then on the Pi, use `command = "ssh"` and `args = ["athena-mac", "<its name>"]`.
+   - **`confirm`:** leave it out, so every tool asks first, unless the tools only read your own data or look things up in public sources. Anything that changes something, or can send to anyone (email, messages, any URL), should ask.
+4. **Check it:**
+   - Restart the service (`sudo systemctl restart pi-assistant`), then run `uv run pi-assistant doctor`. It lists the server's tools and shows how much they add to every prompt.
+   - Send `/tools` in Telegram to see them there too.
+   - Run `uv run pi-assistant eval -m <your model>` to check the model still picks the right tools.
+
+To update a server later, read what changed, change its pinned version and restart. If no safe server exists for something, the assistant can have a built-in tool instead, like `read_news` in `src/pi_assistant/news.py`. A built-in tool is a name, a description, a JSON schema for its arguments and a Python function, added in `build_services`.
 
 ## Memory
 
@@ -269,12 +338,15 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 | `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
 | `src/pi_assistant/siri.py` | The endpoint the Siri shortcut calls |
+| `src/pi_assistant/mac_files.py` | The read-only files server that runs on your Mac |
+| `src/pi_assistant/news.py` | The built-in news reader |
 | `src/pi_assistant/status.py` | What the assistant is doing, published for the status board |
 | `src/pi_assistant/board.py`, `display.py` | Drawing the status board, and the Display HAT Mini |
 | `src/pi_assistant/assets/` | The Athena icon and the board's fonts |
 | `src/pi_assistant/doctor.py`, `evals.py`, `cli.py` | Command-line tools |
 | `prompts/system.md` | System prompt. Point `agent.system_prompt_file` at a `*.local.md` copy to customise it privately. |
 | `scripts/install.sh`, `scripts/update.sh`, `deploy/` | Pi setup and updates |
+| `scripts/connect-mac.sh`, `scripts/mac/install.sh` | Linking the Pi to your Mac's files, Calendar and Reminders |
 
 ## Troubleshooting
 
@@ -284,6 +356,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 - **The bot ignores you:** your ID isn't in `telegram.allowed_user_ids`. Empty the list temporarily to get your ID.
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
 - **The status board stays blank:** check `journalctl -u pi-assistant-display`. Its errors say what to fix, such as SPI being turned off.
+- **A server on the Mac fails:** run `ssh athena-mac hello` on the Pi. If that doesn't say there's no server called 'hello', the problem is SSH: check Remote Login is on and the Mac is awake. If it does, check `~/Library/Logs/Athena/` on the Mac, and that iMCP is running.
 - **The Siri shortcut fails:** check `doctor` says Siri is "listening", and that Tailscale is connected on the device you're asking from. Try the `curl` command from the Siri section. A 401 means the token in the shortcut doesn't match `SIRI_TOKEN`.
 
 ## Security notes
@@ -293,6 +366,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 - `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
+- The Pi reaches your Mac over SSH with a key of its own, which `~/.ssh/authorized_keys` on the Mac restricts to starting the files and Calendar servers: no shell, no port forwarding. The files server is read-only, limited to the folders you chose, and never shows hidden files.
+- The email server only sends to addresses in `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`, and can't delete or move mail, even if you approve. The GitHub token can only read public repositories.
 - The Siri endpoint is off unless you turn it on. It listens only on the Pi itself, Tailscale Serve passes on requests from your tailnet, and each request needs the token. Anyone with both can ask Athena anything you could, so keep the token private.
 - The status board shows the start of your latest message. If other people can see the screen, set `show_task = false` under `[display]`.
 
