@@ -3,6 +3,7 @@ scripts/connect-mac.sh."""
 
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -55,9 +56,12 @@ def mac(tmp_path):
                 text=True,
             )
 
-        def ssh_command(self, original):
+        def ssh_command(self, original, shell="/bin/sh"):
+            """Do what sshd does when the Pi connects: run the key's forced command through the login shell."""
+            line = next(line for line in self.keys.read_text().splitlines() if "ssh-command" in line)
+            command = re.search(r'command="((?:[^"\\]|\\.)*)"', line).group(1).replace('\\"', '"')
             return subprocess.run(
-                [str(self.app / "ssh-command")],
+                [shell, "-c", command],
                 env={**env, "SSH_ORIGINAL_COMMAND": original},
                 capture_output=True,
                 text=True,
@@ -70,7 +74,7 @@ def mac(tmp_path):
 
 
 def our_line(mac, key=KEY):
-    return f'restrict,command="{mac.app}/ssh-command" {key}'
+    return f"restrict,command=\"'{mac.app}/ssh-command'\" {key}"
 
 
 def test_install_sets_up_both_servers_for_the_pi_key_only(mac):
@@ -111,6 +115,25 @@ def test_the_key_can_only_reach_the_two_servers(mac):
         assert result.returncode == 1 and "there's no server called" in result.stderr
     connections = [call for call in mac.calls("nc") if " -U " in call]
     assert connections == [f"nc -U {mac.app}/files.sock"]  # only the one for "files"
+
+
+@pytest.mark.parametrize("shell", [sh for sh in ["/bin/sh", "/bin/bash", "/bin/zsh"] if Path(sh).exists()])
+def test_the_forced_command_survives_the_space_in_its_path(mac, shell):
+    # sshd runs it through your login shell, and "Application Support" has a space in it.
+    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents").check_returncode()
+    mac.ssh_command("files", shell=shell)
+    assert mac.calls("nc")[-1] == f"nc -U {mac.app}/files.sock"
+
+
+def test_rerunning_fixes_the_key_line_of_an_older_install(mac):
+    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents").check_returncode()
+    mac.keys.write_text(f'restrict,command="{mac.app}/ssh-command" {KEY}\n')  # what versions before this wrote
+    assert mac.ssh_command("files").returncode == 127  # the shell split the path at the space
+
+    mac.install().check_returncode()  # no options: the same key, with its line fixed
+    assert mac.keys.read_text() == our_line(mac) + "\n"
+    mac.ssh_command("files")
+    assert mac.calls("nc")[-1] == f"nc -U {mac.app}/files.sock"
 
 
 def test_rerunning_keeps_folders_and_a_new_key_replaces_the_old_one(mac):
