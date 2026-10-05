@@ -38,7 +38,7 @@ class FakeBot:
 
 def make_bot(config, respond, allowed=(ME,)):
     config.telegram = TelegramConfig(bot_token="123456:TEST", allowed_user_ids=list(allowed))
-    services = SimpleNamespace(config=config, agent=SimpleNamespace(respond=respond))
+    services = SimpleNamespace(config=config, agent=SimpleNamespace(respond=respond), rewarm=asyncio.Event())
     return TelegramBot(services)
 
 
@@ -71,7 +71,7 @@ def test_handlers_depend_on_allowlist(config):
 
 
 async def test_message_round_trip_with_confirmation(config):
-    async def respond(chat_id, text, confirm, note=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None):
         approved = await confirm("delete_note", {"name": "shopping"})
         return AgentResult(text=f"**{'Deleted' if approved else 'Kept'}** it")
 
@@ -106,7 +106,7 @@ async def test_message_round_trip_with_confirmation(config):
 
 
 async def test_confirmation_times_out_as_denied(config):
-    async def respond(chat_id, text, confirm, note=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None):
         return AgentResult(text="Kept it" if not await confirm("x", {}) else "Did it")
 
     bot = make_bot(config, respond)
@@ -121,7 +121,7 @@ async def test_confirmation_shows_long_arguments_in_full(config):
     body = "Hi Sam,\n\n" + "Here's the plan for the weekend. " * 200 + "\nP.S. the door code is 4321."
     args = {"to": "sam@example.com", "body": body}
 
-    async def respond(chat_id, text, confirm, note=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None):
         return AgentResult(text="Sent" if await confirm("send_email", args) else "Not sent")
 
     bot = make_bot(config, respond)
@@ -144,7 +144,7 @@ async def test_agent_errors_become_friendly_replies(config):
     import httpx
     import openai
 
-    async def respond(chat_id, text, confirm, note=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None):
         raise openai.APIConnectionError(request=httpx.Request("POST", "http://mac/v1/chat/completions"))
 
     bot = make_bot(config, respond)
@@ -187,13 +187,15 @@ async def test_keeps_the_model_server_warm(config):
         # /reload may change the tools, so it warms up again straight away.
         reloaded = []
 
-        async def reload():
-            reloaded.append(True)
+        async def reload(reconnect=False):
+            reloaded.append(reconnect)
+            bot.s.rewarm.set()  # as Services.reload does
 
         async def reply_text(text):
             pass
 
-        bot.s.mcp = SimpleNamespace(reload=reload, status=lambda: [])
+        bot.s.reload = reload
+        bot.s.mcp = SimpleNamespace(status=lambda: [])
         bot.s.tools = SimpleNamespace(all=lambda: [])
         update = SimpleNamespace(
             effective_message=SimpleNamespace(reply_text=reply_text), effective_chat=SimpleNamespace(id=1)
@@ -203,13 +205,13 @@ async def test_keeps_the_model_server_warm(config):
             await asyncio.sleep(0.01)
     finally:
         task.cancel()
-    assert reloaded and set(calls) == {str(ME)}
+    assert reloaded == [True] and set(calls) == {str(ME)}  # it reconnects every server
 
 
 async def test_confirmation_shows_what_the_tool_says_it_will_do(config):
     args = {"side": "buy", "ticker": "AAPL_US_EQ", "quantity": 2}
 
-    async def respond(chat_id, text, confirm, note=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None):
         approved = await confirm("trading212_place_order", args, "Buy 2 Apple <Inc> at the market price.")
         return AgentResult(text="Bought" if approved else "Not bought")
 
@@ -225,3 +227,21 @@ async def test_confirmation_shows_what_the_tool_says_it_will_do(config):
     )
     assert "&quot;ticker&quot;: &quot;AAPL_US_EQ&quot;" in prompt.text
     assert "reply_markup" in prompt.kwargs
+
+
+async def test_session_starts_a_new_session(config):
+    replies = []
+
+    async def reply_text(text):
+        replies.append(text)
+
+    bot = make_bot(config, None)
+    bot.s.new_session = lambda: SimpleNamespace(id=7)
+    update = SimpleNamespace(
+        effective_message=SimpleNamespace(reply_text=reply_text), effective_chat=SimpleNamespace(id=1)
+    )
+    await bot.cmd_session(update, SimpleNamespace(bot=FakeBot()))
+    assert replies[0].startswith("Started session 7. I've cleared our conversation from my context.")
+    app = bot.build()
+    names = {name for h in app.handlers[0] if hasattr(h, "commands") for name in h.commands}
+    assert {"session", "reset"} <= names  # /reset still works, for anyone used to it

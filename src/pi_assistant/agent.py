@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -17,7 +18,8 @@ from pi_assistant.config import AgentConfig
 from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient, LLMReply, ToolCall
 from pi_assistant.memory import MemoryHit, MemoryService
-from pi_assistant.status import StatusTracker, Task
+from pi_assistant.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
+from pi_assistant.status import StatusTracker, Task, describe_error
 from pi_assistant.tools import ToolError, ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -52,6 +54,7 @@ class AgentResult:
     tools_used: list[str] = field(default_factory=list)
     model_calls: int = 0
     elapsed: float = 0.0
+    saved: bool = False  # the exchange went into the history
 
 
 class Agent:
@@ -65,6 +68,7 @@ class Agent:
         system_prompt_template: str | None = None,
         auto_recall: bool = True,
         status: StatusTracker | None = None,
+        stats: UsageStats | None = None,
     ):
         self.cfg = cfg
         self.llm = llm
@@ -72,10 +76,53 @@ class Agent:
         self.history = history
         self.memory = memory
         self.status = status or StatusTracker()
+        self.stats = stats
         self.auto_recall = auto_recall and memory is not None
         # Rendered once and never changed, so the model server can cache it.
         self.system_prompt = render_system_prompt(system_prompt_template, cfg)
+        # Called after each exchange is saved to the history, once the chat is free again.
+        self.on_saved: Callable[[], None] | None = None
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # While paused, new messages wait; `busy` counts the ones being answered.
+        self._open = asyncio.Event()
+        self._open.set()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._busy = 0
+        self._pausing = asyncio.Lock()
+
+    # -- pausing --------------------------------------------------------------------------
+
+    @property
+    def busy(self) -> bool:
+        return self._busy > 0
+
+    @contextlib.asynccontextmanager
+    async def paused(self) -> AsyncIterator[None]:
+        """Wait for messages being answered to finish, and hold new ones until this ends.
+
+        For changing the tools: a message is always answered with the same set throughout.
+        """
+        async with self._pausing:
+            self._open.clear()
+            try:
+                await self._idle.wait()
+                yield
+            finally:
+                self._open.set()
+
+    @contextlib.asynccontextmanager
+    async def _working(self) -> AsyncIterator[None]:
+        while not self._open.is_set():
+            await self._open.wait()
+        self._busy += 1
+        self._idle.clear()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            if not self._busy:
+                self._idle.set()
 
     # -- prompt construction ----------------------------------------------------------
 
@@ -109,21 +156,22 @@ class Agent:
 
     # -- tools --------------------------------------------------------------------------
 
-    async def _run_tool(self, call: ToolCall, confirm: ConfirmFn | None, task: Task) -> str:
+    async def _run_tool(self, call: ToolCall, confirm: ConfirmFn | None, task: Task) -> tuple[str, str]:
+        """Run a tool call. Returns what the model is told, and what happened: RAN, FAILED or DECLINED."""
         tool = self.tools.get(call.name)
         if tool is None:
-            return f"Error: there is no tool called '{call.name}'."
+            return f"Error: there is no tool called '{call.name}'.", FAILED
         if call.arguments is None:
-            return f"Error: the arguments were not valid JSON: {call.raw_arguments[:200]}"
+            return f"Error: the arguments were not valid JSON: {call.raw_arguments[:200]}", FAILED
         if tool.needs_confirmation:
             if confirm is None:
-                return "Error: this action needs the user's approval, which can't be requested here."
+                return "Error: this action needs the user's approval, which can't be requested here.", FAILED
             summary = None
             if tool.preview:
                 try:
                     summary = await asyncio.wait_for(tool.preview(call.arguments), self.cfg.tool_timeout_seconds)
                 except Exception as exc:  # nothing has been done, and the user hasn't been asked
-                    return self._tool_error(call.name, exc)
+                    return self._tool_error(call.name, exc), FAILED
             try:
                 with task.approval(tool.name):
                     approved = await confirm(tool.name, call.arguments, summary)
@@ -131,17 +179,18 @@ class Agent:
                 log.warning("Confirmation request failed: %s", exc)
                 approved = False
             if not approved:
-                return "The user declined this action. Don't retry it unless they ask."
+                return "The user declined this action. Don't retry it unless they ask.", DECLINED
         task.using(tool.name)
         try:
             result = await asyncio.wait_for(tool.handler(call.arguments), self.cfg.tool_timeout_seconds)
         except Exception as exc:
-            return self._tool_error(call.name, exc)
+            return self._tool_error(call.name, exc), FAILED
         result = result if isinstance(result, str) else json.dumps(result, default=str)
         limit = self.cfg.max_tool_result_chars
         if len(result) > limit:
             result = result[:limit] + f"\n[...truncated {len(result) - limit} characters]"
-        return result or "(no output)"
+        # An MCP server's own errors come back as text starting "Error:" (see mcp_manager.result_to_text).
+        return result or "(no output)", FAILED if result.startswith("Error:") else RAN
 
     def _tool_error(self, name: str, exc: Exception) -> str:
         """What the model is told when a tool fails. Call it from the `except` block."""
@@ -162,13 +211,17 @@ class Agent:
         lock = self._locks[chat_id]
         if lock.locked():
             return None
-        async with lock:
+        async with self._working(), lock:
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 *self.history.load(chat_id),
                 {"role": "user", "content": "Hi"},  # the next message goes here; only what's before it is reused
             ]
-            return await self.llm.chat(messages, self.tools.schemas() or None, max_tokens=1)
+            session = self.history.session.id
+            reply = await self.llm.chat(messages, self.tools.schemas() or None, max_tokens=1)
+            if self.stats and reply.prompt_tokens:  # how much the conversation takes up, for the dashboard
+                self.stats.note_context(session, reply.prompt_tokens)
+            return reply
 
     async def respond(
         self,
@@ -178,17 +231,45 @@ class Agent:
         confirm: ConfirmFn | None = None,
         on_tool: ToolEventFn | None = None,
         note: str | None = None,
+        channel: str = "",
     ) -> AgentResult:
-        """Answer ``text``. ``note`` goes in the context block for this message only, e.g. how it was sent."""
-        async with self._locks[chat_id]:
+        """Answer ``text``. ``note`` goes in the context block for this message only, e.g. how it was sent.
+
+        ``channel`` says where it came from, such as "Siri", for the usage statistics.
+        """
+        async with self._working(), self._locks[chat_id]:
             task = self.status.begin(text)
+            record = QueryRecord(session=self.history.session.id, channel=channel or self.status.channel)
             try:
-                result = await self._respond(chat_id, text, task, confirm, on_tool, note)
+                result = await self._respond(chat_id, text, task, confirm, on_tool, note, record)
             except BaseException as exc:  # including cancellation, so the board never sticks on "working"
                 task.finish(exc)
+                record.error = describe_error(exc)
                 raise
+            finally:
+                self._record(record)
             task.finish()
-            return result
+        if result.saved and self.on_saved:
+            self.on_saved()
+        return result
+
+    def _record(self, record: QueryRecord) -> None:
+        if not self.stats:
+            return
+        record.seconds = time.time() - record.started
+        try:
+            self.stats.record(record)
+        except Exception:  # statistics mustn't get in the way of an answer
+            log.exception("Couldn't record usage statistics")
+
+    async def _chat(self, record: QueryRecord, messages: list[dict[str, Any]], schemas: Any) -> LLMReply:
+        reply = await self.llm.chat(messages, schemas)
+        record.model_calls += 1
+        record.prompt_tokens = max(record.prompt_tokens, reply.prompt_tokens or 0)
+        record.completion_tokens += reply.completion_tokens or 0
+        if reply.prompt_tokens:
+            record.context_tokens = reply.prompt_tokens + (reply.completion_tokens or 0)
+        return reply
 
     async def _respond(
         self,
@@ -198,6 +279,7 @@ class Agent:
         confirm: ConfirmFn | None,
         on_tool: ToolEventFn | None,
         note: str | None,
+        record: QueryRecord,
     ) -> AgentResult:
         started = time.monotonic()
         memories = await self._recall(text)
@@ -213,7 +295,7 @@ class Agent:
 
         for _ in range(self.cfg.max_tool_rounds):
             task.thinking()
-            reply = await self.llm.chat(messages, schemas)
+            reply = await self._chat(record, messages, schemas)
             result.model_calls += 1
             if not reply.tool_calls:
                 result.text = reply.content
@@ -226,8 +308,9 @@ class Agent:
                 }
             )
             for call in reply.tool_calls:
-                output = await self._run_tool(call, confirm, task)
+                output, outcome = await self._run_tool(call, confirm, task)
                 result.tools_used.append(call.name)
+                record.tools.append((call.name, outcome))
                 log.info("tool %s(%s) -> %s", call.name, call.raw_arguments[:200], output[:200].replace("\n", " "))
                 if on_tool:
                     await on_tool(call.name, call.arguments or {}, output)
@@ -235,13 +318,15 @@ class Agent:
         else:
             # Out of tool rounds: ask for a final answer with tools switched off.
             task.thinking()
-            reply = await self.llm.chat(messages, None)
+            reply = await self._chat(record, messages, None)
             result.model_calls += 1
             result.text = reply.content
 
         if not result.text.strip():
             result.text = "Sorry, I didn't manage to produce an answer. Could you rephrase that?"
+            record.error = "No answer"
         else:
             self.history.append_exchange(chat_id, text, result.text)
+            result.saved = True
         result.elapsed = time.monotonic() - started
         return result

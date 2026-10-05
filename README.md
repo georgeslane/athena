@@ -25,9 +25,11 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Tool calling with MCP**: connects to any MCP server, on the Pi, on your Mac over SSH, or remote over HTTP. Per-server filters choose which tools the model sees.
 - **A general assistant**: [recommended servers](#mcp-servers) let it search and read files on your Mac, use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own. Built-in tools read your [Trading 212](#trading-212) account and place the trades you approve, and query [SQLite databases](#databases) you choose.
 - **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
-- **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`. Related memories are also added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
+- **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions. Related memories are added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
+- **Sessions**: `/session` clears the conversation from the model's context, so replies stay quick, while the memory keeps everything you've talked about.
 - **Your notes as memory**: `pi-assistant ingest ~/notes` indexes Markdown and text files so the assistant can search them.
-- **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
+- **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
+- **A dashboard**: a web page for your iPhone or Mac, over Tailscale. It shows what Athena is doing, how much it's used and how full the model's context is, for the session and in total. From it you can switch tools and MCP servers on and off, set them up and give them keys, without editing `config.toml`. See [Dashboard](#dashboard).
 - **A status board**: with a Pimoroni Display HAT Mini, the Pi's screen shows what the assistant is doing: idle, working on your request, or waiting for your approval. The board is its own service, [pi-display-microservice](#status-board), which reads Athena's status API.
 - **SSH-friendly tools**: `pi-assistant doctor` checks every connection, `pi-assistant chat` gives you a terminal chat, and `pi-assistant eval` compares models on tool calling.
 
@@ -56,6 +58,7 @@ Then:
 4. **Try it in the terminal:** run `uv run pi-assistant chat`.
 5. **Start the bot:** run `sudo systemctl start pi-assistant`, and follow its logs with `journalctl -u pi-assistant -f`.
 6. **Lock it down:** message your bot. Because no users are allowed yet, it replies with your Telegram user ID. Put that ID in `telegram.allowed_user_ids` and run `sudo systemctl restart pi-assistant`.
+7. **Open the dashboard** on your phone or Mac: see [Dashboard](#dashboard).
 
 > oMLX must accept connections from the Pi, not just from `localhost`, and should have an API key set. `doctor` tells you if the Pi can't reach it.
 
@@ -65,12 +68,12 @@ Then:
 
 | Command | What it does |
 |---|---|
-| `/reset` | Start a fresh conversation. Long-term memories are kept. |
+| `/session` | Start a new session: the conversation so far is cleared from the model's context, in every chat. Memories are kept, and earlier conversations can still be searched. `/reset` does the same. |
 | `/remember <fact>` | Save a fact directly. |
 | `/recall [query]` | Search memories, with similarity scores. With no query it shows the most recent. |
 | `/forget <id>` | Delete a memory. |
 | `/tools` | List tools and the status of each MCP server. |
-| `/reload` | Reconnect to MCP servers, for example after the Mac restarts. |
+| `/reload` | Read the tools' settings in `config.toml` again and reconnect to MCP servers, for example after the Mac restarts. |
 | `/status` | Model server, memory and tool health. |
 
 **Command line** (run from the repo with `uv run pi-assistant <command>`):
@@ -83,6 +86,36 @@ Then:
 | `ingest PATH...` | Add `.md`/`.txt` files or folders to memory. Re-running a file replaces its old chunks. |
 | `reindex` | Re-embed everything after changing the embeddings model. |
 | `eval -m MODEL [-m MODEL2]` | Compare models on tool calling (see below). |
+
+## Dashboard
+
+A web page for Athena, on your iPhone or Mac. It has two tabs:
+
+- **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory.
+- **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
+
+It follows your device's light or dark mode. In Safari on an iPhone, Share > Add to Home Screen makes it an app.
+
+### Set it up
+
+The bot serves the dashboard on the Pi only, at `http://127.0.0.1:8092`. Tailscale Serve makes it reachable from your own devices, and from nowhere else, over HTTPS:
+
+```bash
+sudo tailscale serve --bg --https=443 localhost:8092
+grep DASHBOARD_TOKEN .env   # the password, which Athena made the first time it started
+```
+
+Then open `https://<the Pi's tailnet name>/`, such as `https://pi.tail1234.ts.net/`, and sign in. If HTTPS isn't on for your tailnet yet, the first command gives a link to turn it on. Siri's endpoint keeps working alongside it, on plain HTTP.
+
+You stay signed in for 90 days. To change the password, set `DASHBOARD_TOKEN` in `.env` to at least 12 characters and restart the service. That signs every device out.
+
+### Sessions and context
+
+Athena keeps the conversation going from one message to the next, so each reply can build on the last. All of it counts towards the model's context, and the more there is, the longer the Mac takes to read it. A **session** is everything since you last started one: send `/session` in Telegram, or press **New session** on the dashboard. The conversation is cleared from the model's context in every chat, and Athena carries on with its memories. Every exchange is also kept in memory, so Athena can still search what you talked about in earlier sessions.
+
+**Context** on the dashboard is what Athena reads before your next message: the system prompt, the tools' descriptions and this session's conversation. Athena measures it after each reply, when it warms up the model server's cache. The limit comes from the model server. If yours doesn't say, set `llm.context_window` in `config.toml`.
+
+**Forget everything**, under Memory, deletes every memory: saved facts, the chunks of your notes, past exchanges and the conversation history. It also starts a new session. Usage statistics stay, because they're only counts and timings.
 
 ## Status board
 
@@ -160,6 +193,8 @@ The token is stored in the shortcut, which iCloud syncs between your devices. Ta
 
 ## MCP servers
 
+The [dashboard](#dashboard)'s Tools tab is the easy way to switch servers on and off, set them up and add new ones: it edits `config.toml` for you. This section is about the settings behind it, for doing it by hand.
+
 Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has either `command` (a local server spoken to over stdio) or `url` (a remote server over Streamable HTTP; URLs ending in `/sse` use the older SSE transport). Optional settings:
 
 - `include`, `exclude` and `confirm` take glob patterns matched against the server's tool names.
@@ -168,11 +203,11 @@ Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has eithe
 - `env` passes extra environment variables to a local server. Local servers otherwise get only a minimal environment, so your Telegram token isn't exposed to them.
 - `enabled = false` keeps a server's settings without starting it.
 
-After changing servers, restart the service (`sudo systemctl restart pi-assistant`) and check them with `uv run pi-assistant doctor`. Each local server's stderr is written to `data/logs/mcp-<name>.log`. If a server on the Mac stops answering, for example after the Mac restarts, send `/reload`.
+After changing servers by hand, send `/reload` in Telegram, which reads the tools' settings in `config.toml` again, or press **Reconnect all** on the dashboard. Check them with `uv run pi-assistant doctor`. Each local server's stderr is written to `data/logs/mcp-<name>.log`. If a server on the Mac stops answering, for example after the Mac restarts, send `/reload`.
 
 ### Recommended servers
 
-`config.example.toml` has each of these ready to copy into your `config.toml`, switched off until you set it up. To add others, see [Adding a server](#adding-a-server).
+The dashboard lists each of these, ready to switch on, and `config.example.toml` has them ready to copy into your `config.toml`, switched off until you set them up. To add others, see [Adding a server](#adding-a-server).
 
 | For | Server | Runs on | Asks first |
 |---|---|---|---|
@@ -194,7 +229,7 @@ Versions are pinned, as in `mcp-email-server==1.11.0`, so a new release can't ch
 
 Tools only run when the model uses them, but every tool's description is part of every prompt, so the model knows what it can use. With everything above switched on, the descriptions come to about 10,000 tokens, against about 1,300 for the system prompt and the first three servers. Email, SEC filings and GitHub account for two-thirds of that, while Trading 212's five tools add about 650 and the database tools about 200.
 
-On most messages that costs almost nothing, because oMLX caches the part of the prompt it has already read, and the assistant keeps the cache warm: at startup, after `/reload`, and every 10 minutes (`llm.warm_up_minutes`). But when the cache is cold, for example just after the Mac restarts, the next message waits while the Mac reads the whole prompt again. On an M1 Pro that could be a minute with every server on. To see what yours costs, run `doctor`: its last section measures how many tokens the tools add, how long your Mac takes to read them, and whether oMLX's cache is working. If it's slow, switch off servers you rarely use, or narrow their `include` lists.
+On most messages that costs almost nothing, because oMLX caches the part of the prompt it has already read, and the assistant keeps the cache warm: at startup, after each reply, when the tools change, and every 10 minutes (`llm.warm_up_minutes`). But when the cache is cold, for example just after the Mac restarts, the next message waits while the Mac reads the whole prompt again. On an M1 Pro that could be a minute with every server on. To see what yours costs, run `doctor`: its last section measures how many tokens the tools add, how long your Mac takes to read them, and whether oMLX's cache is working. If it's slow, switch off servers you rarely use, or narrow their `include` lists.
 
 ### Your Mac: files, Calendar and Reminders
 
@@ -217,7 +252,7 @@ Two servers run on your Mac: `mac_files` from this repo, which can search folder
    ```
 
 4. **On the Mac**, open iMCP. Turn on Calendar and Reminders only, allow access when macOS asks, and turn on "Start at login" in its settings.
-5. **On the Pi**, run `ssh athena-mac hello`. It should say there's no server called 'hello', which means the key works. Then set `enabled = true` on `files` and `apple` in `config.toml`, restart the service and run `doctor`.
+5. **On the Pi**, run `ssh athena-mac hello`. It should say there's no server called 'hello', which means the key works. Then switch on **Files on your Mac** and **Calendar and Reminders** on the dashboard's Tools tab, and run `doctor`.
 6. **On the Mac**, the first time the Pi uses each server, macOS asks for access to your folders (for "python3") and to the local network (for "imcp-server"). Allow them, over Screen Sharing if the Mac has no screen.
 
 The Mac needs to stay on and logged in. After updating the repo on the Mac, run `scripts/mac/install.sh` again, without options to keep the same folders. `bash scripts/mac/install.sh --uninstall` removes it all, including the Pi's key.
@@ -237,7 +272,7 @@ To set it up:
 1. In the Trading 212 app, go to **Settings > API (Beta)** and generate a key. The API works with Invest and Stocks ISA accounts.
 2. Choose its permissions: account data, portfolio, history, metadata and reading orders. To trade, also allow executing orders. Leave pies off: Athena doesn't use them.
 3. Restrict it to trusted IPs, and give your home's public address, which `curl -s https://api.ipify.org` on the Pi prints. Then the key is useless anywhere else. If your provider changes your address, the key stops working until you update it, and `doctor` will tell you.
-4. Put the key and its secret in `.env` as `TRADING212_API_KEY` and `TRADING212_API_SECRET`, set `enabled = true` under `[trading212]` in `config.toml`, restart and run `doctor`. It checks the key and lists any permissions it's missing.
+4. On the dashboard's Tools tab, open **Trading 212**, paste the key and its secret, and switch it on. (Or put them in `.env` as `TRADING212_API_KEY` and `TRADING212_API_SECRET`, set `enabled = true` under `[trading212]` in `config.toml` and send `/reload`.) Then run `doctor`: it checks the key and lists any permissions it's missing.
 
 Orders are for a number of shares, which can be a fraction: Trading 212's API doesn't take orders by amount. Limit and stop prices are in the instrument's own currency, which is pence (GBX) for most London shares. The API only gives prices for what you hold, so for anything else ask Athena to look the price up first. To practise, make a key in Trading 212's practice mode and set `environment = "demo"`.
 
@@ -249,7 +284,7 @@ They can only read, and SQLite itself enforces that. Each file is opened read-on
 
 ### Company filings
 
-[EdgarTools](https://github.com/dgunning/edgartools) searches and reads filings to the US Securities and Exchange Commission: annual and quarterly reports, financial statements, insider trades and fund holdings. The SEC asks callers to say who they are, so set `EDGAR_IDENTITY` in `.env` to your name and email, like `Jane Doe jane@example.com`.
+[EdgarTools](https://github.com/dgunning/edgartools) searches and reads filings to the US Securities and Exchange Commission: annual and quarterly reports, financial statements, insider trades and fund holdings. The SEC asks callers to say who they are, so give your name and email, like `Jane Doe jane@example.com`: on the dashboard, or as `EDGAR_IDENTITY` in `.env`.
 
 It needs about 300 MB of Python packages, mostly data libraries, which take longer to install on a Pi than the assistant waits for a server to start. So install them before switching it on:
 
@@ -261,13 +296,13 @@ uvx --from "edgartools[ai]==5.60.0" edgartools-mcp --help
 
 This uses the server GitHub hosts, in read-only mode with lockdown on. Lockdown hides text in issues and pull requests from people without push access to the repo, which is where instructions aimed at an assistant would most likely be hidden.
 
-Make a [fine-grained token](https://github.com/settings/personal-access-tokens/new) with **Public repositories (read-only)** access and an expiry date, and set it as `GITHUB_TOKEN` in `.env`. It can't see your private repositories or change anything, even if someone got hold of it.
+Make a [fine-grained token](https://github.com/settings/personal-access-tokens/new) with **Public repositories (read-only)** access and an expiry date, and paste it into **GitHub** on the dashboard, or set it as `GITHUB_TOKEN` in `.env`. It can't see your private repositories or change anything, even if someone got hold of it.
 
 ### Email
 
 Give the assistant an email address of its own, with any provider that offers IMAP, SMTP and app passwords, such as Fastmail, iCloud Mail or Gmail with 2-Step Verification. Then it can't read your own mail, and its password only opens its own mailbox. Forward it anything you'd like it to read.
 
-Put the app password in `.env` as `EMAIL_PASSWORD`, and the address and your provider's IMAP and SMTP servers in the `email` block. Two settings in that block are enforced by the email server itself, whatever the model asks for and whatever you approve:
+On the dashboard, open **Email** and fill in the address, your provider's IMAP and SMTP servers and the app password, which goes in `.env` as `EMAIL_PASSWORD`. Or put them in the `email` block of `config.toml` yourself. Two settings in that block are enforced by the email server itself, whatever the model asks for and whatever you approve:
 
 - `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`: who it may email, comma-separated, with `*` as a wildcard. Start with just your own address.
 - `MCP_EMAIL_SERVER_ALLOWED_MUTATIONS = "send"`: it can send, but never delete, move, flag or draft.
@@ -280,7 +315,7 @@ To give the assistant a new ability, look for an MCP server that provides it. Mo
 
 1. **Choose carefully.** A server sees whatever the assistant passes it and can act on your behalf. Prefer one from the service's own makers, or one that's widely used and recently updated, and read what each of its tools does.
 2. **Give it as little as possible.** Use its read-only mode if it has one, and give it a token or account that can only do what you need. Use any limits the server itself enforces, like the email server's allowed recipients.
-3. **Add it to `config.toml`:**
+3. **Add it** on the dashboard (Tools > Add a server), or to `config.toml`:
 
    ```toml
    [mcp_servers.weather]
@@ -296,7 +331,7 @@ To give the assistant a new ability, look for an MCP server that provides it. Mo
    - **Servers that need your Mac's apps or files** run on the Mac. Add a line to `SERVERS` at the top of `scripts/mac/install.sh` and run it again on the Mac. Then on the Pi, use `command = "ssh"` and `args = ["athena-mac", "<its name>"]`.
    - **`confirm`:** leave it out, so every tool asks first, unless the tools only read your own data or look things up in public sources. Anything that changes something, or can send to anyone (email, messages, any URL), should ask.
 4. **Check it:**
-   - Restart the service (`sudo systemctl restart pi-assistant`), then run `uv run pi-assistant doctor`. It lists the server's tools and shows how much they add to every prompt.
+   - On the dashboard, open the server to see its tools, and choose which Athena can use and which ask first. Or send `/reload`, then run `uv run pi-assistant doctor`, which lists the server's tools and shows how much they add to every prompt.
    - Send `/tools` in Telegram to see them there too.
    - Run `uv run pi-assistant eval -m <your model>` to check the model still picks the right tools.
 
@@ -306,8 +341,10 @@ To update a server later, read what changed, change its pinned version and resta
 
 - **Auto-recall:** before each message, the closest memories (up to `recall_top_k`, within `recall_max_distance`) go into a `<context>` block together with the current time. Use `/recall something` to see similarity scores. If unrelated memories keep appearing, lower `recall_max_distance`. If relevant ones are missed, raise it.
 - **Saving:** the model saves durable facts on its own, guided by `prompts/system.md`. `/remember` lets you add them yourself.
+- **Past conversations:** after each reply, your message and the reply are added to memory, in an index of their own. `search_memory` finds them, so Athena can look up what you talked about in an earlier session, but they aren't added to messages automatically, so an old answer can't be mistaken for a current one. Anything said while the embeddings server was down is added when it's back.
+- **Forgetting:** `/forget <id>` deletes one memory. **Forget everything** on the dashboard deletes them all, with the conversation history.
 - **Embeddings model:** `embeddinggemma` (768 dimensions, about 600 MB of RAM) runs on the Pi's CPU through Ollama. To switch models, change `[embeddings]` and run `pi-assistant reindex`. If you change `dimensions`, start a fresh database instead.
-- **Storage:** everything (history and memory) lives in `data/assistant.db`. Back up that one file.
+- **Storage:** everything (history, memory and usage statistics) lives in `data/assistant.db`. Back up that one file.
 
 ## Choosing a model
 
@@ -371,8 +408,11 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/mac_files.py` | The read-only files server that runs on your Mac |
 | `src/pi_assistant/news.py` | The built-in news reader |
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
-| `src/pi_assistant/webserver.py` | The small HTTP server behind Siri's endpoint and the status API |
-| `src/pi_assistant/assets/` | The Athena icon |
+| `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, and the page itself (plain HTML, CSS and JavaScript) |
+| `src/pi_assistant/settings.py` | What the dashboard's Tools tab can change, and how it edits `config.toml` and `.env` |
+| `src/pi_assistant/stats.py` | Usage statistics, per session and in total |
+| `src/pi_assistant/webserver.py` | The small HTTP server behind Siri's endpoint, the status API and the dashboard |
+| `src/pi_assistant/assets/` | The Athena icon, used by the dashboard and this README |
 | `src/pi_assistant/doctor.py`, `evals.py`, `cli.py` | Command-line tools |
 | `prompts/system.md` | System prompt. Point `agent.system_prompt_file` at a `*.local.md` copy to customise it privately. |
 | `scripts/install.sh`, `scripts/update.sh`, `deploy/` | Pi setup and updates |
@@ -385,6 +425,9 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - **The model answers instead of using tools:** check that tool calling works in `doctor`, then compare models with `eval`.
 - **The bot ignores you:** your ID isn't in `telegram.allowed_user_ids`. Empty the list temporarily to get your ID.
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
+- **The dashboard doesn't load:** run `doctor` and see what it says under "Dashboard". If it's answering there, check `sudo tailscale serve status` shows `localhost:8092`, and that Tailscale is connected on your phone or Mac.
+- **The dashboard says "Can't reach Athena":** the service has stopped or is restarting. `journalctl -u pi-assistant -f` says why.
+- **A server's switch won't stay on:** the dashboard says what it needs first, such as a key. If it's on but shows an error, open it: the error and the server's log (`data/logs/mcp-<name>.log`) usually say why.
 - **The status board says "Offline" while Athena runs:** run `doctor` and see what it says under "Status API". Problems with the board itself are covered in pi-display-microservice's README.
 - **`zsh: no such file or directory: …/Library/Application`:** the Mac was set up by a version of `scripts/mac/install.sh` with a quoting bug. On the Mac, pull the repo and run `bash scripts/mac/install.sh` again: it keeps your folders and the Pi's key.
 - **A server on the Mac fails:** run `ssh athena-mac hello` on the Pi. If that doesn't say there's no server called 'hello', the problem is SSH: check Remote Login is on and the Mac is awake. If it does, check `~/Library/Logs/Athena/` on the Mac, and that iMCP is running.
@@ -403,8 +446,9 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - Reading your Trading 212 account doesn't ask, but placing or cancelling an order always does, and that can't be switched off. The key's own permissions have the last word: without permission to execute orders it can't trade at all, and restricted to your IP address it's useless anywhere else.
 - SQLite databases are opened read-only, and SQLite itself refuses anything but reading, so a query can't change them or write files.
 - The Siri endpoint is off unless you turn it on. It listens only on the Pi itself, Tailscale Serve passes on requests from your tailnet, and each request needs the token. Anyone with both can ask Athena anything you could, so keep the token private.
+- The dashboard only listens on the Pi itself, and Tailscale Serve passes on requests from your tailnet. Everything but the sign-in page needs its password. Changes are only accepted from the dashboard's own page, so another website can't make them with your cookie. Keys you enter go into `.env` and are never sent back to the browser. The dashboard can't change Athena's own secrets (the Telegram token, the model's API key, the Siri token and its own password) or pass them to a server. Anyone with the password can add an MCP server, which runs a command on the Pi, so keep it as private as an SSH password.
 - The status API includes the start of your latest message, for the status board. It only listens on the Pi itself unless you set `host`, and then it needs a token. If other people can see the screen, set `show_task = false` under `[display]`.
 
 ## License
 
-MIT. The fonts in `src/pi_assistant/assets/fonts` (Cinzel and Inter) are under the SIL Open Font License; their licence files are next to them.
+MIT.

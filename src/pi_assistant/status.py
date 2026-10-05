@@ -1,4 +1,4 @@
-"""What the assistant is doing right now, for the status board.
+"""What the assistant is doing right now, for the status board and the dashboard.
 
 The agent keeps a StatusTracker up to date as it works, and status_api.py serves it
 over HTTP. The status board itself is a separate service (pi-display-microservice) that asks
@@ -8,8 +8,10 @@ the board knows the assistant isn't running.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
+import secrets
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -107,14 +109,14 @@ class Task:
 
 
 class StatusTracker:
-    """Tracks what the agent is doing and reports every change to ``on_change``."""
+    """Tracks what the agent is doing and reports every change to each of ``listeners``."""
 
     def __init__(self, *, show_task: bool = True, clock: Callable[[], float] = time.time):
         self.show_task = show_task
         self.clock = clock
         self.channel = ""  # set by the front end, e.g. "Telegram"
         self.approval_timeout = 0.0  # seconds before an unanswered approval is denied (0: no limit)
-        self.on_change: Callable[[Snapshot], None] | None = None
+        self.listeners: list[Callable[[Snapshot], None]] = []
         self._tasks: list[Task] = []
         self._last: tuple[str, str, float] = ("", "", 0.0)  # previous task, its error, when it ended
         self._published: Snapshot | None = None
@@ -154,5 +156,49 @@ class StatusTracker:
         if snapshot == self._published:
             return
         self._published = snapshot
-        if self.on_change:
-            self.on_change(dataclasses.replace(snapshot, updated=self.clock()))
+        stamped = dataclasses.replace(snapshot, updated=self.clock())
+        for listener in list(self.listeners):
+            listener(stamped)
+
+
+class StatusFeed:
+    """The tracker's status, with a version that changes with it, so a reader can wait for the next change.
+
+    Versions look like "3f9a1c2e-17". The part before the dash is new each time a feed
+    starts, so a version from before Athena restarted never matches.
+    """
+
+    def __init__(self, tracker: StatusTracker):
+        self.tracker = tracker
+        self._boot = secrets.token_hex(4)
+        self._changes = 0
+        self.snapshot = Snapshot()
+        self._changed = asyncio.Event()
+        self.running = False
+
+    @property
+    def version(self) -> str:
+        return f"{self._boot}-{self._changes}"
+
+    def start(self) -> None:
+        self.running = True
+        self._publish(dataclasses.replace(self.tracker.snapshot(), updated=self.tracker.clock()))
+        self.tracker.listeners.append(self._publish)
+
+    def stop(self) -> None:
+        if self.running:
+            self.tracker.listeners.remove(self._publish)
+            self.running = False
+            self._changed.set()  # so readers that are waiting hear now, not when their wait runs out
+
+    async def wait(self, after: str | None, timeout: float) -> None:
+        """Wait up to ``timeout`` seconds for the version to move on from ``after``. Returns at once if it has."""
+        if timeout > 0 and after == self.version and self.running:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._changed.wait(), timeout)
+
+    def _publish(self, snapshot: Snapshot) -> None:
+        self.snapshot = snapshot
+        self._changes += 1
+        changed, self._changed = self._changed, asyncio.Event()
+        changed.set()

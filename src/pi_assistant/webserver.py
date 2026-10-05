@@ -1,4 +1,4 @@
-"""A small HTTP/1.1 server for the assistant's own endpoints: Siri's and the status API's.
+"""A small HTTP/1.1 server for the assistant's own endpoints: Siri's, the status API's and the dashboard's.
 
 Standard library only. Each connection carries one request, which is read in full,
 within limits on its size and how long it may take, answered, and closed.
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass
-from urllib.parse import parse_qsl
+from dataclasses import dataclass, field
+from urllib.parse import parse_qsl, unquote
 
 MAX_REQUEST_BYTES = 16_384  # per line, and for the body
 MAX_DISCARD_BYTES = 1_048_576  # how much of a too-long body is read before saying so
@@ -17,12 +17,18 @@ MAX_HEADERS = 64
 READ_TIMEOUT_SECONDS = 10.0
 REASONS = {
     200: "OK",
+    304: "Not Modified",
     400: "Bad Request",
     401: "Unauthorized",
+    403: "Forbidden",
     404: "Not Found",
     405: "Method Not Allowed",
+    409: "Conflict",
     413: "Content Too Large",
+    415: "Unsupported Media Type",
+    429: "Too Many Requests",
     500: "Internal Server Error",
+    503: "Service Unavailable",
 }
 
 
@@ -44,8 +50,11 @@ class Request:
 
 @dataclass
 class Response:
-    body: str
+    body: str | bytes
     content_type: str = "text/plain; charset=utf-8"
+    status: int = 200
+    # Sent as well as Content-Type and Content-Length. Cache-Control is no-store unless given here.
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 class Server:
@@ -78,20 +87,21 @@ class Server:
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             try:
-                status, response = 200, await self.handle(await read_request(reader, writer))
+                response = await self.handle(await read_request(reader, writer))
             except HTTPError as exc:
-                status, response = exc.status, Response(exc.text)
+                response = Response(exc.text, status=exc.status)
             except (ValueError, asyncio.IncompleteReadError):  # malformed, too long, or cut short
-                status, response = 400, Response("Bad request.")
-            body = response.body.encode()
+                response = Response("Bad request.", status=400)
+            body = response.body.encode() if isinstance(response.body, str) else response.body
+            headers = {"Cache-Control": "no-store", **response.headers}
             head = (
-                f"HTTP/1.1 {status} {REASONS[status]}\r\n"
+                f"HTTP/1.1 {response.status} {REASONS[response.status]}\r\n"
                 f"Content-Type: {response.content_type}\r\n"
                 f"Content-Length: {len(body)}\r\n"
-                "Cache-Control: no-store\r\n"
-                "Connection: close\r\n\r\n"
+                + "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+                + "Connection: close\r\n\r\n"
             )
-            writer.write(head.encode() + body)
+            writer.write(head.encode("latin-1") + body)
             await writer.drain()
         except (ConnectionError, TimeoutError):
             pass  # the other end went away or was too slow to send its request
@@ -117,7 +127,7 @@ async def read_request(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     params: dict[str, str] = {}
     for name, value in parse_qsl(query):
         params.setdefault(name, value)
-    return Request(method, path, params, headers, body)
+    return Request(method, unquote(path), params, headers, body)
 
 
 async def _read_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str]) -> bytes:

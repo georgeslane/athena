@@ -1,13 +1,19 @@
 """Long-term memory: an embeddings model plus a SQLite vector store (sqlite-vec).
 
-Two kinds of entries share one index:
-  * facts     - short statements the assistant saves with the ``remember`` tool
-  * documents - chunks of your own notes, added with ``pi-assistant ingest``
+Three kinds of entries:
+  * facts         - short statements the assistant saves with the ``remember`` tool
+  * documents     - chunks of your own notes, added with ``pi-assistant ingest``
+  * conversations - each message you've sent and Athena's reply, added after it answers
+
+Facts and documents share one index, which is searched automatically for every message.
+Conversations have an index of their own, searched only when the model asks
+(``search_memory``), so an old answer isn't mistaken for a current one.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -16,7 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import sqlite_vec
 from openai import AsyncOpenAI
@@ -24,7 +30,14 @@ from openai import AsyncOpenAI
 from pi_assistant.config import EmbeddingsConfig, MemoryConfig
 from pi_assistant.tools import Tool
 
-Kind = Literal["fact", "document"]
+if TYPE_CHECKING:
+    from pi_assistant.history import ConversationStore, Exchange
+
+log = logging.getLogger(__name__)
+
+Kind = Literal["fact", "document", "conversation"]
+VECTOR_TABLES = {"fact": "memory_vectors", "document": "memory_vectors", "conversation": "conversation_vectors"}
+INDEXED_TO = "conversations_indexed_to"  # memory_meta: the last message whose exchange is in memory
 TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".text", ".org", ".rst"}
 DUPLICATE_DISTANCE = 0.04  # facts closer than this to an existing fact are treated as duplicates
 
@@ -135,14 +148,15 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS memory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 """
             )
-            self._conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors "
-                f"USING vec0(embedding float[{self.dimensions}] distance_metric=cosine)"
-            )
+            for table in sorted(set(VECTOR_TABLES.values())):
+                self._conn.execute(
+                    f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} "
+                    f"USING vec0(embedding float[{self.dimensions}] distance_metric=cosine)"
+                )
             meta = dict(self._conn.execute("SELECT key, value FROM memory_meta").fetchall())
             current = {"embedding_model": self.embedding_model, "dimensions": str(self.dimensions)}
-            if not meta:
-                self._conn.executemany("INSERT INTO memory_meta VALUES (?, ?)", current.items())
+            if "dimensions" not in meta:  # a new index
+                self._conn.executemany("INSERT OR REPLACE INTO memory_meta VALUES (?, ?)", current.items())
             elif meta.get("dimensions") != current["dimensions"]:
                 raise MemoryStoreError(
                     f"The memory index was built with {meta.get('dimensions')}-dimension embeddings "
@@ -164,48 +178,76 @@ class MemoryStore:
             )
         self.embedding_model = model
 
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM memory_meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def _insert(self, text: str, embedding: Sequence[float], kind: Kind, source: str | None, created_at: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO memories (kind, source, text, created_at) VALUES (?, ?, ?, ?)",
+            (kind, source, text, created_at),
+        )
+        self._conn.execute(
+            f"INSERT INTO {VECTOR_TABLES[kind]} (rowid, embedding) VALUES (?, ?)",
+            (cur.lastrowid, sqlite_vec.serialize_float32(list(embedding))),
+        )
+        return int(cur.lastrowid)
+
     def add(self, text: str, embedding: Sequence[float], kind: Kind, source: str | None = None) -> int:
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock, self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO memories (kind, source, text, created_at) VALUES (?, ?, ?, ?)",
-                (kind, source, text, now),
-            )
-            row_id = cur.lastrowid
+            return self._insert(text, embedding, kind, source, now)
+
+    def add_conversations(self, entries: Sequence[tuple[str, Sequence[float], str]], indexed_to: int) -> None:
+        """Add (text, embedding, created_at) for each exchange, and note the last message they cover, together."""
+        with self._lock, self._conn:
+            for text, embedding, created_at in entries:
+                self._insert(text, embedding, "conversation", None, created_at)
             self._conn.execute(
-                "INSERT INTO memory_vectors (rowid, embedding) VALUES (?, ?)",
-                (row_id, sqlite_vec.serialize_float32(list(embedding))),
+                "INSERT INTO memory_meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (INDEXED_TO, str(indexed_to)),
             )
-        return int(row_id)
 
     def replace_embedding(self, memory_id: int, embedding: Sequence[float]) -> None:
         with self._lock, self._conn:
-            self._conn.execute("DELETE FROM memory_vectors WHERE rowid = ?", (memory_id,))
+            row = self._conn.execute("SELECT kind FROM memories WHERE id = ?", (memory_id,)).fetchone()
+            table = VECTOR_TABLES.get(row[0] if row else "fact", "memory_vectors")
+            self._conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (memory_id,))
             self._conn.execute(
-                "INSERT INTO memory_vectors (rowid, embedding) VALUES (?, ?)",
+                f"INSERT INTO {table} (rowid, embedding) VALUES (?, ?)",
                 (memory_id, sqlite_vec.serialize_float32(list(embedding))),
             )
 
-    def search(self, embedding: Sequence[float], k: int, kind: Kind | None = None) -> list[MemoryHit]:
-        # Over-fetch when filtering by kind, since the KNN step can't filter.
-        fetch = k * 4 if kind else k
+    def _nearest(self, table: str, embedding: Sequence[float], k: int) -> list[MemoryHit]:
+        rows = self._conn.execute(
+            f"""
+            SELECT m.id, m.kind, m.source, m.text, m.created_at, v.distance
+            FROM (
+                SELECT rowid, distance FROM {table}
+                WHERE embedding MATCH ? AND k = ?
+            ) AS v
+            JOIN memories AS m ON m.id = v.rowid
+            ORDER BY v.distance
+            """,
+            (sqlite_vec.serialize_float32(list(embedding)), k),
+        ).fetchall()
+        return [MemoryHit(*row) for row in rows]
+
+    def search(
+        self, embedding: Sequence[float], k: int, kind: Kind | None = None, *, conversations: bool = False
+    ) -> list[MemoryHit]:
+        """The ``k`` entries nearest ``embedding``: facts and documents, plus conversations if asked."""
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT m.id, m.kind, m.source, m.text, m.created_at, v.distance
-                FROM (
-                    SELECT rowid, distance FROM memory_vectors
-                    WHERE embedding MATCH ? AND k = ?
-                ) AS v
-                JOIN memories AS m ON m.id = v.rowid
-                ORDER BY v.distance
-                """,
-                (sqlite_vec.serialize_float32(list(embedding)), fetch),
-            ).fetchall()
-        hits = [MemoryHit(*row) for row in rows]
+            if kind == "conversation":
+                return self._nearest("conversation_vectors", embedding, k)
+            # Over-fetch when filtering by kind, since the KNN step can't filter.
+            hits = self._nearest("memory_vectors", embedding, k * 4 if kind else k)
+            if conversations and not kind:
+                hits += self._nearest("conversation_vectors", embedding, k)
         if kind:
             hits = [h for h in hits if h.kind == kind]
-        return hits[:k]
+        return sorted(hits, key=lambda h: h.distance)[:k]
 
     def get(self, memory_id: int) -> MemoryHit | None:
         with self._lock:
@@ -217,15 +259,48 @@ class MemoryStore:
     def delete(self, memory_id: int) -> bool:
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-            self._conn.execute("DELETE FROM memory_vectors WHERE rowid = ?", (memory_id,))
+            for table in set(VECTOR_TABLES.values()):
+                self._conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (memory_id,))
         return cur.rowcount > 0
 
     def delete_source(self, source: str) -> int:
         with self._lock, self._conn:
             ids = [r[0] for r in self._conn.execute("SELECT id FROM memories WHERE source = ?", (source,))]
-            self._conn.executemany("DELETE FROM memory_vectors WHERE rowid = ?", [(i,) for i in ids])
+            for table in set(VECTOR_TABLES.values()):
+                self._conn.executemany(f"DELETE FROM {table} WHERE rowid = ?", [(i,) for i in ids])
             self._conn.execute("DELETE FROM memories WHERE source = ?", (source,))
         return len(ids)
+
+    def clear(self) -> None:
+        """Delete every memory, and start a fresh index for the current embeddings model.
+
+        What's deleted is overwritten on disk, not just unlinked, and the file is then
+        rebuilt without it (best effort: if another connection is busy, that waits).
+        """
+        with self._lock:
+            try:
+                self._conn.executescript(
+                    """
+                    PRAGMA secure_delete = ON;
+                    BEGIN IMMEDIATE;
+                    DROP TABLE IF EXISTS memory_vectors;
+                    DROP TABLE IF EXISTS conversation_vectors;
+                    DELETE FROM memories;
+                    DELETE FROM memory_meta;
+                    COMMIT;
+                    """
+                )
+            except sqlite3.Error:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+        self._init_schema()
+        with self._lock:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._conn.execute("VACUUM")
+            except sqlite3.OperationalError as exc:
+                log.warning("Memories deleted, but the database file couldn't be compacted: %s", exc)
 
     def recent(self, limit: int = 10, kind: Kind | None = "fact") -> list[MemoryHit]:
         sql = "SELECT id, kind, source, text, created_at, 0.0 FROM memories"
@@ -252,6 +327,19 @@ class MemoryStore:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def _title(entry: MemoryHit) -> str:
+    """The title an entry is embedded with (see EmbeddingsConfig.document_prefix)."""
+    if entry.kind == "document" and entry.source:
+        return Path(entry.source).stem
+    return "conversation" if entry.kind == "conversation" else "none"
+
+
+def conversation_text(exchange: Exchange, limit: int) -> str:
+    """How an exchange is stored in memory: both sides, cut short if they're long."""
+    text = f"User: {exchange.question.strip()}\nAssistant: {exchange.answer.strip()}"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -340,17 +428,34 @@ class MemoryService:
                 return hit.id, False
         return self.store.add(text, vector, "fact", source), True
 
-    async def search(self, query: str, k: int | None = None, kind: Kind | None = None) -> list[MemoryHit]:
+    async def search(
+        self, query: str, k: int | None = None, kind: Kind | None = None, *, conversations: bool = True
+    ) -> list[MemoryHit]:
         vector = await self.embedder.embed_one(query, "query")
-        return self.store.search(vector, k or self.cfg.search_top_k, kind)
+        return self.store.search(vector, k or self.cfg.search_top_k, kind, conversations=conversations)
 
     async def recall(self, query: str) -> list[MemoryHit]:
-        """Memories relevant enough to show the model automatically."""
-        hits = await self.search(query, self.cfg.recall_top_k)
+        """Memories relevant enough to show the model automatically: facts and documents, not old conversations."""
+        hits = await self.search(query, self.cfg.recall_top_k, conversations=False)
         return [h for h in hits if h.distance <= self.cfg.recall_max_distance]
 
     def forget(self, memory_id: int) -> bool:
         return self.store.delete(memory_id)
+
+    async def index_conversations(self, history: ConversationStore, batch: int = 16) -> int:
+        """Add exchanges that aren't in memory yet, so they can be searched later. Returns how many were added.
+
+        Each batch is added together with a note of where it got to, so if the embeddings
+        server is down, the next call carries on from there.
+        """
+        added = 0
+        while exchanges := history.exchanges_after(int(self.store.get_meta(INDEXED_TO) or 0), batch):
+            texts = [conversation_text(e, self.cfg.chunk_chars) for e in exchanges]
+            vectors = await self.embedder.embed(texts, "document", ["conversation"] * len(texts))
+            entries = [(t, v, e.created_at) for t, v, e in zip(texts, vectors, exchanges, strict=True)]
+            self.store.add_conversations(entries, indexed_to=exchanges[-1].id)
+            added += len(entries)
+        return added
 
     async def ingest_file(self, path: Path) -> int:
         text = path.read_text(errors="replace")
@@ -368,7 +473,7 @@ class MemoryService:
         entries = self.store.all_entries()
         for start in range(0, len(entries), 32):
             batch = entries[start : start + 32]
-            titles = [Path(e.source).stem if e.kind == "document" and e.source else "none" for e in batch]
+            titles = [_title(e) for e in batch]
             vectors = await self.embedder.embed([e.text for e in batch], "document", titles)
             for entry, vector in zip(batch, vectors, strict=True):
                 self.store.replace_embedding(entry.id, vector)
@@ -433,7 +538,8 @@ class MemoryService:
             Tool(
                 name="search_memory",
                 description=(
-                    "Search long-term memory: facts the user has told you and their ingested notes and documents."
+                    "Search long-term memory: facts the user has told you, their notes and documents, and your "
+                    "past conversations with them (kind 'conversation', dated when they were said)."
                 ),
                 parameters={
                     "type": "object",

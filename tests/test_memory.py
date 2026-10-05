@@ -96,3 +96,90 @@ async def test_memory_tools(memory):
     assert "Forgot memory #1" in await tools["forget_memory"].handler({"id": 1})
     assert "No memory #1" in await tools["forget_memory"].handler({"id": "1"})
     assert "Error" in await tools["forget_memory"].handler({"id": "abc"})
+
+
+# -- past conversations ---------------------------------------------------------------------------------
+
+
+def chats(tmp_path, *exchanges):
+    from pi_assistant.history import ConversationStore
+
+    history = ConversationStore(tmp_path / "history.db")
+    for question, answer in exchanges:
+        history.append_exchange("chat", question, answer)
+    return history
+
+
+async def test_past_exchanges_can_be_searched_but_arent_recalled_automatically(memory, tmp_path):
+    history = chats(
+        tmp_path,
+        ("Which restaurant did you suggest for Friday?", "Try Dishoom in King's Cross: book ahead."),
+        ("What's the weather like?", "Sunny, 21 degrees."),
+    )
+    await memory.remember("George is vegetarian.")
+    assert await memory.index_conversations(history) == 2
+    assert await memory.index_conversations(history) == 0  # each is added once
+    assert memory.store.count() == {"fact": 1, "conversation": 2}
+
+    hits = await memory.search("restaurant Friday Dishoom")
+    assert hits[0].kind == "conversation"
+    assert (
+        hits[0].text
+        == "User: Which restaurant did you suggest for Friday?\nAssistant: Try Dishoom in King's Cross: book ahead."
+    )
+    assert all(h.kind != "conversation" for h in await memory.recall("restaurant Friday Dishoom"))
+    only = await memory.search("restaurant Friday Dishoom", kind="conversation")
+    assert [h.kind for h in only] == ["conversation", "conversation"] and "Dishoom" in only[0].text
+
+    found = await {t.name: t for t in memory.tools()}["search_memory"].handler({"query": "Dishoom restaurant"})
+    assert '"kind": "conversation"' in found and "Dishoom" in found
+    history.close()
+
+
+async def test_exchanges_said_while_embeddings_were_down_are_added_later(memory, tmp_path):
+    history = chats(tmp_path, ("one", "first"), ("two", "second"))
+    real = memory.embedder.embed
+
+    async def down(*args, **kwargs):
+        raise ConnectionError("Ollama isn't running")
+
+    memory.embedder.embed = down
+    with pytest.raises(ConnectionError):
+        await memory.index_conversations(history)
+    assert memory.store.count() == {}
+    memory.embedder.embed = real
+    history.append_exchange("chat", "three", "third")
+    assert await memory.index_conversations(history) == 3
+    history.close()
+
+
+async def test_long_exchanges_are_cut_short(memory, tmp_path):
+    history = chats(tmp_path, ("tell me everything", "word " * 1000))
+    memory.cfg.chunk_chars = 200
+    await memory.index_conversations(history)
+    [entry] = memory.store.recent(kind="conversation")
+    assert len(entry.text) == 200 and entry.text.endswith("…")
+    history.close()
+
+
+async def test_forgetting_everything(memory, tmp_path):
+    history = chats(tmp_path, ("q", "a"))
+    await memory.remember("George's bike is blue.")
+    await memory.index_conversations(history)
+    memory.store.clear()
+    assert memory.store.count() == {}
+    assert await memory.search("blue bike") == []
+    assert memory.store.get_meta("dimensions") == str(memory.store.dimensions)
+    # The index works afterwards, and old exchanges aren't added back from the history.
+    await memory.remember("George's car is red.")
+    assert (await memory.search("red car"))[0].text == "George's car is red."
+    history.close()
+
+
+async def test_reindexing_includes_past_exchanges(memory, tmp_path):
+    history = chats(tmp_path, ("Where did I park?", "Level 3 of the station car park."))
+    await memory.index_conversations(history)
+    memory.embedder.cfg.model = "fake-embed-v2"
+    assert await memory.reindex() == 1
+    assert (await memory.search("park level station"))[0].kind == "conversation"
+    history.close()

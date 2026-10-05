@@ -113,4 +113,6 @@ $(printf '\033[1;32m')Done.$(printf '\033[0m') Next steps (all in $REPO_DIR):
 
 Then message your bot on Telegram. It replies with your user ID: put that in
 telegram.allowed_user_ids in config.toml and run: sudo systemctl restart pi-assistant
+
+For the dashboard on your phone or Mac, see README, "Dashboard".
 EOF

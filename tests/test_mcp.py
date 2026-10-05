@@ -125,3 +125,51 @@ async def test_streamable_http_server(http_server):
         assert await add.handler({"a": 5, "b": 6}) == "11"
     finally:
         await asyncio.wait_for(manager.stop(), 20)
+
+
+async def test_changing_one_server_leaves_the_others_connected():
+    manager = MCPManager({"one": demo_stdio(include=["add"]), "two": demo_stdio(include=["get_env"])})
+    await manager.start()
+    try:
+        one, two = (manager._connections[name].client for name in ("one", "two"))
+        [status_two] = [s for s in manager.status() if s.name == "two"]
+        assert [name for name, _ in status_two.offered] == ["add", "delete_note", "hidden_tool", "explode", "get_env"]
+
+        # Change "two", add "three", leave "one" alone.
+        await manager.configure(
+            {
+                "one": demo_stdio(include=["add"]),
+                "two": demo_stdio(include=["add"]),
+                "three": demo_stdio(include=["delete_note"], confirm=[]),
+            }
+        )
+        assert manager._connections["one"].client is one  # the same connection
+        assert manager._connections["two"].client is not two
+        assert [t.name for t in manager.tools()] == ["add", "two__add", "delete_note"]  # in config order
+        assert not manager.tools()[2].needs_confirmation
+
+        # Remove "one": its tool goes, and "two"'s add is now plain "add".
+        await manager.configure({"two": demo_stdio(include=["add"]), "three": demo_stdio(include=["delete_note"])})
+        assert [t.name for t in manager.tools()] == ["add", "delete_note"]
+        assert await manager.tools()[0].handler({"a": 1, "b": 2}) == "3"
+
+        # Switched off is the same as removed.
+        await manager.configure({"two": demo_stdio(include=["add"], enabled=False)})
+        assert manager.tools() == [] and manager.status() == []
+
+        await manager.configure({"two": demo_stdio(include=["add"])}, reconnect=True)
+        assert [t.name for t in manager.tools()] == ["add"]
+    finally:
+        await manager.stop()
+
+
+async def test_stopping_doesnt_wait_for_a_server_that_never_answers(tmp_path):
+    silent = tmp_path / "silent.py"
+    silent.write_text("import time\ntime.sleep(60)\n")  # starts, but never speaks MCP
+    manager = MCPManager({"silent": MCPServerConfig(command=sys.executable, args=[str(silent)], timeout_seconds=60)})
+    starting = asyncio.create_task(manager.start())
+    await asyncio.sleep(0.5)
+    began = time.monotonic()
+    await asyncio.wait_for(manager.stop(), 10)
+    await asyncio.wait_for(starting, 5)
+    assert time.monotonic() - began < 10 and manager.tools() == []

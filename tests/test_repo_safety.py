@@ -30,6 +30,9 @@ PRIVATE_PATHS = [
     ".env",
     ".env.local",
     "config.toml",
+    "config.toml.bak",  # the dashboard's copy of the config before its last change
+    "config.toml.tmp",  # and the config while it's being written
+    ".env.tmp",
     "data/assistant.db",
     "data/status.json",  # what you last asked the assistant, left by the old built-in status board
     "data/logs/mcp-fetch.log",

@@ -39,10 +39,12 @@ class LLMConfig(_Section):
     # Passed through untouched in the request body, for server-specific options
     # such as {"chat_template_kwargs": {"enable_thinking": false}}.
     extra_body: dict[str, Any] = Field(default_factory=dict)
-    # At startup, after /reload and then every this many minutes, have the model server
-    # read the system prompt, tools and your chat, so its cache is ready before your next
-    # message. When it's already cached this takes a moment. 0 turns it off.
+    # At startup, after each reply, after /reload and then every this many minutes, have
+    # the model server read the system prompt, tools and your chat, so its cache is ready
+    # before your next message. When it's already cached this takes a moment. 0 turns it off.
     warm_up_minutes: float = 10.0
+    # The most the model can read at once, in tokens, for the dashboard. 0: ask the model server.
+    context_window: int = 0
 
 
 class TelegramConfig(_Section):
@@ -100,9 +102,20 @@ class DisplayConfig(_Section):
     led: bool | None = None
 
 
+class DashboardConfig(_Section):
+    # A web page for Athena's status, usage and tools, served by the bot (see README, "Dashboard").
+    enabled: bool = True
+    # Tailscale Serve passes requests from your own devices on to this address.
+    host: str = "127.0.0.1"
+    port: int = 8092
+    # Its password. Athena makes one in .env, as DASHBOARD_TOKEN, if there isn't one.
+    token: str = Field(default_factory=lambda: os.environ.get("DASHBOARD_TOKEN", ""))
+
+
 class NewsConfig(_Section):
     # News feeds (RSS or Atom) the assistant can read, by name. Only these are ever
     # fetched, so reading them doesn't need your approval (see README, "News").
+    enabled: bool = True
     feeds: dict[str, str] = Field(default_factory=dict)
     cache_minutes: float = 10.0
 
@@ -120,6 +133,7 @@ class Trading212Config(_Section):
 class SQLiteConfig(_Section):
     # SQLite databases the assistant can query, by name (see README, "Databases"). Only these
     # files are ever opened, and only for reading.
+    enabled: bool = True
     databases: dict[str, str] = Field(default_factory=dict)
     max_rows: int = 100
     timeout_seconds: float = 10.0  # a query running longer than this is stopped
@@ -176,6 +190,7 @@ class Config(_Section):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     siri: SiriConfig = Field(default_factory=SiriConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     trading212: Trading212Config = Field(default_factory=Trading212Config)
@@ -184,10 +199,17 @@ class Config(_Section):
 
     # Directory containing the config file; relative paths are resolved against it.
     base_dir: Path = Field(default_factory=Path.cwd, exclude=True)
+    # The config file itself, which the dashboard edits. None if the config didn't come from a file.
+    path: Path | None = Field(default=None, exclude=True)
 
     def resolve(self, path: str | Path) -> Path:
         p = Path(path).expanduser()
         return p if p.is_absolute() else self.base_dir / p
+
+    @property
+    def env_path(self) -> Path:
+        """The .env file next to the config, where secrets live."""
+        return self.base_dir / ".env"
 
     @property
     def db_path(self) -> Path:
@@ -213,13 +235,24 @@ def load_config(path: str | Path | None = None) -> Config:
     path = Path(path or os.environ.get("PI_ASSISTANT_CONFIG") or DEFAULT_CONFIG_PATH).expanduser().resolve()
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}\nCopy config.example.toml to config.toml and edit it.")
-    # Secrets: .env next to the config. Real environment variables take precedence.
-    load_dotenv(path.parent / ".env", override=False)
+    # Secrets: .env next to the config. Real environment variables take precedence. Values are
+    # taken as they are, without filling in ${NAME}s, as systemd's EnvironmentFile does.
+    load_dotenv(path.parent / ".env", override=False, interpolate=False)
+    return parse_config(path.read_text(), path)
+
+
+def parse_config(text: str, path: Path) -> Config:
+    """The config in ``text``, as if it were the file at ``path``. Raises ConfigError if it's invalid."""
     try:
-        raw = tomllib.loads(path.read_text())
+        raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
     try:
-        return Config.model_validate({**expand_env(raw), "base_dir": path.parent})
+        return Config.model_validate({**expand_env(raw), "base_dir": path.parent, "path": path})
     except ValidationError as exc:
-        raise ConfigError(f"Problem in {path}:\n{exc}") from exc
+        # Where and what, but not the values: with ${NAME} filled in, they can be secrets.
+        problems = [
+            f"  {'.'.join(str(part) for part in error['loc']) or '(top level)'}: {error['msg']}"
+            for error in exc.errors(include_url=False, include_input=False)
+        ]
+        raise ConfigError(f"Problem in {path}:\n" + "\n".join(problems)) from None

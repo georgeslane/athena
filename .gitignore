@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 config.toml
+config.toml.*
 prompts/*.local.md
 .personal-blocklist
 

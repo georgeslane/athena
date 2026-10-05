@@ -1,0 +1,14 @@
+{
+  "name": "Athena",
+  "short_name": "Athena",
+  "description": "What Athena is doing, how it's used, and its tools.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0e0b08",
+  "theme_color": "#0e0b08",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "athena.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

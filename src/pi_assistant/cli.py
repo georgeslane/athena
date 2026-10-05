@@ -51,7 +51,7 @@ async def _chat(args: argparse.Namespace) -> int:
     services.status.channel = "the terminal"
     await services.start()
     name = cfg.agent.assistant_name
-    print(f"Chatting with {name} via {cfg.llm.model}. Commands: /reset, /tools, /quit\n")
+    print(f"Chatting with {name} via {cfg.llm.model}. Commands: /session, /tools, /quit\n")
     for st in services.mcp.status():
         print(
             f"  MCP {st.name}: "
@@ -79,16 +79,18 @@ async def _chat(args: argparse.Namespace) -> int:
                 continue
             if line in {"/quit", "/exit"}:
                 break
-            if line == "/reset":
-                services.history.reset(args.chat_id)
-                print("  (conversation reset)")
+            if line in {"/session", "/reset"}:
+                session = services.new_session()
+                print(f"  (session {session.id}: the conversation so far is cleared from the model's context)")
                 continue
             if line == "/tools":
                 for tool in services.tools.all():
                     print(f"  - {tool.name} [{tool.source}]{' (asks first)' if tool.needs_confirmation else ''}")
                 continue
             try:
-                result = await services.agent.respond(args.chat_id, line, confirm=confirm, on_tool=on_tool)
+                result = await services.agent.respond(
+                    args.chat_id, line, confirm=confirm, on_tool=on_tool, channel="Terminal"
+                )
             except Exception as exc:
                 print(f"  error: {type(exc).__name__}: {exc}")
                 continue
@@ -169,7 +171,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("run", help="run the Telegram bot (default)")
     p_chat = sub.add_parser("chat", help="chat in the terminal (handy over SSH)")
     p_chat.add_argument("--chat-id", default="cli", help="conversation id (default: cli)")
-    sub.add_parser("doctor", help="check the model, embeddings, MCP servers and Telegram")
+    sub.add_parser("doctor", help="check the model, embeddings, MCP servers, Telegram and the dashboard")
     p_ingest = sub.add_parser("ingest", help="add text/markdown files or folders to long-term memory")
     p_ingest.add_argument("paths", nargs="+")
     sub.add_parser("reindex", help="re-embed all memories (after changing the embeddings model)")
