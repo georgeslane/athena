@@ -139,7 +139,7 @@ async def test_a_port_in_use_is_left_to_the_process_that_has_it(caplog):
         chat = StatusServer(DisplayConfig(port=bot.port), tracker, name="Athena", timezone="UTC")
         assert not await chat.start()
         assert "is in use" in caplog.text
-        assert tracker.on_change is None  # it isn't publishing anything
+        assert not tracker.listeners  # it isn't publishing anything
         tracker.begin("hello").finish()  # and the assistant carries on regardless
         assert (await get(bot)).status_code == 200
         await chat.stop()

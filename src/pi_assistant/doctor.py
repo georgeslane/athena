@@ -13,6 +13,7 @@ import httpx
 
 from pi_assistant.app import build_services
 from pi_assistant.config import Config
+from pi_assistant.dashboard import MIN_TOKEN_CHARS as MIN_PASSWORD_CHARS
 from pi_assistant.databases import Databases
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
@@ -144,17 +145,21 @@ async def run_doctor(cfg: Config) -> bool:
     print(f"\nStatus API, for the status board ({cfg.display.host}:{cfg.display.port})")
     await check_status_api(cfg, report)
 
-    # 8. Trading 212 ---------------------------------------------------------------------------
+    # 8. The dashboard ---------------------------------------------------------------------------
+    print(f"\nDashboard ({cfg.dashboard.host}:{cfg.dashboard.port})")
+    await check_dashboard(cfg, report)
+
+    # 9. Trading 212 ---------------------------------------------------------------------------
     if cfg.trading212.enabled:
         print(f"\nTrading 212 ({cfg.trading212.environment})")
         await check_trading212(cfg, report)
 
-    # 9. Databases --------------------------------------------------------------------------------
-    if cfg.sqlite.databases:
+    # 10. Databases --------------------------------------------------------------------------------
+    if cfg.sqlite.enabled and cfg.sqlite.databases:
         print("\nDatabases")
         check_databases(cfg, report)
 
-    # 10. The prompt ---------------------------------------------------------------------------
+    # 11. The prompt ---------------------------------------------------------------------------
     print("\nThe prompt: what the model reads before every reply")
     if model_ok:
         await check_prompt(cfg, mcp_tools, report)
@@ -296,3 +301,32 @@ async def check_status_api(cfg: Config, report: Callable[[str, str], None]) -> N
             report(FAIL, "it refused [display] token: restart the service if you've changed the token")
         else:
             report(WARN, "not answering. It runs inside the bot: is the pi-assistant service running?")
+
+
+async def check_dashboard(cfg: Config, report: Callable[[str, str], None]) -> None:
+    dashboard = cfg.dashboard
+    if not dashboard.enabled:
+        report(WARN, "off ([dashboard] enabled = false)")
+        return
+    if not dashboard.token:
+        report(WARN, "no password yet: Athena makes one, DASHBOARD_TOKEN in .env, when the service starts")
+    elif len(dashboard.token) < MIN_PASSWORD_CHARS:
+        report(FAIL, f"its password, DASHBOARD_TOKEN in .env, must be at least {MIN_PASSWORD_CHARS} characters")
+        return
+    host = "127.0.0.1" if dashboard.host in ("0.0.0.0", "::") else dashboard.host
+    base = f"http://{host}:{dashboard.port}"
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            (await client.get(f"{base}/health")).raise_for_status()
+            if dashboard.token:
+                response = await client.get(
+                    f"{base}/api/overview", headers={"Authorization": f"Bearer {dashboard.token}"}
+                )
+                if response.status_code == 401:
+                    report(FAIL, "it refused DASHBOARD_TOKEN: restart the service if you've changed it")
+                    return
+                response.raise_for_status()
+    except httpx.HTTPError:
+        report(WARN, "not answering. It runs inside the bot: is the pi-assistant service running?")
+        return
+    report(OK, f"answering at {base}. Sign in with DASHBOARD_TOKEN from .env")

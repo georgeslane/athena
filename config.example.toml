@@ -21,6 +21,8 @@ timeout_seconds = 300
 # prompt, tools and your chat so far, so your next message doesn't wait while it does.
 # It only takes a moment when they're already cached. 0 turns it off.
 warm_up_minutes = 10
+# The most the model can read at once, in tokens, shown on the dashboard. 0 asks the model server.
+context_window = 0
 
 [telegram]
 bot_token = "${TELEGRAM_BOT_TOKEN}"
@@ -64,6 +66,13 @@ host = "127.0.0.1"                     # only programs on this Pi can ask
 port = 8091
 token = ""                             # needed if host isn't 127.0.0.1; the board then sends the same
 show_task = true                       # include the start of your message (false: just the status)
+
+[dashboard]
+# A web page for Athena's status, usage and tools, on your phone or Mac (see README, "Dashboard").
+# Its password is DASHBOARD_TOKEN in .env, which Athena makes the first time it starts.
+enabled = true
+host = "127.0.0.1"                     # Tailscale Serve passes requests from your devices to this
+port = 8092
 
 [news.feeds]
 # News feeds (RSS or Atom) the assistant can read without asking: only these are ever
@@ -119,7 +128,8 @@ args = ["mcp-server-fetch==2026.8.18"]
 # website, for example if a fetched page tells the model to send it there.
 
 # The servers below are switched off until you set them up (see README, "MCP servers").
-# Copy any you want into your config.toml, fill them in and set enabled = true.
+# The dashboard's Tools tab can do that for you, or copy any you want into your
+# config.toml, fill them in and set enabled = true.
 
 # Web search through DuckDuckGo, with no account. Each search asks first, because
 # what you search for leaves your network.

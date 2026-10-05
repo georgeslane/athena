@@ -33,6 +33,7 @@ from telegram.ext import (
 )
 
 from pi_assistant.app import Services
+from pi_assistant.config import ConfigError
 from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
 from pi_assistant.siri import VOICE_NOTE, SiriServer
 from pi_assistant.status import State
@@ -41,7 +42,7 @@ log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 COMMANDS = [
-    ("reset", "Start a fresh conversation (memories are kept)"),
+    ("session", "Start a new session: clears our conversation (memories are kept)"),
     ("remember", "Save a fact: /remember <text>"),
     ("recall", "Search memory: /recall <query>"),
     ("forget", "Delete a memory: /forget <id>"),
@@ -59,7 +60,6 @@ class TelegramBot:
         self._pending: dict[str, asyncio.Future[bool]] = {}
         self._siri: SiriServer | None = None
         self._warming: asyncio.Task[None] | None = None
-        self._rewarm = asyncio.Event()  # set to warm up again straight away, e.g. after /reload
 
     # -- setup ----------------------------------------------------------------------------
 
@@ -79,7 +79,7 @@ class TelegramBot:
             me = filters.User(user_id=list(self.allowed))
             app.add_handler(CommandHandler("start", self.cmd_start, filters=me))
             app.add_handler(CommandHandler("help", self.cmd_start, filters=me))
-            app.add_handler(CommandHandler("reset", self.cmd_reset, filters=me))
+            app.add_handler(CommandHandler(["session", "reset"], self.cmd_session, filters=me))
             app.add_handler(CommandHandler("remember", self.cmd_remember, filters=me))
             app.add_handler(CommandHandler("recall", self.cmd_recall, filters=me))
             app.add_handler(CommandHandler("forget", self.cmd_forget, filters=me))
@@ -133,9 +133,9 @@ class TelegramBot:
                     )
             except Exception as exc:  # the Mac might be asleep: try again next time
                 log.debug("Couldn't warm up the model server: %s", exc)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._rewarm.wait(), self.s.config.llm.warm_up_minutes * 60)
-            self._rewarm.clear()
+            with contextlib.suppress(TimeoutError):  # after a reply, or a change to the tools or session
+                await asyncio.wait_for(self.s.rewarm.wait(), self.s.config.llm.warm_up_minutes * 60)
+            self.s.rewarm.clear()
 
     async def _start_siri(self, bot: Bot) -> None:
         if not self.allowed:
@@ -241,7 +241,7 @@ class TelegramBot:
             question = msg.message_id
         except TelegramError as exc:
             log.warning("Couldn't post the question from Siri to Telegram: %s", exc)
-        reply = await self._reply(bot, chat_id, prompt, note=VOICE_NOTE)
+        reply = await self._reply(bot, chat_id, prompt, note=VOICE_NOTE, channel="Siri")
         try:
             await self._send(bot, chat_id, reply, reply_to=question)
         except TelegramError as exc:  # Siri still gets the answer
@@ -254,7 +254,9 @@ class TelegramBot:
             return "I need your OK in Telegram first, and I'll answer there."
         return "That's taking a while, so I'll send the answer to Telegram."
 
-    async def _reply(self, bot: Bot, chat_id: int, text: str, note: str | None = None) -> str:
+    async def _reply(
+        self, bot: Bot, chat_id: int, text: str, note: str | None = None, channel: str = "Telegram"
+    ) -> str:
         """The agent's reply to ``text``, showing "typing..." and asking for approvals in the chat meanwhile."""
         typing = asyncio.create_task(self._keep_typing(bot, chat_id))
 
@@ -262,7 +264,7 @@ class TelegramBot:
             return await self._confirm(bot, chat_id, tool, args, summary)
 
         try:
-            result = await self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note)
+            result = await self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note, channel=channel)
             reply = result.text
             log.info(
                 "Replied in %.1fs (%d model calls, tools: %s)",
@@ -321,9 +323,12 @@ class TelegramBot:
         lines += [f"/{c} - {d}" for c, d in COMMANDS]
         await update.effective_message.reply_text("\n".join(lines))  # type: ignore[union-attr]
 
-    async def cmd_reset(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        self.s.history.reset(str(update.effective_chat.id))  # type: ignore[union-attr]
-        await update.effective_message.reply_text("Started a fresh conversation. Long-term memories are kept.")  # type: ignore[union-attr]
+    async def cmd_session(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        session = self.s.new_session()
+        await update.effective_message.reply_text(  # type: ignore[union-attr]
+            f"Started session {session.id}. I've cleared our conversation from my context. "
+            "Memories are kept, and I can still search what we said before."
+        )
 
     async def cmd_remember(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = " ".join(ctx.args or []).strip()
@@ -378,8 +383,11 @@ class TelegramBot:
 
     async def cmd_reload(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Reconnecting to MCP servers...")  # type: ignore[union-attr]
-        await self.s.mcp.reload()
-        self._rewarm.set()  # the tools may have changed, and the model server's cache with them
+        try:
+            await self.s.reload(reconnect=True)  # with any changes to config.toml's tools since it started
+        except ConfigError as exc:
+            await update.effective_message.reply_text(f"I kept the tools as they were. {exc}")  # type: ignore[union-attr]
+            return
         await self.cmd_tools(update, ctx)
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

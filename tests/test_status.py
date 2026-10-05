@@ -16,7 +16,7 @@ def tracker(**kwargs) -> tuple[StatusTracker, list[Snapshot], Clock]:
     clock = Clock()
     t = StatusTracker(clock=clock, **kwargs)
     seen: list[Snapshot] = []
-    t.on_change = seen.append
+    t.listeners.append(seen.append)
     return t, seen, clock
 
 
@@ -81,3 +81,20 @@ def test_shorten_and_describe_error():
         describe_error(openai.APITimeoutError(request=httpx.Request("POST", "http://mac"))) == "The model took too long"
     )
     assert describe_error(ValueError("x")) == "Something went wrong (ValueError)"
+
+
+async def test_the_status_api_and_the_dashboard_can_both_follow_it():
+    from pi_assistant.status import StatusFeed
+
+    t, seen, _ = tracker()
+    board, dashboard = StatusFeed(t), StatusFeed(t)
+    board.start()
+    dashboard.start()
+    hello = t.begin("hello")
+    assert board.snapshot.state is dashboard.snapshot.state is State.WORKING
+    assert board.version != dashboard.version  # each has its own, so neither can be confused with the other
+    board.stop()
+    hello.finish()
+    t.begin("again").finish()
+    assert board.snapshot.task == "hello" and dashboard.snapshot.last_task == "again"
+    assert len(t.listeners) == 2  # the dashboard and the test's own

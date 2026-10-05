@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Athena</title>
+  <meta name="description" content="Athena's dashboard: what it's doing, how it's used, and its tools.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5eee2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e0b08" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Athena">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="athena.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="dashboard.css">
+  <script src="dashboard.js" defer></script>
+</head>
+<body>
+  <noscript><p class="noscript">The dashboard needs JavaScript.</p></noscript>
+
+  <main id="sign-in" class="sign-in" hidden>
+    <form class="sign-in-card" id="sign-in-form">
+      <div class="shield shield-large" data-state="idle" aria-hidden="true">
+        <img src="athena.svg" alt="" width="120" height="120">
+        <span class="eye left"></span><span class="eye right"></span><span class="ring"></span>
+      </div>
+      <h1 class="wordmark" data-name>Athena</h1>
+      <p class="muted">Sign in to the dashboard.</p>
+      <input type="text" name="username" autocomplete="username" value="athena" hidden>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input type="password" name="password" id="password" autocomplete="current-password" required>
+      </label>
+      <p class="form-error" id="sign-in-error" role="alert"></p>
+      <button class="button primary wide" type="submit">Sign in</button>
+      <p class="hint">It's <code>DASHBOARD_TOKEN</code> in <code>.env</code> on the Pi.</p>
+    </form>
+  </main>
+
+  <div id="app" class="app" hidden>
+    <header class="top">
+      <div class="top-inner">
+        <a class="brand" href="#status" aria-label="Status">
+          <div class="shield shield-small" data-state="idle" aria-hidden="true">
+            <img src="athena.svg" alt="" width="40" height="40">
+            <span class="eye left"></span><span class="eye right"></span><span class="ring"></span>
+          </div>
+          <span class="wordmark" data-name>Athena</span>
+        </a>
+        <span class="pill" id="top-pill" data-state="idle"><span class="dot"></span><span class="pill-label">Idle</span></span>
+        <nav class="tabs" aria-label="Sections">
+          <a class="tab" href="#status" data-tab="status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Status</span></a>
+          <a class="tab" href="#tools" data-tab="tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg><span>Tools</span></a>
+        </nav>
+      </div>
+      <div class="meander" aria-hidden="true"></div>
+    </header>
+
+    <div class="banner" id="offline" role="status" hidden>Can't reach Athena. Trying again…</div>
+
+    <section id="tab-status" class="panel" data-panel="status" aria-label="Status"></section>
+    <section id="tab-tools" class="panel" data-panel="tools" aria-label="Tools" hidden></section>
+  </div>
+
+  <dialog id="dialog" class="dialog"></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

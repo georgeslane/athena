@@ -6,11 +6,12 @@ from conftest import FakeLLMServer, completion
 
 from pi_assistant.agent import Agent
 from pi_assistant.history import ConversationStore
+from pi_assistant.stats import UsageStats
 from pi_assistant.status import State, StatusTracker
 from pi_assistant.tools import Tool, ToolError, ToolRegistry
 
 
-def make_agent(config, memory, server: FakeLLMServer, extra_tools=(), status=None):
+def make_agent(config, memory, server: FakeLLMServer, extra_tools=(), status=None, stats=None):
     tools = ToolRegistry()
     for t in memory.tools():
         tools.add(t)
@@ -19,7 +20,14 @@ def make_agent(config, memory, server: FakeLLMServer, extra_tools=(), status=Non
     history = ConversationStore(config.db_path, config.agent.max_history_messages)
     prompt = "You are {assistant_name} helping {user_name}. Literal braces stay: {not_a_key} {}"
     return Agent(
-        config.agent, server.client(config.llm), tools, history, memory, system_prompt_template=prompt, status=status
+        config.agent,
+        server.client(config.llm),
+        tools,
+        history,
+        memory,
+        system_prompt_template=prompt,
+        status=status,
+        stats=stats,
     )
 
 
@@ -179,7 +187,7 @@ async def test_embeddings_outage_does_not_break_chat(config, memory):
 def recording_tracker():
     status = StatusTracker()
     seen = []
-    status.on_change = seen.append
+    status.listeners.append(seen.append)
     return status, seen
 
 
@@ -296,3 +304,106 @@ async def test_a_tool_can_check_and_describe_a_call_before_you_are_asked(config,
     assert server.requests[1]["messages"][-1]["content"] == "Error: Say who it's for."
     assert asked == [("post_card", {"to": "Gran"}, "Post a card to Gran.")]
     assert sent == [{"to": "Gran"}]
+
+
+# -- usage statistics, and pausing for changes ------------------------------------------------------------
+
+
+def usage(prompt_tokens, completion_tokens, reply):
+    reply["usage"] = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+    return reply
+
+
+async def test_each_answer_is_counted_with_its_tools_and_context(config, memory):
+    stats = UsageStats(config.db_path)
+    failing = Tool("explode", "Fails.", {"type": "object", "properties": {}}, handler=lambda args: 1 / 0)
+    asking = Tool("send", "Sends.", {"type": "object", "properties": {}}, handler=None, needs_confirmation=True)
+    server = FakeLLMServer(
+        [
+            usage(900, 30, completion(None, [("remember", {"fact": "George likes figs."}), ("explode", {})])),
+            usage(1100, 20, completion(None, [("send", {}), ("no_such_tool", {})])),
+            usage(1300, 40, completion("Done.")),
+        ]
+    )
+    agent = make_agent(config, memory, server, extra_tools=[failing, asking], stats=stats)
+
+    async def decline(tool, args, summary=None):
+        return False
+
+    await agent.respond("chat1", "Remember I like figs", confirm=decline, channel="Siri")
+    session = stats.summary(agent.history.session.id)
+    assert (session["queries"], session["tool_calls"], session["largest_prompt"]) == (1, 4, 1300)
+    assert {t["name"]: (t["calls"], t["failed"], t["declined"]) for t in session["tools"]} == {
+        "remember": (1, 0, 0),
+        "explode": (1, 1, 0),
+        "send": (1, 0, 1),
+        "no_such_tool": (1, 1, 0),
+    }
+    assert session["context"]["tokens"] == 1340  # all the last call read, and what it wrote
+    row = stats._conn.execute("SELECT channel, model_calls, completion_tokens, error FROM stats_queries").fetchone()
+    assert row == ("Siri", 3, 90, "")
+
+
+async def test_a_failed_answer_is_counted_with_why(config, memory):
+    stats = UsageStats(config.db_path)
+    agent = make_agent(config, memory, FakeLLMServer([]), stats=stats)  # the model server errors
+    with pytest.raises(openai.APIStatusError):
+        await agent.respond("chat1", "hello")
+    total = stats.summary()
+    assert (total["queries"], total["failed"]) == (1, 1)
+    assert stats._conn.execute("SELECT error FROM stats_queries").fetchone() == ("The model server returned an error",)
+
+
+async def test_warming_up_measures_the_context(config, memory):
+    stats = UsageStats(config.db_path)
+    agent = make_agent(config, memory, FakeLLMServer([usage(2345, 1, completion("."))]), stats=stats)
+    await agent.warm_up("chat1")
+    assert stats.summary(agent.history.session.id)["context"]["tokens"] == 2345
+
+
+async def test_after_a_reply_the_chat_is_free_to_warm_up(config, memory):
+    server = FakeLLMServer([completion("Hello!"), completion(".")])
+    agent = make_agent(config, memory, server)
+    warmed = []
+
+    def saved():
+        warmed.append(asyncio.ensure_future(agent.warm_up("chat1")))
+
+    agent.on_saved = saved
+    await agent.respond("chat1", "hi")
+    assert warmed and await warmed[0] is not None  # not skipped as busy
+    assert len(server.requests) == 2
+
+
+async def test_pausing_waits_for_answers_and_holds_new_ones(config, memory):
+    release = asyncio.Event()
+    order = []
+
+    async def slow(args):
+        await release.wait()
+        return "slow"
+
+    tool = Tool("slow", "Slow.", {"type": "object", "properties": {}}, slow)
+    server = FakeLLMServer([completion(None, [("slow", {})]), completion("First."), completion("Second.")])
+    agent = make_agent(config, memory, server, extra_tools=[tool])
+
+    first = asyncio.create_task(agent.respond("chat1", "one"))
+    while not agent.busy:
+        await asyncio.sleep(0.01)
+
+    async def change_tools():
+        async with agent.paused():
+            order.append("paused")
+            await asyncio.sleep(0.05)
+            order.append("resumed")
+
+    pausing = asyncio.create_task(change_tools())
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(agent.respond("chat2", "two"))
+    await asyncio.sleep(0.05)
+    assert order == [] and not second.done()  # the pause waits for the first answer
+    release.set()
+    assert (await first).text == "First."
+    await pausing
+    assert (await second).text == "Second."
+    assert order == ["paused", "resumed"] and not agent.busy

@@ -25,18 +25,15 @@ needs a token. Each process that runs the assistant serves it if the port is fre
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import dataclasses
 import errno
 import hmac
 import ipaddress
 import json
 import logging
-import secrets
 
 from pi_assistant.config import DisplayConfig
-from pi_assistant.status import Snapshot, StatusTracker
+from pi_assistant.status import StatusFeed, StatusTracker
 from pi_assistant.webserver import HTTPError, Request, Response, Server
 
 log = logging.getLogger(__name__)
@@ -61,15 +58,11 @@ class StatusServer(Server):
         self.tracker = tracker
         self.assistant = {"name": name, "timezone": timezone}
         self._expected = f"Bearer {cfg.token}".encode() if cfg.token else None
-        self._boot = secrets.token_hex(4)  # so versions from before a restart never match
-        self._changes = 0
-        self._snapshot = Snapshot()
-        self._changed = asyncio.Event()
-        self._running = False
+        self.feed = StatusFeed(tracker)
 
     @property
     def version(self) -> str:
-        return f"{self._boot}-{self._changes}"
+        return self.feed.version
 
     async def start(self) -> bool:
         """Start serving, unless the config forbids it or another process has the port. True if it started."""
@@ -84,24 +77,13 @@ class StatusServer(Server):
             else:
                 log.warning("Status API not started: %s", exc)
             return False
-        self._running = True
-        self._publish(dataclasses.replace(self.tracker.snapshot(), updated=self.tracker.clock()))
-        self.tracker.on_change = self._publish
+        self.feed.start()
         log.info("Status API listening on %s:%d", self.cfg.host, self.port)
         return True
 
     async def stop(self) -> None:
-        if self._running:
-            self.tracker.on_change = None
-            self._running = False
-            self._changed.set()  # so requests that are waiting end now, not when their wait runs out
+        self.feed.stop()  # so requests that are waiting end now, not when their wait runs out
         await super().stop()
-
-    def _publish(self, snapshot: Snapshot) -> None:
-        self._snapshot = snapshot
-        self._changes += 1
-        changed, self._changed = self._changed, asyncio.Event()
-        changed.set()
 
     def payload(self) -> dict:
         return {
@@ -109,7 +91,7 @@ class StatusServer(Server):
             "version": self.version,
             "now": self.tracker.clock(),
             "assistant": self.assistant,
-            "status": dataclasses.asdict(self._snapshot),
+            "status": dataclasses.asdict(self.feed.snapshot),
         }
 
     async def handle(self, request: Request) -> Response:
@@ -121,11 +103,13 @@ class StatusServer(Server):
             request.headers.get("authorization", "").encode(), self._expected
         ):
             raise HTTPError(401, "Wrong or missing token. Use the one in Athena's [display] token.")
-        try:
-            wait = min(max(float(request.query.get("wait", 0)), 0.0), MAX_WAIT_SECONDS)
-        except ValueError:
-            raise HTTPError(400, "wait must be a number of seconds.") from None
-        if wait and request.query.get("after") == self.version and self._running:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._changed.wait(), wait)
+        await self.feed.wait(request.query.get("after"), wait_seconds(request))
         return Response(json.dumps(self.payload(), ensure_ascii=False), "application/json")
+
+
+def wait_seconds(request: Request) -> float:
+    """How long a request asks to wait for a change, from ``?wait=``: 0 to MAX_WAIT_SECONDS."""
+    try:
+        return min(max(float(request.query.get("wait", 0)), 0.0), MAX_WAIT_SECONDS)
+    except ValueError:
+        raise HTTPError(400, "wait must be a number of seconds.") from None

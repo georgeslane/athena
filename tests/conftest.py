@@ -83,15 +83,29 @@ def completion(content: str | None = None, tool_calls: list[tuple[str, dict[str,
 
 
 class FakeLLMServer:
-    """An OpenAI-compatible endpoint (via httpx.MockTransport) that replays scripted replies."""
+    """An OpenAI-compatible endpoint (via httpx.MockTransport) that replays scripted replies.
 
-    def __init__(self, replies: list[dict] | Callable[[dict], dict]):
+    ``model`` adds fields to the model's entry in /models, and ``status`` is what oMLX's
+    /models/status answers (a 404 if None).
+    """
+
+    def __init__(
+        self,
+        replies: list[dict] | Callable[[dict], dict],
+        model: dict[str, Any] | None = None,
+        status: dict[str, Any] | None = None,
+    ):
         self.replies = replies
         self.requests: list[dict] = []
+        self.model = model or {}
+        self.status = status
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
-            return httpx.Response(200, json={"object": "list", "data": [{"id": "test-model", "object": "model"}]})
+            entry = {"id": "test-model", "object": "model", **self.model}
+            return httpx.Response(200, json={"object": "list", "data": [entry]})
+        if request.url.path.endswith("/models/status"):
+            return httpx.Response(200, json=self.status) if self.status else httpx.Response(404, json={"error": "no"})
         body = json.loads(request.content)
         self.requests.append(body)
         if callable(self.replies):

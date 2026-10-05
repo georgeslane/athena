@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import time
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+import openai
 from openai import AsyncOpenAI
 
 from pi_assistant.config import LLMConfig
@@ -124,5 +126,47 @@ class LLMClient:
         page = await self._client.models.list()
         return [m.id for m in page.data]
 
+    async def context_window(self) -> int | None:
+        """The most the model can read at once, in tokens: llm.context_window if set, else what the server says.
+
+        Servers say it in different ways. vLLM and newer oMLX give max_model_len in /models;
+        oMLX's /models/status gives the limit it's set to, which can be lower than what the
+        model supports. Where both are known, the lower one applies.
+        """
+        if self.cfg.context_window > 0:
+            return self.cfg.context_window
+        found: list[int] = []
+        page = await self._client.models.list()
+        for model in page.data:
+            if model.id == self.cfg.model:
+                found += _token_counts(model.model_extra or {})
+        with contextlib.suppress(openai.APIError):  # only some servers have this
+            status = await self._client.get("/models/status", cast_to=object)
+            entries = status.get("models", status.get("data", [])) if isinstance(status, dict) else status
+            for entry in entries if isinstance(entries, list) else []:
+                if isinstance(entry, dict) and self.cfg.model in (
+                    entry.get("id"),
+                    entry.get("model"),
+                    entry.get("name"),
+                ):
+                    found += _token_counts(entry)
+        return min(found) if found else None
+
     async def close(self) -> None:
         await self._client.close()
+
+
+# Fields that servers use for the context window, in /models and similar.
+_CONTEXT_FIELDS = (
+    "max_context_window",
+    "model_context_length",
+    "max_model_len",
+    "context_length",
+    "max_context_length",
+    "context_window",
+    "n_ctx",
+)
+
+
+def _token_counts(info: dict[str, Any]) -> list[int]:
+    return [v for k in _CONTEXT_FIELDS if isinstance(v := info.get(k), int) and not isinstance(v, bool) and v > 0]
