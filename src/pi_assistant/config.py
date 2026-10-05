@@ -89,9 +89,15 @@ class AgentConfig(_Section):
 
 
 class DisplayConfig(_Section):
-    # The status board on a Pimoroni Display HAT Mini (`pi-assistant display`).
-    show_task: bool = True  # show your message on the screen; False shows only the status
-    led: bool = True  # light the HAT's LED while working (blue) or waiting for you (flashing amber)
+    # What Athena tells the status board, which is its own service (pi-display-microservice) and
+    # asks for it over HTTP (see README, "Status board").
+    enabled: bool = True
+    host: str = "127.0.0.1"  # only programs on this Pi can ask; anywhere else needs a token
+    port: int = 8091
+    token: str = ""  # if set, the board must send it
+    show_task: bool = True  # include the start of your message; False: just what Athena is doing
+    # No longer used here: the LED is now set in pi-display-microservice's own config.toml.
+    led: bool | None = None
 
 
 class NewsConfig(_Section):
@@ -190,10 +196,6 @@ class Config(_Section):
     @property
     def log_dir(self) -> Path:
         return self.resolve(self.data_dir) / "logs"
-
-    @property
-    def status_path(self) -> Path:
-        return self.resolve(self.data_dir) / "status.json"
 
 
 def expand_env(value: Any) -> Any:

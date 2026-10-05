@@ -68,59 +68,57 @@ def sandbox(tmp_path):
     return repo, files, run
 
 
-def test_install_with_the_status_board(sandbox):
-    repo, files, run = sandbox
-    result, calls = run("install.sh", "--display")
-    assert result.returncode == 0, result.stderr
-
-    assert "sudo apt-get install -y -qq git curl ca-certificates sqlite3 gcc libc6-dev" in calls
-    assert "uv sync --no-dev --extra display" in calls
-    assert "sudo raspi-config nonint do_spi 0" in calls
-    assert {"sudo usermod -aG spi pi", "sudo usermod -aG gpio pi"} <= set(calls)
-    assert {"sudo systemctl enable pi-assistant-display", "sudo systemctl restart pi-assistant-display"} <= set(calls)
-    unit = (files / "pi-assistant-display.service").read_text()
-    assert f"ExecStart={repo}/.venv/bin/pi-assistant display" in unit
-    assert "User=pi" in unit
-    assert not re.search(r"^[^#].*@[A-Z_]+@", unit, re.MULTILINE)  # every placeholder filled in
-    assert (repo / ".env").stat().st_mode & 0o777 == 0o600
-
-
-def test_install_without_the_status_board(sandbox):
+def test_install(sandbox):
     repo, files, run = sandbox
     result, calls = run("install.sh")
     assert result.returncode == 0, result.stderr
 
     assert "sudo apt-get install -y -qq git curl ca-certificates sqlite3" in calls
     assert "uv sync --no-dev" in calls
-    assert not [c for c in calls if "display" in c and not c.startswith("systemctl cat")]
-    assert not (files / "pi-assistant-display.service").exists()
-    assert (files / "pi-assistant.service").exists()
+    assert not [c for c in calls if "display" in c]  # the status board is its own project now
+    unit = (files / "pi-assistant.service").read_text()
+    assert f"ExecStart={repo}/.venv/bin/pi-assistant run" in unit
+    assert "User=pi" in unit
+    assert not re.search(r"^[^#].*@[A-Z_]+@", unit, re.MULTILINE)  # every placeholder filled in
     assert (repo / "config.toml").read_text() == (repo / "config.example.toml").read_text()
+    assert (repo / ".env").stat().st_mode & 0o777 == 0o600
 
 
-def test_reinstalling_keeps_the_status_board(sandbox):
+def test_install_says_where_the_status_board_went(sandbox):
     _, _, run = sandbox
-    result, calls = run("install.sh", display_installed=True)
-    assert result.returncode == 0, result.stderr
-    assert "uv sync --no-dev --extra display" in calls
-    assert "sudo systemctl restart pi-assistant-display" in calls
+    result, calls = run("install.sh", "--display")
+    assert result.returncode == 2
+    assert "pi-display-microservice" in result.stderr
+    assert calls == []
 
 
 def test_install_rejects_unknown_options(sandbox):
     _, _, run = sandbox
     result, calls = run("install.sh", "--dispaly")
     assert result.returncode == 2
-    assert "--display" in result.stderr
+    assert "Unknown option: --dispaly" in result.stderr
     assert calls == []
 
 
-@pytest.mark.parametrize("display_installed", [False, True])
-def test_update(sandbox, display_installed):
+def test_update(sandbox):
     _, _, run = sandbox
-    result, calls = run("update.sh", display_installed=display_installed, fake_git=True)
+    result, calls = run("update.sh", fake_git=True)
     assert result.returncode == 0, result.stderr
-    if display_installed:  # a plain `uv sync` would uninstall the board's packages
-        expected = ["uv sync --no-dev --extra display", "sudo systemctl restart pi-assistant pi-assistant-display"]
-    else:
-        expected = ["uv sync --no-dev", "sudo systemctl restart pi-assistant"]
-    assert calls == ["git pull --ff-only", "systemctl cat pi-assistant-display.service", *expected]
+    assert calls == [
+        "git pull --ff-only",
+        "uv sync --no-dev",
+        "sudo systemctl restart pi-assistant",
+        "systemctl cat pi-assistant-display.service",
+    ]
+
+
+def test_update_retires_the_old_status_board(sandbox):
+    _, _, run = sandbox
+    result, calls = run("update.sh", display_installed=True, fake_git=True)
+    assert result.returncode == 0, result.stderr
+    assert calls[-3:] == [
+        "sudo systemctl disable --now pi-assistant-display",
+        "sudo rm -f /etc/systemd/system/pi-assistant-display.service",
+        "sudo systemctl daemon-reload",
+    ]
+    assert "pi-display-microservice" in result.stdout

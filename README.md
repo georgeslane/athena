@@ -28,7 +28,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`. Related memories are also added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Your notes as memory**: `pi-assistant ingest ~/notes` indexes Markdown and text files so the assistant can search them.
 - **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
-- **A status board**: with a Pimoroni Display HAT Mini, the Pi's screen shows what the assistant is doing: idle, working on your request, or waiting for your approval.
+- **A status board**: with a Pimoroni Display HAT Mini, the Pi's screen shows what the assistant is doing: idle, working on your request, or waiting for your approval. The board is its own service, [pi-display-microservice](#status-board), which reads Athena's status API.
 - **SSH-friendly tools**: `pi-assistant doctor` checks every connection, `pi-assistant chat` gives you a terminal chat, and `pi-assistant eval` compares models on tool calling.
 
 ## Install on the Pi
@@ -43,7 +43,7 @@ cd ~/pi-assistant
 bash scripts/install.sh
 ```
 
-The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. If you have a Display HAT Mini, run it with `--display` to set up the [status board](#status-board) too.
+The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. For a Display HAT Mini, see [Status board](#status-board).
 
 Then:
 
@@ -83,24 +83,31 @@ Then:
 | `ingest PATH...` | Add `.md`/`.txt` files or folders to memory. Re-running a file replaces its old chunks. |
 | `reindex` | Re-embed everything after changing the embeddings model. |
 | `eval -m MODEL [-m MODEL2]` | Compare models on tool calling (see below). |
-| `display` | Run the [status board](#status-board). `--demo` cycles through example states; `--preview FILE` draws to an image instead of the screen. |
 
 ## Status board
 
-With a [Pimoroni Display HAT Mini](https://pinout.xyz/pinout/display_hat_mini) on the Pi, the screen shows what the assistant is doing:
+With a [Pimoroni Display HAT Mini](https://pinout.xyz/pinout/display_hat_mini) on the Pi, a status board shows what Athena is doing:
+- idle, working on your request, or waiting for your approval
+- an LED that's blue while Athena works, and flashes amber when it needs you
 
-![The status board while idle, thinking, using a tool, waiting for approval, after a failed request, and offline](docs/status-board.png)
+The board is its own project, [pi-display-microservice](https://github.com/georgeslane/pi-display-microservice), with its own installer, updates and settings.
 
-- **Idle:** the time, and how your last request went.
-- **Working:** your request, what the assistant is doing now (thinking, or which tool it's using), the tools it has used and how long it's taken. A light runs round the shield.
-- **Needs you:** a tool is waiting for your approval in Telegram. The shield pulses amber, the LED flashes and the clock counts down to when the request is denied automatically.
-- **Offline:** the assistant isn't running.
+It asks Athena what it's doing through a small HTTP API. So either can be restarted, updated or replaced without the other, and when nothing answers, the board knows Athena isn't running.
 
-Press any button to turn the screen off. It comes back on by itself whenever the assistant is working or needs you. In `config.toml`, `[display]` can keep your messages off the screen (`show_task = false`) or turn off the LED.
+Athena's side is the `[display]` section of `config.toml`:
 
-To set it up, run `bash scripts/install.sh --display`. That turns on SPI, installs the drivers and starts the `pi-assistant-display` service, which shows "offline" until the assistant starts. To test the screen on its own, stop the service and run `uv run pi-assistant display --demo`. On any computer, `uv run pi-assistant display --preview board.png` draws the board into an image instead.
+- **Where it listens:** the API is on by default, and only listens on the Pi, at `http://127.0.0.1:8091/v1/status`. To serve a board on another machine, set `host`, and a `token` for the board to send.
+- **Your messages:** `show_task = false` keeps them out of the API, and so off the screen.
+- **The board's own settings,** like the LED, are in pi-display-microservice's `config.toml`.
 
-The board runs as a separate service, so it keeps working, and says so, when the assistant isn't running. The assistant writes its status to `data/status.json` as it works, and holds a lock on `data/status.lock` while it runs. The system releases that lock even if the assistant crashes, which is how the board knows it's offline.
+The API is one request, `GET /v1/status`, answered with JSON. A board can ask it to wait for the next change (`?wait=25&after=<version>`), so it hears about each change straight away without asking all the time. pi-display-microservice's README has the full format, and how to add information to it for new features. `doctor` checks the API is answering.
+
+Only one process can serve it at a time. Normally that's the service; `pi-assistant chat` only serves it when the service isn't running.
+
+**Moving from the built-in board.** The board used to be part of this repo, as `pi-assistant display` and the `pi-assistant-display` service. To switch:
+1. Update Athena with `scripts/update.sh`. It stops that service.
+2. Install pi-display-microservice on the Pi (see its README).
+3. Remove `led` from `[display]` here.
 
 ## Siri
 
@@ -320,7 +327,7 @@ On an M1 Pro with 32 GB, mixture-of-experts models with about 3–4B active para
 cd ~/pi-assistant && bash scripts/update.sh
 ```
 
-It pulls the latest code, updates the dependencies (keeping the status board's, if you set it up) and restarts the services.
+It pulls the latest code, updates the dependencies and restarts the service.
 
 ## Development
 
@@ -350,7 +357,7 @@ The push check covers commit messages too, and commits made with `--no-verify`. 
 
 On GitHub, CI (`.github/workflows/ci.yml`) scans every push and pull request for secrets and runs the tests on an ARM64 Linux machine like the Pi. `main` only accepts pull requests that pass both, so the Pi only installs code that has.
 
-The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the status board's design, run `uv run --with resvg-py scripts/render_images.py` to redraw the PNG the board uses and the picture in this README.
+The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own copy, in pi-display-microservice.
 
 | Path | Purpose |
 |---|---|
@@ -363,9 +370,9 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 | `src/pi_assistant/siri.py` | The endpoint the Siri shortcut calls |
 | `src/pi_assistant/mac_files.py` | The read-only files server that runs on your Mac |
 | `src/pi_assistant/news.py` | The built-in news reader |
-| `src/pi_assistant/status.py` | What the assistant is doing, published for the status board |
-| `src/pi_assistant/board.py`, `display.py` | Drawing the status board, and the Display HAT Mini |
-| `src/pi_assistant/assets/` | The Athena icon and the board's fonts |
+| `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
+| `src/pi_assistant/webserver.py` | The small HTTP server behind Siri's endpoint and the status API |
+| `src/pi_assistant/assets/` | The Athena icon |
 | `src/pi_assistant/doctor.py`, `evals.py`, `cli.py` | Command-line tools |
 | `prompts/system.md` | System prompt. Point `agent.system_prompt_file` at a `*.local.md` copy to customise it privately. |
 | `scripts/install.sh`, `scripts/update.sh`, `deploy/` | Pi setup and updates |
@@ -378,7 +385,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 - **The model answers instead of using tools:** check that tool calling works in `doctor`, then compare models with `eval`.
 - **The bot ignores you:** your ID isn't in `telegram.allowed_user_ids`. Empty the list temporarily to get your ID.
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
-- **The status board stays blank:** check `journalctl -u pi-assistant-display`. Its errors say what to fix, such as SPI being turned off.
+- **The status board says "Offline" while Athena runs:** run `doctor` and see what it says under "Status API". Problems with the board itself are covered in pi-display-microservice's README.
 - **`zsh: no such file or directory: …/Library/Application`:** the Mac was set up by a version of `scripts/mac/install.sh` with a quoting bug. On the Mac, pull the repo and run `bash scripts/mac/install.sh` again: it keeps your folders and the Pi's key.
 - **A server on the Mac fails:** run `ssh athena-mac hello` on the Pi. If that doesn't say there's no server called 'hello', the problem is SSH: check Remote Login is on and the Mac is awake. If it does, check `~/Library/Logs/Athena/` on the Mac, and that iMCP is running.
 - **"Trading 212 didn't accept the API key":** check the key and secret in `.env`, and that the key is for the account `environment` says (live or practice). If the key is restricted to trusted IPs, check your home's address hasn't changed: compare `curl -s https://api.ipify.org` on the Pi with the key's settings in Trading 212.
@@ -396,7 +403,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. After changing it or the statu
 - Reading your Trading 212 account doesn't ask, but placing or cancelling an order always does, and that can't be switched off. The key's own permissions have the last word: without permission to execute orders it can't trade at all, and restricted to your IP address it's useless anywhere else.
 - SQLite databases are opened read-only, and SQLite itself refuses anything but reading, so a query can't change them or write files.
 - The Siri endpoint is off unless you turn it on. It listens only on the Pi itself, Tailscale Serve passes on requests from your tailnet, and each request needs the token. Anyone with both can ask Athena anything you could, so keep the token private.
-- The status board shows the start of your latest message. If other people can see the screen, set `show_task = false` under `[display]`.
+- The status API includes the start of your latest message, for the status board. It only listens on the Pi itself unless you set `host`, and then it needs a token. If other people can see the screen, set `show_task = false` under `[display]`.
 
 ## License
 

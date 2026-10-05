@@ -16,13 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The status board on a Pimoroni Display HAT Mini (scripts/install.sh --display).
-display = [
-    "pillow>=11",
-    "st7789>=1.0.1; sys_platform == 'linux'",
-    "gpiod>=2.2; sys_platform == 'linux'",
-    "gpiodevice>=0.1; sys_platform == 'linux'",
-]
 # The read-only files server that runs on your Mac (scripts/mac/install.sh): reading PDFs.
 mac = [
     "pypdf>=6",
@@ -35,7 +28,6 @@ pi-assistant = "pi_assistant.cli:main"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "pillow>=11",  # the status board's tests draw real frames
     "pypdf>=6",  # the Mac files server's tests read a real PDF
 ]
 

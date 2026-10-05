@@ -1,7 +1,7 @@
 import httpx
 import openai
 
-from pi_assistant.status import Snapshot, State, StatusFile, StatusTracker, describe_error, shorten
+from pi_assistant.status import Snapshot, State, StatusTracker, describe_error, shorten
 
 
 class Clock:
@@ -81,44 +81,3 @@ def test_shorten_and_describe_error():
         describe_error(openai.APITimeoutError(request=httpx.Request("POST", "http://mac"))) == "The model took too long"
     )
     assert describe_error(ValueError("x")) == "Something went wrong (ValueError)"
-
-
-def test_status_file_says_offline_unless_an_agent_is_running(tmp_path):
-    board = StatusFile(tmp_path / "data" / "status.json")
-    assert board.read().state is State.OFFLINE  # nothing has run yet
-
-    agent = StatusFile(tmp_path / "data" / "status.json")
-    t = StatusTracker()
-    agent.publish(t)
-    assert board.read().state is State.IDLE
-
-    t.begin("Turn on the heating")
-    assert (board.read().state, board.read().task) == (State.WORKING, "Turn on the heating")
-
-    agent.close()  # also what happens when the process exits or crashes
-    assert board.read().state is State.OFFLINE
-
-
-def test_two_agent_processes_can_share_the_board(tmp_path):
-    path = tmp_path / "status.json"
-    bot, chat = StatusFile(path), StatusFile(path)
-    bot.publish(StatusTracker())
-    chat.publish(StatusTracker())
-    chat.close()
-    assert StatusFile(path).read().state is State.IDLE  # the bot is still running
-    bot.close()
-    assert StatusFile(path).read().state is State.OFFLINE
-
-
-def test_unwritable_status_file_does_not_stop_the_assistant(tmp_path, caplog):
-    (tmp_path / "data").write_text("a file where the data folder should be")
-    t = StatusTracker()
-    StatusFile(tmp_path / "data" / "status.json").publish(t)
-    assert t.on_change is None
-    assert "Status board disabled" in caplog.text
-    t.begin("still works").finish()
-
-
-def test_snapshot_json_ignores_fields_it_does_not_know():
-    text = Snapshot(State.WORKING, task="x").to_json().replace('"task"', '"future_field": 1, "task"')
-    assert Snapshot.from_json(text) == Snapshot(State.WORKING, task="x")

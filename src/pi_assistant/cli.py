@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import json
 import logging
-import signal
 import sys
 from typing import Any
 
@@ -36,23 +35,12 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_display(args: argparse.Namespace) -> int:
-    try:
-        from pi_assistant.display import DisplayError, run_display
-    except ModuleNotFoundError as exc:  # Pillow isn't installed
-        print(f"The status board needs packages that aren't installed ({exc.name}).", file=sys.stderr)
-        print("Run: bash scripts/install.sh --display (or: uv sync --extra display)", file=sys.stderr)
-        return 1
-    cfg = load_config(args.config)
-    # `systemctl stop` sends SIGTERM. Leave through the normal path so the screen gets cleared.
-    previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    try:
-        run_display(cfg, preview=args.preview, demo_mode=args.demo, once=args.once)
-    except DisplayError as exc:
-        print(exc, file=sys.stderr)
-        return 1
-    finally:
-        signal.signal(signal.SIGTERM, previous)
-    return 0
+    print(
+        "The status board is now its own service, pi-display-microservice, which gets Athena's status from its\n"
+        'status API. See README, "Status board", to set it up.',
+        file=sys.stderr,
+    )
+    return 1
 
 
 async def _chat(args: argparse.Namespace) -> int:
@@ -188,10 +176,10 @@ def main(argv: list[str] | None = None) -> None:
     p_eval = sub.add_parser("eval", help="compare models on tool calling")
     p_eval.add_argument("--model", "-m", action="append", help="model id (repeatable; default: the configured model)")
     p_eval.add_argument("--repeat", type=int, default=1, help="run each case N times")
-    p_display = sub.add_parser("display", help="run the status board on a Display HAT Mini")
-    p_display.add_argument("--preview", metavar="PNG", help="draw to this PNG file instead of the screen")
-    p_display.add_argument("--demo", action="store_true", help="cycle through example states, to check the screen")
-    p_display.add_argument("--once", action="store_true", help="draw one frame and exit")
+    # The status board moved to its own service; this says where, for anything still running it.
+    p_display = sub.add_parser("display", help=argparse.SUPPRESS)
+    p_display.add_argument("--preview", help=argparse.SUPPRESS)
+    p_display.add_argument("--demo", "--once", action="store_true", help=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
     command = args.command or "run"

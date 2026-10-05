@@ -9,16 +9,17 @@ main() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   export PATH="$HOME/.local/bin:$PATH"
   git pull --ff-only
-  services=(pi-assistant)
+  uv sync --no-dev
+  sudo systemctl restart pi-assistant
+  echo "Updated and restarted pi-assistant."
   if systemctl cat pi-assistant-display.service >/dev/null 2>&1; then
-    # Keep the status board's packages: a plain `uv sync` removes them.
-    uv sync --no-dev --extra display
-    services+=(pi-assistant-display)
-  else
-    uv sync --no-dev
+    # The status board that used to be part of pi-assistant. It's now pi-display-microservice.
+    sudo systemctl disable --now pi-assistant-display >/dev/null 2>&1 || true
+    sudo rm -f /etc/systemd/system/pi-assistant-display.service
+    sudo systemctl daemon-reload
+    echo "Stopped the old status board: it's now its own project, pi-display-microservice."
+    echo "To keep using the screen, set that up (see README, \"Status board\")."
   fi
-  sudo systemctl restart "${services[@]}"
-  echo "Updated and restarted: ${services[*]}"
 }
 
 # Everything runs inside main(), which bash reads in full first, so `git pull` can

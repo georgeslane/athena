@@ -18,6 +18,7 @@ from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryStore
 from pi_assistant.siri import MIN_TOKEN_CHARS
+from pi_assistant.status_api import is_loopback
 from pi_assistant.tools import Tool, ToolError
 from pi_assistant.trading212 import Trading212
 
@@ -139,17 +140,21 @@ async def run_doctor(cfg: Config) -> bool:
         print(f"\nSiri ({cfg.siri.host}:{cfg.siri.port})")
         await check_siri(cfg, report)
 
-    # 7. Trading 212 ---------------------------------------------------------------------------
+    # 7. The status board's API -------------------------------------------------------------------
+    print(f"\nStatus API, for the status board ({cfg.display.host}:{cfg.display.port})")
+    await check_status_api(cfg, report)
+
+    # 8. Trading 212 ---------------------------------------------------------------------------
     if cfg.trading212.enabled:
         print(f"\nTrading 212 ({cfg.trading212.environment})")
         await check_trading212(cfg, report)
 
-    # 8. Databases --------------------------------------------------------------------------------
+    # 9. Databases --------------------------------------------------------------------------------
     if cfg.sqlite.databases:
         print("\nDatabases")
         check_databases(cfg, report)
 
-    # 9. The prompt ----------------------------------------------------------------------------
+    # 10. The prompt ---------------------------------------------------------------------------
     print("\nThe prompt: what the model reads before every reply")
     if model_ok:
         await check_prompt(cfg, mcp_tools, report)
@@ -266,3 +271,28 @@ def check_databases(cfg: Config, report: Callable[[str, str], None]) -> None:
             report(FAIL, f"{name}: {exc}")
         else:
             report(OK, f"{name}: {tables} table{'' if tables == 1 else 's'}, read-only ({file})")
+
+
+async def check_status_api(cfg: Config, report: Callable[[str, str], None]) -> None:
+    display = cfg.display
+    if display.led is not None:
+        report(WARN, "[display] led is no longer used here: set led in pi-display-microservice's config.toml instead")
+    if not display.enabled:
+        report(WARN, "off ([display] enabled = false), so a status board can't show anything")
+        return
+    if not is_loopback(display.host) and not display.token:
+        report(FAIL, f"it won't listen on {display.host} without [display] token")
+        return
+    host = "127.0.0.1" if display.host in ("0.0.0.0", "::") else display.host
+    headers = {"Authorization": f"Bearer {display.token}"} if display.token else {}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"http://{host}:{display.port}/v1/status", headers=headers)
+        response.raise_for_status()
+        state = response.json()["status"]["state"]
+        report(OK, f"answering: Athena is {state}")
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+            report(FAIL, "it refused [display] token: restart the service if you've changed the token")
+        else:
+            report(WARN, "not answering. It runs inside the bot: is the pi-assistant service running?")

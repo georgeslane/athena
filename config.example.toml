@@ -57,9 +57,13 @@ search_top_k = 8
 chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
 
 [display]
-# The status board on a Pimoroni Display HAT Mini (see README, "Status board").
-show_task = true                       # show your message on the screen (false: just the status)
-led = true                             # LED: blue while working, flashing amber when it needs you
+# The status board for a Pimoroni Display HAT Mini is its own service, pi-display-microservice,
+# which asks Athena what it's doing through this API (see README, "Status board").
+enabled = true
+host = "127.0.0.1"                     # only programs on this Pi can ask
+port = 8091
+token = ""                             # needed if host isn't 127.0.0.1; the board then sends the same
+show_task = true                       # include the start of your message (false: just the status)
 
 [news.feeds]
 # News feeds (RSS or Atom) the assistant can read without asking: only these are ever
