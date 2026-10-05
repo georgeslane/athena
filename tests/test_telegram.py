@@ -204,3 +204,24 @@ async def test_keeps_the_model_server_warm(config):
     finally:
         task.cancel()
     assert reloaded and set(calls) == {str(ME)}
+
+
+async def test_confirmation_shows_what_the_tool_says_it_will_do(config):
+    args = {"side": "buy", "ticker": "AAPL_US_EQ", "quantity": 2}
+
+    async def respond(chat_id, text, confirm, note=None):
+        approved = await confirm("trading212_place_order", args, "Buy 2 Apple <Inc> at the market price.")
+        return AgentResult(text="Bought" if approved else "Not bought")
+
+    bot = make_bot(config, respond)
+    bot.cfg.confirm_timeout_seconds = 0.05
+    ctx = SimpleNamespace(bot=FakeBot())
+    await bot.on_text(text_update(ME, "buy 2 apple"), ctx)
+
+    prompt = ctx.bot.sent[0]
+    # The tool's own account of what it will do comes first, then the exact arguments, as always.
+    assert prompt.text.startswith(
+        "Allow <b>trading212_place_order</b>?\nBuy 2 Apple &lt;Inc&gt; at the market price.\n<pre>{"
+    )
+    assert "&quot;ticker&quot;: &quot;AAPL_US_EQ&quot;" in prompt.text
+    assert "reply_markup" in prompt.kwargs

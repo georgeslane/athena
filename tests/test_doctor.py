@@ -92,3 +92,57 @@ async def test_check_reports_a_failing_model_server(config, monkeypatch):
     reported = []
     await check_prompt(config, [], lambda mark, msg: reported.append((mark, msg)))
     assert [mark for mark, _ in reported] == [FAIL]
+
+
+async def test_checks_the_trading_212_key_and_its_permissions(config):
+    import httpx
+    from test_trading212 import FakeTrading212
+
+    def run(t212, key="KEY"):
+        reported = []
+        config.trading212.api_key = key
+        http = httpx.AsyncClient(transport=httpx.MockTransport(t212.handler))
+        return reported, doctor.check_trading212(config, lambda mark, msg: reported.append((mark, msg)), http)
+
+    reported, check = run(FakeTrading212())
+    await check
+    assert reported == [
+        (OK, "connected to your live account, 12345678 in GBP"),
+        (OK, "the key can read everything Athena uses"),
+    ]
+
+    t212 = FakeTrading212()
+    t212.reply("GET", "/orders", httpx.Response(403))
+    t212.reply("GET", "/history/dividends", httpx.Response(403))
+    reported, check = run(t212)
+    await check
+    assert reported[1] == (
+        WARN,
+        "the key can't read: orders:read, history:dividends. Add them in Trading 212, under Settings > API",
+    )
+    assert {r.method for r in t212.requests} == {"GET"}  # checking never trades
+
+    t212 = FakeTrading212()
+    t212.reply("GET", "/account/summary", httpx.Response(401))
+    reported, check = run(t212)
+    await check
+    assert reported[0][0] == FAIL and "didn't accept the API key" in reported[0][1]
+
+    reported, check = run(FakeTrading212(), key="")
+    await check
+    assert reported == [(FAIL, "TRADING212_API_KEY is not set (.env)")]
+
+
+def test_checks_each_database_opens(config, tmp_path):
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "budget.db")
+    conn.execute("CREATE TABLE expenses (x)")
+    conn.close()
+    config.sqlite.databases = {"budget": "budget.db", "gone": "gone.db"}
+    reported = []
+    doctor.check_databases(config, lambda mark, msg: reported.append((mark, msg)))
+    assert reported == [
+        (OK, f"budget: 1 table, read-only ({tmp_path / 'budget.db'})"),
+        (FAIL, f"gone: There's no database file at {tmp_path / 'gone.db'}."),
+    ]

@@ -101,6 +101,24 @@ class NewsConfig(_Section):
     cache_minutes: float = 10.0
 
 
+class Trading212Config(_Section):
+    # Your Trading 212 Invest or Stocks ISA account (see README, "Trading 212"). Reading
+    # it runs without asking; placing or cancelling an order always asks you first.
+    enabled: bool = False
+    api_key: str = ""
+    api_secret: str = ""  # keys made before Trading 212 added secrets have none
+    environment: Literal["live", "demo"] = "live"  # "demo" is the practice account, with its own key
+    timeout_seconds: float = 15.0
+
+
+class SQLiteConfig(_Section):
+    # SQLite databases the assistant can query, by name (see README, "Databases"). Only these
+    # files are ever opened, and only for reading.
+    databases: dict[str, str] = Field(default_factory=dict)
+    max_rows: int = 100
+    timeout_seconds: float = 10.0  # a query running longer than this is stopped
+
+
 class SiriConfig(_Section):
     # Lets an Apple Shortcut ask the assistant, so you can ask by voice (see README, "Siri").
     enabled: bool = False
@@ -154,6 +172,8 @@ class Config(_Section):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     siri: SiriConfig = Field(default_factory=SiriConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
+    trading212: Trading212Config = Field(default_factory=Trading212Config)
+    sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.

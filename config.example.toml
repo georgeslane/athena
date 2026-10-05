@@ -69,6 +69,19 @@ led = true                             # LED: blue while working, flashing amber
 "Financial Times" = "https://www.ft.com/rss/home"
 "Hacker News" = "https://hnrss.org/frontpage"
 
+[trading212]
+# Your Trading 212 Invest or Stocks ISA account (see README, "Trading 212"). Reading it
+# doesn't ask; placing or cancelling an order always asks you first, in Telegram.
+enabled = false
+api_key = "${TRADING212_API_KEY}"
+api_secret = "${TRADING212_API_SECRET}"
+environment = "live"                   # or "demo" for the practice account, which has its own key
+
+[sqlite.databases]
+# SQLite databases the assistant can query, read-only (see README, "Databases"). Only
+# these files are ever opened. Name them however you like:
+# "budget" = "/home/you/budget.db"
+
 [siri]
 # Ask by voice: "Hey Siri, Ask Athena" on your iPhone or Mac (see README, "Siri").
 # Your question and the answer also appear in the Telegram chat.

@@ -181,19 +181,23 @@ class TelegramBot:
         except TelegramError:
             pass
 
-    async def _confirm(self, bot: Bot, chat_id: int, tool: str, args: dict[str, Any]) -> bool:
+    async def _confirm(
+        self, bot: Bot, chat_id: int, tool: str, args: dict[str, Any], summary: str | None = None
+    ) -> bool:
         key = secrets.token_hex(6)
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending[key] = future
         # Show every argument: approving content you can't see isn't approval. Link previews
         # stay off, or Telegram's servers would fetch a URL in the arguments before you decide.
+        # The tool's own summary of what it will do, if it has one, goes first.
         pretty = json.dumps(args, indent=2, ensure_ascii=False)
-        prompt = f"Allow <b>{html.escape(tool)}</b>?\n<pre>{html.escape(pretty)}</pre>"
+        said = f"\n{html.escape(summary)}" if summary else ""
+        prompt = f"Allow <b>{html.escape(tool)}</b>?{said}\n<pre>{html.escape(pretty)}</pre>"
         if len(prompt) > TELEGRAM_LIMIT:
             chunks = split_message(pretty)
             for chunk in chunks:
                 await bot.send_message(chat_id, chunk, link_preview_options=NO_PREVIEW)
-            prompt = f"Allow <b>{html.escape(tool)}</b> with the arguments in the {len(chunks)} messages above?"
+            prompt = f"Allow <b>{html.escape(tool)}</b> with the arguments in the {len(chunks)} messages above?{said}"
         buttons = InlineKeyboardMarkup(
             [
                 [
@@ -254,8 +258,8 @@ class TelegramBot:
         """The agent's reply to ``text``, showing "typing..." and asking for approvals in the chat meanwhile."""
         typing = asyncio.create_task(self._keep_typing(bot, chat_id))
 
-        async def confirm(tool: str, args: dict[str, Any]) -> bool:
-            return await self._confirm(bot, chat_id, tool, args)
+        async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
+            return await self._confirm(bot, chat_id, tool, args, summary)
 
         try:
             result = await self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note)

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from pi_assistant.agent import Agent
 from pi_assistant.config import Config
+from pi_assistant.databases import Databases
 from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
@@ -14,6 +15,7 @@ from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.news import NewsReader
 from pi_assistant.status import StatusFile, StatusTracker
 from pi_assistant.tools import ToolRegistry
+from pi_assistant.trading212 import Trading212
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +33,8 @@ class Services:
     status: StatusTracker
     status_file: StatusFile
     news: NewsReader | None = None
+    databases: Databases | None = None
+    trading212: Trading212 | None = None
 
     async def start(self) -> None:
         await self.mcp.start()
@@ -41,6 +45,8 @@ class Services:
         await self.mcp.stop()
         if self.news:
             await self.news.close()
+        if self.trading212:
+            await self.trading212.close()
         await self.llm.close()
         await self.embedder.close()
         self.memory.store.close()
@@ -64,6 +70,18 @@ def build_services(cfg: Config) -> Services:
     news = NewsReader(cfg.news, cfg.agent.timezone) if cfg.news.feeds else None
     for tool in news.tools() if news else []:
         tools.add(tool)
+    databases = None
+    if cfg.sqlite.databases:
+        databases = Databases(cfg.sqlite, {name: cfg.resolve(path) for name, path in cfg.sqlite.databases.items()})
+        for tool in databases.tools():
+            tools.add(tool)
+    trading212 = None
+    if cfg.trading212.enabled and not cfg.trading212.api_key:
+        log.warning("Trading 212 is switched on, but TRADING212_API_KEY isn't set in .env, so it's left out")
+    elif cfg.trading212.enabled:
+        trading212 = Trading212(cfg.trading212, cfg.agent.timezone)
+        for tool in trading212.tools():
+            tools.add(tool)
     mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir)
     tools.add_provider(mcp.tools)
 
@@ -86,5 +104,17 @@ def build_services(cfg: Config) -> Services:
         status=status,
     )
     return Services(
-        cfg, llm, memory.embedder, memory, history, tools, mcp, agent, status, StatusFile(cfg.status_path), news
+        cfg,
+        llm,
+        memory.embedder,
+        memory,
+        history,
+        tools,
+        mcp,
+        agent,
+        status,
+        StatusFile(cfg.status_path),
+        news,
+        databases,
+        trading212,
     )

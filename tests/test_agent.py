@@ -7,7 +7,7 @@ from conftest import FakeLLMServer, completion
 from pi_assistant.agent import Agent
 from pi_assistant.history import ConversationStore
 from pi_assistant.status import State, StatusTracker
-from pi_assistant.tools import Tool, ToolRegistry
+from pi_assistant.tools import Tool, ToolError, ToolRegistry
 
 
 def make_agent(config, memory, server: FakeLLMServer, extra_tools=(), status=None):
@@ -78,7 +78,7 @@ async def test_confirmation_declined(config, memory):
     agent = make_agent(config, memory, server)
     asked = []
 
-    async def confirm(tool, args):
+    async def confirm(tool, args, summary=None):
         asked.append((tool, args))
         return False
 
@@ -212,7 +212,7 @@ async def test_status_board_shows_approvals_and_failures(config, memory):
     status.channel = "Telegram"
     agent = make_agent(config, memory, server, status=status)
 
-    async def confirm(tool, args):
+    async def confirm(tool, args, summary=None):
         assert (seen[-1].state, seen[-1].tool, seen[-1].channel) == (State.APPROVAL, "forget_memory", "Telegram")
         return False
 
@@ -261,3 +261,38 @@ async def test_warm_up_is_skipped_while_a_message_is_being_answered(config, memo
     async with agent._locks["chat1"]:
         assert await agent.warm_up("chat1") is None
     assert server.requests == []
+
+
+async def test_a_tool_can_check_and_describe_a_call_before_you_are_asked(config, memory):
+    sent = []
+
+    async def send(args):
+        sent.append(args)
+        return "Posted."
+
+    async def preview(args):
+        if not args.get("to"):
+            raise ToolError("Say who it's for.")
+        return f"Post a card to {args['to']}."
+
+    card = Tool("post_card", "Post a card.", {"type": "object", "properties": {}}, send, True, preview=preview)
+    server = FakeLLMServer(
+        [
+            completion(None, [("post_card", {})]),
+            completion(None, [("post_card", {"to": "Gran"})]),
+            completion("Posted it."),
+        ]
+    )
+    agent = make_agent(config, memory, server, extra_tools=[card])
+    asked = []
+
+    async def confirm(tool, args, summary=None):
+        asked.append((tool, args, summary))
+        return True
+
+    await agent.respond("chat1", "send Gran a card", confirm=confirm)
+
+    # A call the tool refuses never reaches you; the model is told why, and can fix it.
+    assert server.requests[1]["messages"][-1]["content"] == "Error: Say who it's for."
+    assert asked == [("post_card", {"to": "Gran"}, "Post a card to Gran.")]
+    assert sent == [{"to": "Gran"}]

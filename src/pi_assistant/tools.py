@@ -14,6 +14,10 @@ ToolProvider = Callable[[], Iterable["Tool"]]
 _INVALID_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 
 
+class ToolError(Exception):
+    """A problem the model can fix, such as a bad argument. Its message is shown to the model as-is."""
+
+
 @dataclass
 class Tool:
     name: str
@@ -22,6 +26,9 @@ class Tool:
     handler: ToolHandler
     needs_confirmation: bool = False
     source: str = "builtin"
+    # For tools that ask first: checks the arguments and says in plain words what the call
+    # will do, for the approval message. Raising ToolError stops the call before you're asked.
+    preview: ToolHandler | None = None
 
     def schema(self) -> dict[str, Any]:
         return {

@@ -18,12 +18,13 @@ from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient, LLMReply, ToolCall
 from pi_assistant.memory import MemoryHit, MemoryService
 from pi_assistant.status import StatusTracker, Task
-from pi_assistant.tools import ToolRegistry
+from pi_assistant.tools import ToolError, ToolRegistry
 
 log = logging.getLogger(__name__)
 
-# Asks the user to approve a tool call: (tool name, arguments) -> approved?
-ConfirmFn = Callable[[str, dict[str, Any]], Awaitable[bool]]
+# Asks the user to approve a tool call: (tool name, arguments, what it will do if the
+# tool can say) -> approved?
+ConfirmFn = Callable[[str, dict[str, Any], str | None], Awaitable[bool]]
 # Notified as each tool runs: (tool name, arguments, result).
 ToolEventFn = Callable[[str, dict[str, Any], str], Awaitable[None]]
 
@@ -117,9 +118,15 @@ class Agent:
         if tool.needs_confirmation:
             if confirm is None:
                 return "Error: this action needs the user's approval, which can't be requested here."
+            summary = None
+            if tool.preview:
+                try:
+                    summary = await asyncio.wait_for(tool.preview(call.arguments), self.cfg.tool_timeout_seconds)
+                except Exception as exc:  # nothing has been done, and the user hasn't been asked
+                    return self._tool_error(call.name, exc)
             try:
                 with task.approval(tool.name):
-                    approved = await confirm(tool.name, call.arguments)
+                    approved = await confirm(tool.name, call.arguments, summary)
             except Exception as exc:
                 log.warning("Confirmation request failed: %s", exc)
                 approved = False
@@ -128,16 +135,22 @@ class Agent:
         task.using(tool.name)
         try:
             result = await asyncio.wait_for(tool.handler(call.arguments), self.cfg.tool_timeout_seconds)
-        except TimeoutError:
-            return f"Error: the tool timed out after {self.cfg.tool_timeout_seconds:.0f}s."
         except Exception as exc:
-            log.exception("Tool %s failed", call.name)
-            return f"Error: {type(exc).__name__}: {exc}"
+            return self._tool_error(call.name, exc)
         result = result if isinstance(result, str) else json.dumps(result, default=str)
         limit = self.cfg.max_tool_result_chars
         if len(result) > limit:
             result = result[:limit] + f"\n[...truncated {len(result) - limit} characters]"
         return result or "(no output)"
+
+    def _tool_error(self, name: str, exc: Exception) -> str:
+        """What the model is told when a tool fails. Call it from the `except` block."""
+        if isinstance(exc, TimeoutError):
+            return f"Error: the tool timed out after {self.cfg.tool_timeout_seconds:.0f}s."
+        if isinstance(exc, ToolError):
+            return f"Error: {exc}"
+        log.exception("Tool %s failed", name)
+        return f"Error: {type(exc).__name__}: {exc}"
 
     # -- main entry point -------------------------------------------------------------
 

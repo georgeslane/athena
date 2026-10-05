@@ -70,9 +70,10 @@ async def _chat(args: argparse.Namespace) -> int:
             + (f"{st.tools} tool{'' if st.tools == 1 else 's'}" if st.connected else f"unavailable ({st.error})")
         )
 
-    async def confirm(tool: str, tool_args: dict[str, Any]) -> bool:
+    async def confirm(tool: str, tool_args: dict[str, Any], summary: str | None = None) -> bool:
+        said = "\n  " + summary.replace("\n", "\n  ") if summary else ""
         answer = await asyncio.to_thread(
-            input, f"\n  Allow {tool}({json.dumps(tool_args, ensure_ascii=False)})? [y/N] "
+            input, f"{said}\n  Allow {tool}({json.dumps(tool_args, ensure_ascii=False)})? [y/N] "
         )
         return answer.strip().lower() in {"y", "yes"}
 
