@@ -31,7 +31,7 @@ PRIVATE_PATHS = [
     ".env.local",
     "config.toml",
     "data/assistant.db",
-    "data/status.json",  # what you last asked the assistant, for the status board
+    "data/status.json",  # what you last asked the assistant, left by the old built-in status board
     "data/logs/mcp-fetch.log",
     "prompts/system.local.md",
     ".personal-blocklist",  # your personal details, for scripts/check-secrets.sh to look for

@@ -1,28 +1,19 @@
-"""What the assistant is doing right now, published for the status board.
+"""What the assistant is doing right now, for the status board.
 
-The agent process keeps a StatusTracker up to date and writes every change to
-``data/status.json``. The status board (``pi-assistant display``) is a separate
-process that reads it. While an agent process runs it holds a shared lock on
-``data/status.lock``; the kernel drops that lock when the process exits, even
-if it crashes, so the board can tell "offline" from "idle" without the agent
-rewriting anything on a timer.
+The agent keeps a StatusTracker up to date as it works, and status_api.py serves it
+over HTTP. The status board itself is a separate service (pi-display-microservice) that asks
+for it, so either can run, restart or change without the other. When nothing answers,
+the board knows the assistant isn't running.
 """
 
 from __future__ import annotations
 
 import contextlib
 import dataclasses
-import fcntl
-import json
-import logging
-import os
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
-
-log = logging.getLogger(__name__)
 
 TASK_CHARS = 160  # about three lines on the board
 
@@ -45,14 +36,13 @@ class State(StrEnum):
     IDLE = "idle"
     WORKING = "working"
     APPROVAL = "approval"  # waiting for the user to allow or deny a tool
-    OFFLINE = "offline"  # no agent process is running
 
 
 @dataclass
 class Snapshot:
-    """Everything the board shows. Times are Unix timestamps."""
+    """What the assistant is doing, as the status API reports it. Times are Unix timestamps."""
 
-    state: State = State.OFFLINE
+    state: State = State.IDLE
     task: str = ""  # the request being worked on ("" when idle, or when show_task is off)
     step: str = ""  # what's happening right now, e.g. "Using fetch"
     tools: list[str] = field(default_factory=list)  # tools used for this task so far
@@ -63,18 +53,7 @@ class Snapshot:
     last_task: str = ""  # idle: the previous task,
     last_error: str = ""  # why it failed ("" if it didn't),
     last_finished: float = 0.0  # and when it ended
-    updated: float = 0.0  # when this snapshot was written
-
-    def to_json(self) -> str:
-        return json.dumps(dataclasses.asdict(self), ensure_ascii=False)
-
-    @classmethod
-    def from_json(cls, text: str) -> Snapshot:
-        raw = json.loads(text)
-        known = {f.name for f in dataclasses.fields(cls)}
-        snapshot = cls(**{k: v for k, v in raw.items() if k in known})
-        snapshot.state = State(snapshot.state)
-        return snapshot
+    updated: float = 0.0  # when it last changed
 
 
 def shorten(text: str, limit: int = TASK_CHARS) -> str:
@@ -177,74 +156,3 @@ class StatusTracker:
         self._published = snapshot
         if self.on_change:
             self.on_change(dataclasses.replace(snapshot, updated=self.clock()))
-
-
-class StatusFile:
-    """``status.json``, plus the lock that says an agent process is running."""
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.lock_path = path.with_suffix(".lock")
-        self._lock_fd: int | None = None
-
-    # -- agent side -----------------------------------------------------------------------
-
-    def publish(self, tracker: StatusTracker) -> None:
-        """Hold the "running" lock until close() or exit, and write every change from ``tracker``."""
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-            # Shared, so several agent processes (the bot and `chat`) can run at once.
-            # Blocks only for the instant the board holds the lock to check it.
-            fcntl.flock(fd, fcntl.LOCK_SH)
-            self._lock_fd = fd
-            self.write(tracker.snapshot())
-        except OSError as exc:
-            log.warning("Status board disabled: can't write %s: %s", self.path, exc)
-            return
-        tracker.on_change = self._write_or_stop(tracker)
-
-    def _write_or_stop(self, tracker: StatusTracker) -> Callable[[Snapshot], None]:
-        def write(snapshot: Snapshot) -> None:
-            try:
-                self.write(snapshot)
-            except OSError as exc:  # e.g. disk full: keep the assistant running, stop updating
-                log.warning("Status board updates stopped: can't write %s: %s", self.path, exc)
-                tracker.on_change = None
-
-        return write
-
-    def write(self, snapshot: Snapshot) -> None:
-        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(snapshot.to_json())
-        os.replace(tmp, self.path)  # atomic: the board never sees half a file
-
-    def close(self) -> None:
-        if self._lock_fd is not None:
-            os.close(self._lock_fd)  # releases the lock
-            self._lock_fd = None
-
-    # -- board side -----------------------------------------------------------------------
-
-    def agent_running(self) -> bool:
-        try:
-            fd = os.open(self.lock_path, os.O_RDONLY)
-        except FileNotFoundError:
-            return False
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True  # an agent process holds its shared lock
-        finally:
-            os.close(fd)  # also releases our lock if we got it
-        return False
-
-    def read(self) -> Snapshot:
-        if not self.agent_running():
-            return Snapshot(State.OFFLINE)
-        try:
-            return Snapshot.from_json(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):  # running, but nothing (valid) written yet
-            return Snapshot(State.IDLE)

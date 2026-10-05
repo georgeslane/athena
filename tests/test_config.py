@@ -47,8 +47,9 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
     assert cfg.sqlite.databases == {}  # none until you list some
     assert cfg.llm.warm_up_minutes == 10
     assert cfg.agent.assistant_name == "Athena"
-    assert cfg.display.show_task and cfg.display.led
-    assert cfg.status_path == tmp_path / "data" / "status.json"
+    # The status board's API only listens on the Pi, and the LED is set on the board's side now.
+    assert cfg.display.enabled and (cfg.display.host, cfg.display.port) == ("127.0.0.1", 8091)
+    assert cfg.display.show_task and cfg.display.led is None
     # Siri is off until you set it up, and only listens on this machine.
     assert not cfg.siri.enabled and cfg.siri.host == "127.0.0.1"
     assert cfg.siri.token == "for-the-shortcut"
@@ -84,3 +85,10 @@ def test_mcp_http_transport_detection():
     assert MCPServerConfig(url="http://mac:8765/sse").http_transport == "sse"
     assert MCPServerConfig(url="http://mac:8765/mcp").http_transport == "http"
     assert MCPServerConfig(url="http://mac:8765/mcp", transport="sse").http_transport == "sse"
+
+
+def test_a_config_from_before_the_board_moved_still_loads(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[llm]\nmodel = "m"\n[display]\nshow_task = false\nled = true\n')
+    cfg = load_config(p)
+    assert cfg.display.show_task is False and cfg.display.led is True  # doctor says led has moved

@@ -13,7 +13,8 @@ from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.news import NewsReader
-from pi_assistant.status import StatusFile, StatusTracker
+from pi_assistant.status import StatusTracker
+from pi_assistant.status_api import StatusServer
 from pi_assistant.tools import ToolRegistry
 from pi_assistant.trading212 import Trading212
 
@@ -31,17 +32,19 @@ class Services:
     mcp: MCPManager
     agent: Agent
     status: StatusTracker
-    status_file: StatusFile
+    status_api: StatusServer | None
     news: NewsReader | None = None
     databases: Databases | None = None
     trading212: Trading212 | None = None
 
     async def start(self) -> None:
         await self.mcp.start()
-        self.status_file.publish(self.status)  # the status board shows "offline" until now
+        if self.status_api:
+            await self.status_api.start()  # the status board shows "offline" until now
 
     async def close(self) -> None:
-        self.status_file.close()
+        if self.status_api:
+            await self.status_api.stop()
         await self.mcp.stop()
         if self.news:
             await self.news.close()
@@ -93,6 +96,9 @@ def build_services(cfg: Config) -> Services:
         log.warning("System prompt %s not found; using a minimal built-in prompt", prompt_path)
 
     status = StatusTracker(show_task=cfg.display.show_task)
+    status_api = None
+    if cfg.display.enabled:
+        status_api = StatusServer(cfg.display, status, name=cfg.agent.assistant_name, timezone=cfg.agent.timezone)
     agent = Agent(
         cfg.agent,
         llm,
@@ -113,7 +119,7 @@ def build_services(cfg: Config) -> Services:
         mcp,
         agent,
         status,
-        StatusFile(cfg.status_path),
+        status_api,
         news,
         databases,
         trading212,
