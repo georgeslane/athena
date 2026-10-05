@@ -42,6 +42,9 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
         if server.command == "uvx":
             assert any("==" in arg for arg in server.args), server.args
     assert "BBC News" in cfg.news.feeds
+    # Trading 212 is off until you add a key, and trades always ask first (see test_trading212.py).
+    assert not cfg.trading212.enabled and cfg.trading212.environment == "live"
+    assert cfg.sqlite.databases == {}  # none until you list some
     assert cfg.llm.warm_up_minutes == 10
     assert cfg.agent.assistant_name == "Athena"
     assert cfg.display.show_task and cfg.display.led
