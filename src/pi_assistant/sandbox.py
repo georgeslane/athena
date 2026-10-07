@@ -24,6 +24,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+HIDDEN = ("/home", "/root", "/run/user", "/var/tmp")  # emptied in the sandbox, along with your home folder
 INSTALL_HINT = "Install bubblewrap (sudo apt install bubblewrap), or set sandbox = false for the server."
 
 
@@ -71,11 +72,11 @@ class Sandbox:
         """The command line that runs ``command`` in a sandbox."""
         assert self.bwrap
         args = [self.bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
-        for hidden in ("/home", "/root", "/run/user", "/var/tmp", str(self.home)):
-            if Path(hidden).is_dir():
+        for hidden in self._hidden():
+            if hidden.is_dir():
                 # Nothing in anyone's home, nor their session sockets. Its own home is empty and
                 # writable, and gone when it stops.
-                args += ["--tmpfs", hidden]
+                args += ["--tmpfs", str(hidden)]
         for path in _unique([*self.needed(command), *read_only, *([cwd] if cwd else [])]):
             args += ["--ro-bind-try", str(path), str(path)]
         args += ["--unshare-all", *(["--share-net"] if network else [])]
@@ -84,15 +85,24 @@ class Sandbox:
 
     def needed(self, command: list[str]) -> list[Path]:
         """What a command needs from the home folder to run at all."""
-        paths = [self.home / ".local" / "share" / "uv" / "python"]  # the Pythons uv installs, for venvs
+        paths = [self.home / ".local" / "share" / "uv" / "python"]  # where uv puts the Pythons it installs
         program = Path(command[0]) if "/" in command[0] else Path(shutil.which(command[0]) or command[0])
-        if program.is_absolute() and _within(program, self.home):
+        if program.is_absolute():
             venv = program.parent.parent
-            # A virtual environment's command needs the whole environment; any other, just its folder.
-            paths.append(venv if (venv / "pyvenv.cfg").exists() else program.parent)
+            if (venv / "pyvenv.cfg").exists():
+                # A virtual environment's command needs the whole environment, and the Python it was made from.
+                paths += [venv, *_base_python(venv)]
+            else:
+                paths.append(program.parent)
+            if program.resolve() != program:
+                paths.append(program.resolve().parent)  # where a link to it leads
         if program.name == "ssh":
             paths.append(self.home / ".ssh")  # ssh itself is trusted: it's for the Mac's servers
-        return [p for p in paths if p.is_absolute() and _within(p, self.home)]  # the rest is visible anyway
+        # Only what's in a hidden folder needs showing: the rest is visible anyway.
+        return [p for p in _unique(paths) if any(_within(p, hidden) for hidden in self._hidden())]
+
+    def _hidden(self) -> list[Path]:
+        return _unique([*map(Path, HIDDEN), self.home])
 
     async def self_test(self) -> list[tuple[bool, str]]:
         """Checks, for doctor, that a sandboxed process can't see a file in your home folder, or reach the network."""
@@ -128,6 +138,16 @@ async def _run(command: list[str]) -> tuple[int, str]:
         return 127, str(exc)
     output, _ = await proc.communicate()
     return proc.returncode or 0, output.decode(errors="replace")
+
+
+def _base_python(venv: Path) -> list[Path]:
+    """The installation of the Python a virtual environment was made from, as its pyvenv.cfg names it."""
+    for line in (venv / "pyvenv.cfg").read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "home" and value.strip():
+            installed = Path(value.strip()).parent  # home is its bin folder: take the whole installation
+            return _unique([installed, installed.resolve()])
+    return []
 
 
 def _within(path: Path, folder: Path) -> bool:
