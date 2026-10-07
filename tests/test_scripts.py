@@ -26,6 +26,8 @@ STUBS = {
     + '  echo "Error: pull model manifest: 412: this model requires a newer version of Ollama"; exit 1\nfi\n'
     + 'if [ "$1" = pull ] && [ "$2" = missing ]; then echo "Error: file does not exist"; exit 1; fi\n',
     "uv": RECORD + 'exit "${UV_EXIT:-0}"\n',
+    # `dpkg -s bubblewrap` says it's installed only if BWRAP_INSTALLED is set.
+    "dpkg": RECORD + '[ -n "$BWRAP_INSTALLED" ]\n',
     "uvx": RECORD,
     "raspi-config": RECORD,
     "getent": RECORD,
@@ -79,7 +81,7 @@ def test_install(sandbox):
     result, calls = run("install.sh")
     assert result.returncode == 0, result.stderr
 
-    assert "sudo apt-get install -y -qq git curl ca-certificates sqlite3" in calls
+    assert "sudo apt-get install -y -qq git curl ca-certificates sqlite3 bubblewrap" in calls
     assert "uv sync --no-dev" in calls
     assert not [c for c in calls if "display" in c]  # the status board is its own project now
     unit = (files / "pi-assistant.service").read_text()
@@ -108,14 +110,22 @@ def test_install_rejects_unknown_options(sandbox):
 
 def test_update(sandbox):
     _, _, run = sandbox
-    result, calls = run("update.sh", fake_git=True)
+    result, calls = run("update.sh", fake_git=True, BWRAP_INSTALLED="1")
     assert result.returncode == 0, result.stderr
     assert calls == [
         "git pull --ff-only",
         "uv sync --no-dev",
+        "dpkg -s bubblewrap",
         "sudo systemctl restart pi-assistant",
         "systemctl cat pi-assistant-display.service",
     ]
+
+
+def test_update_installs_the_mcp_servers_sandbox(sandbox):
+    _, _, run = sandbox
+    result, calls = run("update.sh", fake_git=True)
+    assert result.returncode == 0, result.stderr
+    assert calls[2:4] == ["dpkg -s bubblewrap", "sudo apt-get install -y -qq bubblewrap"]
 
 
 def test_update_retires_the_old_status_board(sandbox):

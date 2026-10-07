@@ -171,6 +171,11 @@ class MCPServerConfig(_Section):
     # data off the local network; set [] only for servers that can't (e.g. local, read-only).
     confirm: list[str] = Field(default_factory=lambda: ["*"])
     timeout_seconds: float = 60.0
+    # Local servers run in a sandbox (see sandbox.py): without your home folder, and without the
+    # network unless `network`. `read_only_paths` are folders or files it may read as well.
+    sandbox: bool = True
+    network: bool = True
+    read_only_paths: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _exactly_one_transport(self) -> MCPServerConfig:

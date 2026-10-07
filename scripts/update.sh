@@ -10,6 +10,10 @@ main() {
   export PATH="$HOME/.local/bin:$PATH"
   git pull --ff-only
   uv sync --no-dev
+  if ! dpkg -s bubblewrap >/dev/null 2>&1; then
+    # Local MCP servers run in a bubblewrap sandbox, and won't start without it.
+    sudo apt-get install -y -qq bubblewrap >/dev/null
+  fi
   sudo systemctl restart pi-assistant
   echo "Updated and restarted pi-assistant."
   if systemctl cat pi-assistant-display.service >/dev/null 2>&1; then

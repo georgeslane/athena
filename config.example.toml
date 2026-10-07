@@ -116,6 +116,10 @@ reply_timeout_seconds = 20             # Siri gives up after about 25s; slower a
 #   confirm = [...]   ask for approval in Telegram before running these
 #                     (default: all of them, since any tool might send your data
 #                     off your network; set [] only for servers that can't)
+# Local servers run in a sandbox, without your home folder (README, "Sandbox"):
+#   network = false   no network access either (default: true)
+#   read_only_paths = [...]   files or folders it may read
+#   sandbox = false   run it without a sandbox: it can read everything you can
 # Fewer tools = shorter prompts = faster replies, so only enable what you use.
 # ---------------------------------------------------------------------------
 
@@ -123,6 +127,7 @@ reply_timeout_seconds = 20             # Siri gives up after about 25s; slower a
 command = "uvx"
 args = ["mcp-server-time==2026.8.18", "--local-timezone=Europe/London"]
 confirm = []                           # local and read-only, so it needn't ask
+network = false                        # it only reads the clock
 
 [mcp_servers.fetch]
 command = "uvx"

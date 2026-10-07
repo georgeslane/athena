@@ -160,6 +160,7 @@ CATALOG: tuple[Integration, ...] = (
             "command": "uvx",
             "args": ["mcp-server-time==2026.8.18", "--local-timezone=Europe/London"],
             "confirm": [],
+            "network": False,
         },
         asks="Never asks: it's local and only reads the clock.",
     ),
