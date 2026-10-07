@@ -70,9 +70,15 @@ def test_fit_dimensions_truncates_and_normalises():
         fit_dimensions([1.0], 2)
 
 
+@pytest.mark.parametrize("vector", [[float("nan"), 1.0], [float("inf"), 1.0], [0.0, 0.0]])
+def test_broken_vectors_are_refused_rather_than_saved(vector):
+    with pytest.raises(MemoryStoreError, match="unusable vector"):
+        fit_dimensions(vector, 2)
+
+
 def test_changing_embedding_model_is_detected(tmp_path):
     MemoryStore(tmp_path / "m.db", 8, "model-a").close()
-    with pytest.raises(MemoryStoreError, match="reindex"):
+    with pytest.raises(MemoryStoreError, match="switch-embeddings.sh model-b"):
         MemoryStore(tmp_path / "m.db", 8, "model-b")
     with pytest.raises(MemoryStoreError, match="dimension"):
         MemoryStore(tmp_path / "m.db", 16, "model-a")

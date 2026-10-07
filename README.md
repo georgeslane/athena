@@ -13,7 +13,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
                    │   memory ◄────────┤                      │      │                             │
                    │   (SQLite + vec)  │  MCP client ─────────┼─────►│ MCP servers: your files     │
                    │                   │      │               │ SSH  │   (read-only), Calendar and │
-                   │ Ollama: embeddinggemma   ▼               │      │   Reminders (iMCP)          │
+                   │ Ollama: EmbeddingGemma 2 ▼               │      │   Reminders (iMCP)          │
                    │ MCP servers: time, fetch, email, SEC ... │      └─────────────────────────────┘
                    └──────────────────────────────────────────┘
 ```
@@ -45,7 +45,7 @@ cd ~/pi-assistant
 bash scripts/install.sh
 ```
 
-The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. For a Display HAT Mini, see [Status board](#status-board).
+The script installs uv and Ollama (or updates an Ollama too old for the embeddings model), pulls EmbeddingGemma 2, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. For a Display HAT Mini, see [Status board](#status-board).
 
 Then:
 
@@ -84,7 +84,9 @@ Then:
 | `chat` | Chat in the terminal, with the same tools and memory. |
 | `doctor` | Check the model server, embeddings, database, MCP servers and Telegram. |
 | `ingest PATH...` | Add `.md`/`.txt` files or folders to memory. Re-running a file replaces its old chunks. |
-| `reindex` | Re-embed everything after changing the embeddings model. |
+| `reindex` | Re-embed everything with the configured embeddings model. |
+| `embeddings test [-m MODEL]` | Test how well an embeddings model finds memories, and the cut-offs that suit it (see [Changing the embeddings model](#changing-the-embeddings-model)). |
+| `embeddings use MODEL` | Test a model against the current one, then switch to it and re-embed everything. Stop Athena first, or use `scripts/switch-embeddings.sh`. |
 | `eval -m MODEL [-m MODEL2]` | Compare models on tool calling (see below). |
 
 ## Dashboard
@@ -343,8 +345,21 @@ To update a server later, read what changed, change its pinned version and resta
 - **Saving:** the model saves durable facts on its own, guided by `prompts/system.md`. `/remember` lets you add them yourself.
 - **Past conversations:** after each reply, your message and the reply are added to memory, in an index of their own. `search_memory` finds them, so Athena can look up what you talked about in an earlier session, but they aren't added to messages automatically, so an old answer can't be mistaken for a current one. Anything said while the embeddings server was down is added when it's back.
 - **Forgetting:** `/forget <id>` deletes one memory. **Forget everything** on the dashboard deletes them all, with the conversation history.
-- **Embeddings model:** `embeddinggemma` (768 dimensions, about 600 MB of RAM) runs on the Pi's CPU through Ollama. To switch models, change `[embeddings]` and run `pi-assistant reindex`. If you change `dimensions`, start a fresh database instead.
+- **Duplicates:** a fact closer than `duplicate_distance` to one already saved isn't saved again.
+- **Embeddings model:** [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (`embeddinggemma-2:740m-bf16`: 768 dimensions, a 1.5 GB download) runs on the Pi's CPU through Ollama 0.36 or later.
 - **Storage:** everything (history, memory and usage statistics) lives in `data/assistant.db`. Back up that one file.
+
+### Changing the embeddings model
+
+Every memory is stored as a vector from the embeddings model, and vectors from different models can't be compared, so switching means re-embedding all of them. Each model also scores distances on its own scale: EmbeddingGemma 2's are about half EmbeddingGemma's, so `recall_max_distance` and `duplicate_distance` change with it. One script does all of this:
+
+```bash
+bash scripts/switch-embeddings.sh embeddinggemma-2:740m-bf16
+```
+
+It downloads the model (offering to update Ollama if it's too old for it), stops Athena, and tests the new model against the current one on 40 questions about made-up memories. It shows how often each finds the right memory, how fast it is and the cut-offs that suit it, then says what it will change and asks. If you agree, it sets the model and cut-offs in `config.toml` (keeping a copy in `config.toml.bak`) and re-embeds every memory. If that fails part way, nothing changes. Athena starts again either way.
+
+To test models without switching, run `uv run pi-assistant embeddings test -m embeddinggemma-2:740m-bf16 -m embeddinggemma-2:740m`. Ollama's `740m` is a 4-bit version of the same model (`nvfp4`): smaller, but less precise. `bf16` is the precision Google publishes and recommends; avoid `float16` builds, which can return broken vectors. Athena refuses to save those. If you change `dimensions`, start a fresh database instead.
 
 ## Choosing a model
 
@@ -413,7 +428,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/stats.py` | Usage statistics, per session and in total |
 | `src/pi_assistant/webserver.py` | The small HTTP server behind Siri's endpoint, the status API and the dashboard |
 | `src/pi_assistant/assets/` | The Athena icon, used by the dashboard and this README |
-| `src/pi_assistant/doctor.py`, `evals.py`, `cli.py` | Command-line tools |
+| `src/pi_assistant/doctor.py`, `evals.py`, `search_eval.py`, `cli.py` | Command-line tools |
 | `prompts/system.md` | System prompt. Point `agent.system_prompt_file` at a `*.local.md` copy to customise it privately. |
 | `scripts/install.sh`, `scripts/update.sh`, `deploy/` | Pi setup and updates |
 | `scripts/connect-mac.sh`, `scripts/mac/install.sh` | Linking the Pi to your Mac's files, Calendar and Reminders |
@@ -422,6 +437,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 
 - **Start with `uv run pi-assistant doctor`.** Then check `journalctl -u pi-assistant -f` and `data/logs/mcp-*.log`.
 - **"Can't reach the model server":** oMLX isn't running, is only listening on localhost, or the hostname doesn't resolve from the Pi. Try `curl http://my-mac.local:8000/v1/models` from the Pi.
+- **Memories show up in replies about something else, or don't when they should:** the recall cut-off doesn't suit the embeddings model. Run `uv run pi-assistant embeddings test` and set `recall_max_distance` to the cut-off it suggests.
+- **"The memory index was built with … but the config now uses …":** `config.toml` names a different embeddings model from the one your memories were stored with. Run the switch script it names, or put the old model back.
 - **The model answers instead of using tools:** check that tool calling works in `doctor`, then compare models with `eval`.
 - **The bot ignores you:** your ID isn't in `telegram.allowed_user_ids`. Empty the list temporarily to get your ID.
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.

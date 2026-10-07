@@ -18,7 +18,7 @@ import math
 import re
 import sqlite3
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +39,6 @@ Kind = Literal["fact", "document", "conversation"]
 VECTOR_TABLES = {"fact": "memory_vectors", "document": "memory_vectors", "conversation": "conversation_vectors"}
 INDEXED_TO = "conversations_indexed_to"  # memory_meta: the last message whose exchange is in memory
 TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".text", ".org", ".rst"}
-DUPLICATE_DISTANCE = 0.04  # facts closer than this to an existing fact are treated as duplicates
 
 
 class MemoryStoreError(Exception):
@@ -59,7 +58,10 @@ def fit_dimensions(vector: Sequence[float], dims: int) -> list[float]:
             "Set embeddings.dimensions to match the model."
         )
     v = list(vector[:dims])
-    norm = math.sqrt(sum(x * x for x in v)) or 1.0
+    norm = math.sqrt(sum(x * x for x in v))
+    if not math.isfinite(norm) or norm == 0:
+        # e.g. a model run in float16, which overflows: saving it would quietly break search.
+        raise MemoryStoreError("The embeddings model returned an unusable vector (NaN, infinite or all zeros).")
     return [x / norm for x in v]
 
 
@@ -166,17 +168,9 @@ class MemoryStore:
             elif meta.get("embedding_model") != current["embedding_model"] and not self._allow_model_change:
                 raise MemoryStoreError(
                     f"The memory index was built with '{meta.get('embedding_model')}' but the config now uses "
-                    f"'{self.embedding_model}'. Run `pi-assistant reindex` to re-embed everything."
+                    f"'{self.embedding_model}'. To switch, run "
+                    f"`bash scripts/switch-embeddings.sh {self.embedding_model}`, which re-embeds everything."
                 )
-
-    def set_embedding_model(self, model: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO memory_meta VALUES ('embedding_model', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (model,),
-            )
-        self.embedding_model = model
 
     def get_meta(self, key: str) -> str | None:
         with self._lock:
@@ -209,15 +203,19 @@ class MemoryStore:
                 (INDEXED_TO, str(indexed_to)),
             )
 
-    def replace_embedding(self, memory_id: int, embedding: Sequence[float]) -> None:
+    def replace_embeddings(self, vectors: Sequence[tuple[int, str, bytes]], model: str) -> None:
+        """Swap in new (id, kind, serialised vector)s for every entry, and note the model, all at once."""
         with self._lock, self._conn:
-            row = self._conn.execute("SELECT kind FROM memories WHERE id = ?", (memory_id,)).fetchone()
-            table = VECTOR_TABLES.get(row[0] if row else "fact", "memory_vectors")
-            self._conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (memory_id,))
+            for memory_id, kind, blob in vectors:
+                table = VECTOR_TABLES.get(kind, "memory_vectors")
+                self._conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (memory_id,))
+                self._conn.execute(f"INSERT INTO {table} (rowid, embedding) VALUES (?, ?)", (memory_id, blob))
             self._conn.execute(
-                f"INSERT INTO {table} (rowid, embedding) VALUES (?, ?)",
-                (memory_id, sqlite_vec.serialize_float32(list(embedding))),
+                "INSERT INTO memory_meta VALUES ('embedding_model', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (model,),
             )
+        self.embedding_model = model
 
     def _nearest(self, table: str, embedding: Sequence[float], k: int) -> list[MemoryHit]:
         rows = self._conn.execute(
@@ -424,7 +422,7 @@ class MemoryService:
             raise ValueError("nothing to remember")
         vector = await self.embedder.embed_one(text, "document")
         for hit in self.store.search(vector, 1, kind="fact"):
-            if hit.distance < DUPLICATE_DISTANCE:
+            if hit.distance < self.cfg.duplicate_distance:
                 return hit.id, False
         return self.store.add(text, vector, "fact", source), True
 
@@ -469,15 +467,19 @@ class MemoryService:
             self.store.add(chunk, vector, "document", source)
         return len(chunks)
 
-    async def reindex(self) -> int:
+    async def reindex(self, progress: Callable[[int, int], None] | None = None) -> int:
+        """Re-embed every entry with the configured model. Nothing changes until all of them are done,
+        so if the embeddings server fails part way, the old index is still whole."""
         entries = self.store.all_entries()
+        done: list[tuple[int, str, bytes]] = []
         for start in range(0, len(entries), 32):
             batch = entries[start : start + 32]
             titles = [_title(e) for e in batch]
             vectors = await self.embedder.embed([e.text for e in batch], "document", titles)
-            for entry, vector in zip(batch, vectors, strict=True):
-                self.store.replace_embedding(entry.id, vector)
-        self.store.set_embedding_model(self.embedder.cfg.model)
+            done += [(e.id, e.kind, sqlite_vec.serialize_float32(v)) for e, v in zip(batch, vectors, strict=True)]
+            if progress:
+                progress(len(done), len(entries))
+        self.store.replace_embeddings(done, self.embedder.cfg.model)
         return len(entries)
 
     # -- tools exposed to the model -------------------------------------------------
