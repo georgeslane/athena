@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,6 +28,7 @@ from mcp_types import Implementation
 from pi_assistant import __version__
 from pi_assistant.config import MCPServerConfig
 from pi_assistant.server_envs import ServerEnvError, ServerEnvs, parse_uvx
+from pi_assistant.tool_approvals import ToolApprovals, ToolChange, ToolVersion
 from pi_assistant.tools import Tool, matches_any, safe_tool_name
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,8 @@ class ServerStatus:
     # For servers started with uvx: where the lock on its dependencies came from ("reviewed", from
     # mcp-locks/, or "first use"), or "unlocked" if uvx is given options that can't be locked.
     lock: str | None = None
+    # Tools it offers that are new or have changed since you approved them, and so are held back.
+    pending: list[ToolChange] = field(default_factory=list)
 
 
 def result_to_text(result: Any) -> str:
@@ -91,6 +95,7 @@ class MCPManager:
         base_dir: Path | None = None,
         log_dir: Path | None = None,
         envs: ServerEnvs | None = None,
+        approvals: ToolApprovals | None = None,
     ):
         self.configured = dict(servers)  # including those switched off
         self.base_dir = base_dir or Path.cwd()
@@ -98,6 +103,11 @@ class MCPManager:
         self.log_dir = log_dir
         # Servers started with uvx run from locked environments made by this (as given, if None).
         self.envs = envs
+        # Tools that are new or changed are held back until approved here (all are used, if None).
+        self.approvals = approvals
+        # Told (server, changes) when a server's tools change, once for each change.
+        self.listeners: list[Callable[[str, list[ToolChange]], None]] = []
+        self._told: set[tuple[str, str, str]] = set()
         self._connections: dict[str, _Connection] = {}
         self._tools: list[Tool] = []
         self._lock = asyncio.Lock()
@@ -117,6 +127,17 @@ class MCPManager:
         return [
             self._connections[name].status if name in self._connections else ServerStatus(name) for name in self.servers
         ]
+
+    def approve(self, server: str, tools: dict[str, str]) -> None:
+        """Approve held-back tools, given as {tool: fingerprint}, so it's exactly the version you looked at."""
+        conn = self._connections.get(server)
+        held = {c.tool: c for c in conn.status.pending} if conn else {}
+        for tool, seen in tools.items():
+            if tool not in held or held[tool].now.fingerprint != seen:
+                raise ValueError(f"{tool} isn't waiting for approval, or has changed again: have another look.")
+        if self.approvals and tools:
+            self.approvals.approve(server, {tool: held[tool].now for tool in tools})
+            self._rebuild_tools()
 
     async def start(self) -> None:
         self._started = True
@@ -256,6 +277,9 @@ class MCPManager:
             remote_tools.extend(listing.tools)
         conn.client = client
         conn.remote_tools = remote_tools
+        if self.approvals and not self.approvals.knows(conn.name):
+            # The first time: you've just chosen this server, and can see its tools on the dashboard.
+            self.approvals.approve(conn.name, {t.name: _version(t) for t in remote_tools})
         conn.status.offered = [(t.name, (t.description or t.title or "").strip()) for t in remote_tools]
 
     def _rebuild_tools(self) -> None:
@@ -265,31 +289,54 @@ class MCPManager:
             if not conn.status.connected or conn.client is None:
                 continue
             cfg, taken = conn.cfg, {t.name for t in tools}
+            approved = self.approvals.approved(conn.name) if self.approvals else None
             mine: list[Tool] = []
+            held: list[ToolChange] = []
             for remote in conn.remote_tools:
                 if cfg.include and not matches_any(remote.name, cfg.include):
                     continue
                 if matches_any(remote.name, cfg.exclude):
                     continue
+                version = _version(remote)
+                if approved is not None:
+                    before = approved.get(remote.name)
+                    if before is None or before.fingerprint != version.fingerprint:
+                        held.append(ToolChange(remote.name, version, before))
+                        continue
                 tool_name = safe_tool_name(remote.name)
                 if tool_name in taken or tool_name in RESERVED_NAMES:
                     tool_name = safe_tool_name(f"{conn.name}__{remote.name}")
-                schema = dict(remote.input_schema or {})
-                schema.setdefault("type", "object")
-                schema.setdefault("properties", {})
                 mine.append(
                     Tool(
                         name=tool_name,
-                        description=(remote.description or remote.title or remote.name).strip(),
-                        parameters=schema,
+                        description=version.description,
+                        parameters=version.parameters,
                         handler=self._make_handler(conn.client, remote.name),
                         needs_confirmation=matches_any(remote.name, cfg.confirm),
                         source=f"mcp:{conn.name}",
                     )
                 )
             conn.status.tools = len(mine)
+            conn.status.pending = held
             tools.extend(mine)
+            self._tell(conn.name, held)
         self._tools = tools
+
+    def _tell(self, server: str, held: list[ToolChange]) -> None:
+        new = [c for c in held if (server, c.tool, c.now.fingerprint) not in self._told]
+        if not new:
+            return
+        self._told.update((server, c.tool, c.now.fingerprint) for c in new)
+        log.warning(
+            "MCP server '%s' has new or changed tools, held back until approved: %s",
+            server,
+            ", ".join(c.tool for c in new),
+        )
+        for listener in self.listeners:
+            try:
+                listener(server, new)
+            except Exception:
+                log.exception("Couldn't tell a listener about changed tools")
 
     @staticmethod
     def _make_handler(client: Client, remote_name: str):
@@ -298,6 +345,14 @@ class MCPManager:
             return result_to_text(result)
 
         return handler
+
+
+def _version(remote: Any) -> ToolVersion:
+    """What the model is shown of a server's tool: its description and the JSON schema of its arguments."""
+    schema = dict(remote.input_schema or {})
+    schema.setdefault("type", "object")
+    schema.setdefault("properties", {})
+    return ToolVersion((remote.description or remote.title or remote.name).strip(), schema)
 
 
 def _describe(exc: BaseException) -> str:

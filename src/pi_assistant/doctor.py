@@ -21,6 +21,7 @@ from pi_assistant.memory import Embedder, MemoryStore
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.siri import MIN_TOKEN_CHARS
 from pi_assistant.status_api import is_loopback
+from pi_assistant.tool_approvals import ToolApprovals
 from pi_assistant.tools import Tool, ToolError
 from pi_assistant.trading212 import Trading212
 
@@ -104,7 +105,8 @@ async def run_doctor(cfg: Config) -> bool:
         report(WARN, "none configured")
     else:
         envs = ServerEnvs.for_config(cfg)
-        mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, envs)
+        approvals = ToolApprovals(cfg.db_path)
+        mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, envs, approvals)
         try:
             await mcp.start()
             for st in mcp.status():
@@ -113,10 +115,14 @@ async def run_doctor(cfg: Config) -> bool:
                     report(OK, f"{st.name}: {st.tools} tool{'' if st.tools == 1 else 's'} ({names})")
                 else:
                     report(FAIL, f"{st.name}: {st.error}")
+                if st.pending:
+                    held = ", ".join(c.tool + (" (changed)" if c.approved else " (new)") for c in st.pending)
+                    report(WARN, f"{st.name}: held back until you approve them on the dashboard: {held}")
                 await check_lock(envs, st, report)
             mcp_tools = mcp.tools()
         finally:
             await mcp.stop()
+            approvals.close()
         disabled = [n for n, c in cfg.mcp_servers.items() if not c.enabled]
         if disabled:
             report(WARN, f"disabled: {', '.join(disabled)}")

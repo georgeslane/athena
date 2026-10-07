@@ -37,6 +37,7 @@ from pi_assistant.config import ConfigError
 from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
 from pi_assistant.siri import VOICE_NOTE, SiriServer
 from pi_assistant.status import State
+from pi_assistant.tool_approvals import ToolChange
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -60,6 +61,7 @@ class TelegramBot:
         self._pending: dict[str, asyncio.Future[bool]] = {}
         self._siri: SiriServer | None = None
         self._warming: asyncio.Task[None] | None = None
+        self._telling: set[asyncio.Task[None]] = set()
 
     # -- setup ----------------------------------------------------------------------------
 
@@ -93,6 +95,7 @@ class TelegramBot:
         return app
 
     async def _post_init(self, app: Application) -> None:
+        self.s.mcp.listeners.append(lambda server, changes: self._tools_changed(app.bot, server, changes))
         await self.s.start()
         for st in self.s.mcp.status():
             log.info("MCP %s: %s", st.name, f"{st.tools} tools" if st.connected else st.error)
@@ -118,6 +121,25 @@ class TelegramBot:
         if self._siri:
             await self._siri.stop()
         await self.s.close()
+
+    def _tools_changed(self, bot: Bot, server: str, changes: list[ToolChange]) -> None:
+        """Tell you that a server's tools changed, so they're held back until you approve them."""
+        if not self.cfg.allowed_user_ids:
+            return
+        tools = ", ".join(f"<code>{html.escape(c.tool)}</code> ({'changed' if c.approved else 'new'})" for c in changes)
+        text = (
+            f"⚠️ <b>{html.escape(server)}</b> has new or changed tools: {tools}. Athena won't use them until "
+            "you approve them on the dashboard's Tools tab, where you can see what changed."
+        )
+        task = asyncio.create_task(self._tell(bot, text), name="tools-changed")
+        self._telling.add(task)
+        task.add_done_callback(self._telling.discard)
+
+    async def _tell(self, bot: Bot, text: str) -> None:
+        try:
+            await bot.send_message(self.cfg.allowed_user_ids[0], text, parse_mode=ParseMode.HTML)
+        except TelegramError as exc:
+            log.warning("Couldn't send a message about changed tools: %s", exc)
 
     async def _keep_warm(self) -> None:
         """Keep the model server's prompt cache ready for your chat (llm.warm_up_minutes)."""

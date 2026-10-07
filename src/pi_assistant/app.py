@@ -24,6 +24,7 @@ from pi_assistant.settings import PROTECTED_SECRETS
 from pi_assistant.stats import UsageStats
 from pi_assistant.status import StatusTracker
 from pi_assistant.status_api import StatusServer
+from pi_assistant.tool_approvals import ToolApprovals
 from pi_assistant.tools import Tool, ToolRegistry
 from pi_assistant.trading212 import Trading212
 
@@ -112,6 +113,12 @@ class Services:
     def trading212(self) -> Trading212 | None:
         return self.builtins.trading212
 
+    def approve_tools(self, server: str, tools: dict[str, str]) -> None:
+        """Let the model use tools that were held back because they're new or changed: {tool: fingerprint}."""
+        self.mcp.approve(server, tools)
+        self.rewarm.set()  # the prompt has changed
+        log.info("Approved %s from MCP server '%s'", ", ".join(tools), server)
+
     async def start(self) -> None:
         await self.mcp.start()
         if self.status_api:
@@ -130,6 +137,8 @@ class Services:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._indexer
         await self.mcp.stop()
+        if self.mcp.approvals:
+            self.mcp.approvals.close()
         await self.builtins.close()
         await self.llm.close()
         await self.embedder.close()
@@ -232,7 +241,7 @@ def build_services(cfg: Config) -> Services:
     tools = ToolRegistry()
     for tool in memory.tools():
         tools.add(tool)
-    mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, ServerEnvs.for_config(cfg))
+    mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, ServerEnvs.for_config(cfg), ToolApprovals(cfg.db_path))
 
     prompt_path = cfg.resolve(cfg.agent.system_prompt_file)
     template = None
