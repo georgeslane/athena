@@ -70,6 +70,7 @@ async def athena(tmp_path, monkeypatch):
     )
     services.llm = services.agent.llm = model.client(cfg.llm)
     services.memory.embedder = FakeEmbedder()
+    services.mcp.sandbox = None  # the demo server lives in the repo; the sandbox has tests of its own
     await services.start()
     try:
         yield services

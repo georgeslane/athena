@@ -41,7 +41,7 @@ if [[ "$(uname -m)" != "aarch64" ]]; then
 fi
 
 step "Installing system packages"
-packages=(git curl ca-certificates sqlite3)
+packages=(git curl ca-certificates sqlite3 bubblewrap)  # bubblewrap: the MCP servers' sandbox
 sudo apt-get update -qq
 sudo apt-get install -y -qq "${packages[@]}" >/dev/null
 

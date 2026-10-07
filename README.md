@@ -224,6 +224,24 @@ A tool's description and arguments go into every prompt, and a server can change
 
 A server's tools are approved as they are the first time it connects, since you've just chosen it and can see them on the dashboard. Removing a server forgets its approvals.
 
+### Sandbox
+
+Local servers run in a sandbox made with [bubblewrap](https://github.com/containers/bubblewrap), which `install.sh` installs. Inside it, a server sees:
+
+- the system, read-only
+- an empty home folder of its own, wiped when it stops, so your `.env`, memories (`data/`), Athena's code and `~/.ssh` aren't there
+- its own `/tmp`
+- read-only, only what it needs to run: its locked environment, uv's Pythons, the folder its command is in, and `~/.ssh` if the command is `ssh` (for the Mac's servers, where the program is OpenSSH itself)
+
+Nothing it starts outlives it.
+
+- **`network = false`** cuts it off from the network too. The time server has this.
+- **Network on means everywhere.** A server with network access can reach anything the Pi can, including services on the Pi itself, such as Ollama. The sandbox can't limit it to particular sites.
+- **`read_only_paths = ["/home/pi/notes"]`** lets a server read files or folders it needs.
+- **`sandbox = false`** runs a server without one. It can then read everything you can, so `doctor` warns about it.
+
+`doctor` checks the sandbox for real. It writes a file in your home folder and checks that a sandboxed process can't see it, nor connect out without network access. If bubblewrap is missing, or can't make a sandbox, local servers aren't started, and the dashboard says why. On a Mac, which bubblewrap doesn't support, servers run without one.
+
 ### Recommended servers
 
 The dashboard lists each of these, ready to switch on, and `config.example.toml` has them ready to copy into your `config.toml`, switched off until you set them up. To add others, see [Adding a server](#adding-a-server).
@@ -431,6 +449,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/agent.py` | Agent loop: prompt building, tool calls, approvals |
 | `src/pi_assistant/llm.py` | OpenAI-compatible client |
 | `src/pi_assistant/mcp_manager.py` | MCP connections (stdio, Streamable HTTP, SSE) |
+| `src/pi_assistant/sandbox.py` | The bubblewrap sandbox local MCP servers run in |
 | `src/pi_assistant/tool_approvals.py` | Which version of each MCP tool you've approved |
 | `src/pi_assistant/server_envs.py`, `mcp-locks/` | Locked environments for servers started with `uvx`, and the recommended servers' locks |
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
@@ -461,6 +480,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
 - **The dashboard doesn't load:** run `doctor` and see what it says under "Dashboard". If it's answering there, check `sudo tailscale serve status` shows `localhost:8092`, and that Tailscale is connected on your phone or Mac.
 - **The dashboard says "Can't reach Athena":** the service has stopped or is restarting. `journalctl -u pi-assistant -f` says why.
+- **"Couldn't start it in a sandbox":** install bubblewrap (`sudo apt install bubblewrap`), then run `doctor`, which says whether it can make a sandbox. A server that needs something from your home folder can be given it with `read_only_paths`.
 - **A server says "waiting for you":** some of its tools are new or have changed since you approved them. Open its card on the dashboard to see what changed and approve them.
 - **A server's switch won't stay on:** the dashboard says what it needs first, such as a key. If it's on but shows an error, open it: the error and the server's log (`data/logs/mcp-<name>.log`) usually say why.
 - **The status board says "Offline" while Athena runs:** run `doctor` and see what it says under "Status API". Problems with the board itself are covered in pi-display-microservice's README.
@@ -475,7 +495,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - Secrets stay in `.env` (mode 600). `config.toml`, `.env` and `data/` are git-ignored.
 - `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
-- Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)). A local server still runs as your user, though, so it could read files in your home folder, including `.env`.
+- Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)).
+- Local servers run in a [sandbox](#sandbox) without your home folder, so they can't read `.env`, your memories or your SSH keys, and without the network if they don't need it. A server with network access can reach anything the Pi can, though, so the approval before a tool runs is still what stops your data being sent somewhere.
 - A server's tools that are new or have changed since you approved them are held back from the model until you approve them on the dashboard ([When a server's tools change](#when-a-servers-tools-change)).
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
 - The Pi reaches your Mac over SSH with a key of its own, which `~/.ssh/authorized_keys` on the Mac restricts to starting the files and Calendar servers: no shell, no port forwarding. The files server is read-only, limited to the folders you chose, and never shows hidden files.

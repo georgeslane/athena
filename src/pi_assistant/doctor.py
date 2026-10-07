@@ -18,6 +18,7 @@ from pi_assistant.databases import Databases
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager, ServerStatus
 from pi_assistant.memory import Embedder, MemoryStore
+from pi_assistant.sandbox import Sandbox, SandboxError
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.siri import MIN_TOKEN_CHARS
 from pi_assistant.status_api import is_loopback
@@ -106,7 +107,9 @@ async def run_doctor(cfg: Config) -> bool:
     else:
         envs = ServerEnvs.for_config(cfg)
         approvals = ToolApprovals(cfg.db_path)
-        mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, envs, approvals)
+        sandbox = Sandbox.detect()
+        await check_sandbox(sandbox, cfg, report)
+        mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, envs, approvals, sandbox)
         try:
             await mcp.start()
             for st in mcp.status():
@@ -115,6 +118,9 @@ async def run_doctor(cfg: Config) -> bool:
                     report(OK, f"{st.name}: {st.tools} tool{'' if st.tools == 1 else 's'} ({names})")
                 else:
                     report(FAIL, f"{st.name}: {st.error}")
+                server = cfg.mcp_servers[st.name]
+                if server.command and sandbox.supported and not server.sandbox:
+                    report(WARN, f"{st.name}: runs without a sandbox (sandbox = false), so it can read your files")
                 if st.pending:
                     held = ", ".join(c.tool + (" (changed)" if c.approved else " (new)") for c in st.pending)
                     report(WARN, f"{st.name}: held back until you approve them on the dashboard: {held}")
@@ -202,6 +208,22 @@ async def measure_prompt(llm: LLMClient, system_prompt: str, schemas: list[dict[
     cached = await llm.chat(messages("b"), schemas or None, max_tokens=1)
     tokens = cold.prompt_tokens - bare.prompt_tokens if cold.prompt_tokens and bare.prompt_tokens else None
     return PromptCost(len(schemas), tokens, cold.elapsed, max(0.0, cold.elapsed - bare.elapsed), cached.elapsed)
+
+
+async def check_sandbox(sandbox: Sandbox, cfg: Config, report: Callable[[str, str], None]) -> None:
+    """Whether local servers can be sandboxed here, tried for real: can a sandboxed process see files or connect out?"""
+    if not any(s.command and s.enabled for s in cfg.mcp_servers.values()):
+        return
+    if not sandbox.supported:
+        report(WARN, "sandbox: not on Linux, so local servers run without one")
+        return
+    try:
+        results = await sandbox.self_test()
+    except SandboxError as exc:
+        report(FAIL, f"sandbox: {exc}")
+        return
+    for ok, what in results:
+        report(OK if ok else FAIL, f"sandbox: {what}")
 
 
 async def check_lock(envs: ServerEnvs, st: ServerStatus, report: Callable[[str, str], None]) -> None:
