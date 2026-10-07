@@ -41,9 +41,11 @@ def home(tmp_path):
     home = tmp_path / "home" / "pi"
     (home / ".local" / "bin").mkdir(parents=True)
     (home / ".local" / "bin" / "uvx").touch()
+    python = home / "pythons" / "cpython-3.12" / "bin"  # wherever uv was told to put its Pythons
+    python.mkdir(parents=True)
     venv = home / "athena" / "data" / "mcp" / "time" / ".venv"
     (venv / "bin").mkdir(parents=True)
-    (venv / "pyvenv.cfg").touch()
+    (venv / "pyvenv.cfg").write_text(f"home = {python}\nimplementation = CPython\n")
     (home / ".ssh").mkdir()
     return home
 
@@ -59,7 +61,12 @@ def test_the_sandbox_hides_your_home_and_shows_only_what_the_server_needs(home):
     assert args[:3] == ["/usr/bin/bwrap", "--ro-bind", "/"]
     assert args[args.index("--tmpfs", 4) :].count(str(home)) >= 1
     assert args.index(str(home)) < args.index("--ro-bind-try")  # emptied first, then the server's bits shown
-    assert binds(args) == [str(home / ".local" / "share" / "uv" / "python"), str(venv)]
+    # The environment, and the Python it was made from (wherever that is).
+    assert binds(args) == [
+        str(home / ".local" / "share" / "uv" / "python"),
+        str(venv),
+        str(home / "pythons" / "cpython-3.12"),
+    ]
     assert "--unshare-all" in args and "--share-net" not in args
     assert {"--die-with-parent", "--new-session"} <= set(args)
     assert args[args.index("--") + 1 :] == [str(venv / "bin" / "mcp-server-time"), "--local-timezone=Europe/London"]
@@ -73,6 +80,12 @@ def test_what_else_a_server_can_be_given(home, tmp_path):
     # A command in ~/.local/bin gets that folder, not the rest of ~/.local.
     assert binds(args) == [str(home / ".local" / "share" / "uv" / "python"), str(home / ".local" / "bin"), str(notes)]
     assert args[args.index("--chdir") + 1] == str(notes)
+    # A command that's a link gets where the link leads too.
+    tool = home / ".local" / "share" / "uv" / "tools" / "x" / "bin"
+    tool.mkdir(parents=True)
+    (tool / "x").touch()
+    (home / ".local" / "bin" / "x").symlink_to(tool / "x")
+    assert str(tool) in binds(sandbox.wrap([str(home / ".local" / "bin" / "x")], network=False))
     # ssh (for the Mac's servers) gets ~/.ssh; things outside your home are visible anyway.
     assert str(home / ".ssh") in binds(sandbox.wrap([str(home / "bin" / "ssh"), "athena-mac", "files"], network=True))
     assert binds(sandbox.wrap(["/usr/bin/node", "x.js"], network=True, read_only=[Path("/opt/data")])) == [
