@@ -27,6 +27,7 @@ from mcp_types import Implementation
 
 from pi_assistant import __version__
 from pi_assistant.config import MCPServerConfig
+from pi_assistant.sandbox import Sandbox, SandboxError
 from pi_assistant.server_envs import ServerEnvError, ServerEnvs, parse_uvx
 from pi_assistant.tool_approvals import ToolApprovals, ToolChange, ToolVersion
 from pi_assistant.tools import Tool, matches_any, safe_tool_name
@@ -49,6 +50,7 @@ class ServerStatus:
     lock: str | None = None
     # Tools it offers that are new or have changed since you approved them, and so are held back.
     pending: list[ToolChange] = field(default_factory=list)
+    sandboxed: bool = False  # running in a sandbox
 
 
 def result_to_text(result: Any) -> str:
@@ -96,6 +98,7 @@ class MCPManager:
         log_dir: Path | None = None,
         envs: ServerEnvs | None = None,
         approvals: ToolApprovals | None = None,
+        sandbox: Sandbox | None = None,
     ):
         self.configured = dict(servers)  # including those switched off
         self.base_dir = base_dir or Path.cwd()
@@ -105,6 +108,8 @@ class MCPManager:
         self.envs = envs
         # Tools that are new or changed are held back until approved here (all are used, if None).
         self.approvals = approvals
+        # Local servers run in this, unless their config says not to (and nothing is, if None).
+        self.sandbox = sandbox
         # Told (server, changes) when a server's tools change, once for each change.
         self.listeners: list[Callable[[str, list[ToolChange]], None]] = []
         self._told: set[tuple[str, str, str]] = set()
@@ -222,7 +227,17 @@ class MCPManager:
             conn.ready.set()
 
     async def _install(self, conn: _Connection) -> bool:
-        """Lock and install a uvx server's environment if needed. False if that failed, with why in its status."""
+        """Get a local server ready to start: check it can be sandboxed, and lock and install its environment
+        if it's started with uvx. False if that failed, with why in its status."""
+        if self._sandboxed(conn.cfg):
+            assert self.sandbox
+            try:
+                await self.sandbox.check()
+            except SandboxError as exc:
+                conn.status.error = str(exc)
+                log.warning("MCP server '%s' unavailable: %s", conn.name, exc)
+                return False
+            conn.status.sandboxed = True
         if conn.cfg.command != "uvx" or self.envs is None:
             return True
         server = parse_uvx(conn.cfg.args)
@@ -239,12 +254,21 @@ class MCPManager:
         conn.status.lock = self.envs.lock_origin(conn.name)
         return True
 
+    def _sandboxed(self, cfg: MCPServerConfig) -> bool:
+        return bool(cfg.command and cfg.sandbox and self.sandbox and self.sandbox.supported)
+
     def _client_for(self, conn: _Connection, http_client: Any, errlog: TextIO) -> Client:
         cfg = conn.cfg
         info = Implementation(name="pi-assistant", version=__version__)
         if cfg.command:
             cwd = str((self.base_dir / cfg.cwd).resolve()) if cfg.cwd else None
             command, *args = conn.launch or [cfg.command, *cfg.args]
+            if conn.status.sandboxed:
+                assert self.sandbox
+                paths = [self.base_dir / p for p in cfg.read_only_paths]
+                command, *args = self.sandbox.wrap(
+                    [command, *args], network=cfg.network, read_only=paths, cwd=Path(cwd) if cwd else None
+                )
             # Servers get a minimal environment (PATH, HOME, ...) plus `env` from the config,
             # so your Telegram token and API keys aren't visible to third-party code.
             params = StdioServerParameters(command=command, args=args, env=cfg.env or None, cwd=cwd)
