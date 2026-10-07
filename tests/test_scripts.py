@@ -18,9 +18,15 @@ pytestmark = pytest.mark.skipif(
 RECORD = '#!/bin/sh\necho "$(basename "$0") $*" >> "$STUB_LOG"\n'
 STUBS = {
     "apt-get": RECORD,
-    "curl": RECORD,
-    "ollama": RECORD,
-    "uv": RECORD,
+    # Ollama's installer, piped to sh, "updates" Ollama: it stops being too old.
+    "curl": RECORD + 'case "$*" in *ollama.com/install.sh*) echo "rm -f \'$STUB_FILES/ollama-too-old\'";; esac\n',
+    # OLLAMA_VERSION is what `ollama --version` says. While $STUB_FILES/ollama-too-old exists, pulls fail.
+    "ollama": RECORD
+    + 'if [ "$1" = --version ] && [ -n "$OLLAMA_VERSION" ]; then echo "ollama version is $OLLAMA_VERSION"; fi\n'
+    + 'if [ "$1" = pull ] && [ -e "$STUB_FILES/ollama-too-old" ]; then\n'
+    + '  echo "Error: pull model manifest: 412: this model requires a newer version of Ollama"; exit 1\nfi\n'
+    + 'if [ "$1" = pull ] && [ "$2" = missing ]; then echo "Error: file does not exist"; exit 1; fi\n',
+    "uv": RECORD + 'exit "${UV_EXIT:-0}"\n',
     "uvx": RECORD,
     "raspi-config": RECORD,
     "getent": RECORD,
@@ -53,12 +59,13 @@ def sandbox(tmp_path):
         "GIT_CEILING_DIRECTORIES": str(tmp_path),
     }
 
-    def run(script, *args, display_installed=False, fake_git=False):
+    def run(script, *args, display_installed=False, fake_git=False, answer="", **extra_env):
         path = f"{git_stub}:{env['PATH']}" if fake_git else env["PATH"]  # install.sh needs the real git
         result = subprocess.run(
             ["bash", f"scripts/{script}", *args],
             cwd=repo,
-            env={**env, "PATH": path, "DISPLAY_INSTALLED": "1" if display_installed else ""},
+            env={**env, "PATH": path, "DISPLAY_INSTALLED": "1" if display_installed else "", **extra_env},
+            input=answer,
             capture_output=True,
             text=True,
             timeout=60,
@@ -122,3 +129,68 @@ def test_update_retires_the_old_status_board(sandbox):
         "sudo systemctl daemon-reload",
     ]
     assert "pi-display-microservice" in result.stdout
+
+
+@pytest.mark.parametrize(("version", "updated"), [("", True), ("0.30.4", True), ("0.36.0", False), ("0.41.2", False)])
+def test_install_updates_an_ollama_too_old_for_the_embeddings_model(sandbox, version, updated):
+    _, _, run = sandbox
+    result, calls = run("install.sh", OLLAMA_VERSION=version)
+    assert result.returncode == 0, result.stderr
+    assert ("curl -fsSL https://ollama.com/install.sh" in calls) == updated
+    assert "ollama pull embeddinggemma-2:740m-bf16" in calls
+
+
+# -- switch-embeddings.sh --------------------------------------------------------------------------------
+
+
+def test_switching_the_embeddings_model(sandbox):
+    _, _, run = sandbox
+    result, calls = run("switch-embeddings.sh", "new-model")
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        "ollama pull new-model",
+        "sudo systemctl stop pi-assistant",
+        "uv run pi-assistant embeddings use new-model",
+        "sudo systemctl restart ollama",  # lets go of the old model
+        "sudo systemctl start pi-assistant",
+    ]
+
+
+def test_athena_starts_again_if_switching_fails(sandbox):
+    _, _, run = sandbox
+    result, calls = run("switch-embeddings.sh", "new-model", UV_EXIT="1")
+    assert result.returncode == 1
+    assert calls[-2:] == ["uv run pi-assistant embeddings use new-model", "sudo systemctl start pi-assistant"]
+    assert "sudo systemctl restart ollama" not in calls
+
+
+def test_a_model_that_wont_download_changes_nothing(sandbox):
+    _, _, run = sandbox
+    result, calls = run("switch-embeddings.sh", "missing")
+    assert result.returncode == 1 and "nothing was changed" in result.stderr
+    assert calls == ["ollama pull missing"]  # Athena wasn't stopped
+
+
+@pytest.mark.parametrize("answer", ["y\n", "n\n", ""])
+def test_an_ollama_too_old_for_the_model_is_updated_if_you_say_so(sandbox, answer):
+    _, files, run = sandbox
+    (files / "ollama-too-old").touch()
+    result, calls = run("switch-embeddings.sh", "new-model", answer=answer)
+    if answer == "y\n":
+        assert result.returncode == 0, result.stderr
+        assert calls[:3] == [
+            "ollama pull new-model",
+            "curl -fsSL https://ollama.com/install.sh",
+            "curl -sf http://127.0.0.1:11434/api/version",
+        ]
+        assert calls[3:5] == ["ollama pull new-model", "sudo systemctl stop pi-assistant"]
+    else:
+        assert result.returncode == 1 and "Nothing was changed" in result.stderr
+        assert calls == ["ollama pull new-model"]
+
+
+def test_switching_needs_one_model(sandbox):
+    _, _, run = sandbox
+    for args in [(), ("a", "b")]:
+        result, calls = run("switch-embeddings.sh", *args)
+        assert result.returncode == 2 and "Usage" in result.stderr and calls == []

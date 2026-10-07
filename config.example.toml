@@ -44,7 +44,8 @@ max_history_messages = 40
 [embeddings]
 # Ollama on the Pi serves the embeddings model (installed by scripts/install.sh).
 base_url = "http://127.0.0.1:11434/v1"
-model = "embeddinggemma"
+# To change it later: bash scripts/switch-embeddings.sh MODEL (README, "Changing the embeddings model").
+model = "embeddinggemma-2:740m-bf16"
 api_key = "ollama"
 dimensions = 768                       # EmbeddingGemma also supports 512, 256 or 128
 # Prompt formats EmbeddingGemma was trained with. Set both to "" for other models.
@@ -54,7 +55,9 @@ document_prefix = "title: {title} | text: "
 [memory]
 auto_recall = true                     # show the model memories related to each message
 recall_top_k = 4
-recall_max_distance = 0.55             # cosine distance cut-off for auto-recall (lower = stricter)
+# Cosine distance cut-offs, which suit the embeddings model: `pi-assistant embeddings test` measures them.
+recall_max_distance = 0.31             # auto-recall leaves out memories further away than this (lower = stricter)
+duplicate_distance = 0.03              # a new fact closer than this to a saved one isn't saved again
 search_top_k = 8
 chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
 

@@ -424,6 +424,42 @@ def test_removing_a_server_keeps_the_comment_above_the_next_one(setup):
     assert load_config(config).mcp_servers["two"].args == ["two==2"]
 
 
+def test_setting_values_changes_only_those_lines(setup):
+    settings, config, _ = setup
+    before = config.read_text()
+    cfg = settings.set_values({"embeddings.model": "other-model", "memory.recall_max_distance": 0.4})
+    assert (cfg.embeddings.model, cfg.memory.recall_max_distance) == ("other-model", 0.4)
+    assert changed_lines(before, config.read_text()) == [
+        '-model = "embeddinggemma-2:740m-bf16"',
+        '+model = "other-model"',
+        "-recall_max_distance = 0.31             # auto-recall leaves out memories further away than this "
+        "(lower = stricter)",
+        "+recall_max_distance = 0.4             # auto-recall leaves out memories further away than this "
+        "(lower = stricter)",
+    ]
+    # A setting that isn't there yet goes at the end of its section, and a section that isn't there is added.
+    config.write_text(
+        before.replace(
+            "duplicate_distance = 0.03              # a new fact closer than this to a saved one isn't saved again\n",
+            "",
+        )
+    )
+    settings.set_values({"memory.duplicate_distance": 0.05})
+    raw = tomllib.loads(config.read_text())
+    assert raw["memory"]["duplicate_distance"] == 0.05 and list(raw["memory"])[-1] == "duplicate_distance"
+    config.write_text('[llm]\nmodel = "m"\n')
+    settings.set_values({"memory.duplicate_distance": 0.05})
+    assert tomllib.loads(config.read_text())["memory"] == {"duplicate_distance": 0.05}
+
+
+def test_setting_a_value_that_breaks_the_config_writes_nothing(setup):
+    settings, config, _ = setup
+    before = config.read_text()
+    with pytest.raises(SettingsError, match="invalid, so nothing was changed"):
+        settings.set_values({"memory.recall_max_distance": "far"})
+    assert config.read_text() == before
+
+
 def test_a_change_that_would_break_the_config_writes_nothing(setup):
     settings, config, env = setup
     settings.add_server({"name": "weather", "command": "uvx", "args": ["w==1"]})

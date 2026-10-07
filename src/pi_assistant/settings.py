@@ -833,6 +833,16 @@ class Settings:
         _add_server_table(doc, name, table, "Added from the dashboard.")
         return name, self._save(doc, env_changes)
 
+    def set_values(self, values: Mapping[str, Any]) -> Config:
+        """Set settings such as {"embeddings.model": "x"}, adding their section if it isn't there."""
+        doc, _ = self._load()
+        for dotted, value in values.items():
+            table, _, key = dotted.rpartition(".")
+            section = _section(doc, table, create=True)
+            assert section is not None
+            _set(section, key, value)
+        return self._save(doc, {})
+
     def remove_server(self, name: str) -> Config:
         doc, raw = self._load()
         if name in BY_ID:
