@@ -776,6 +776,7 @@ class ToolCard {
       tools: d.tools && d.tools[0] && d.tools[0].asks !== null ? Object.fromEntries(d.tools.map((t) => [t.name, { on: t.on, asks: t.asks }])) : null,
     };
     const parts = [];
+    if (d.held && d.held.length) parts.push(this.heldEditor());
     if (d.asks) parts.push(h("p.note", {}, icon("lock"), h("span", { text: d.asks })));
     if (d.setup) parts.push(h("p.note.setup", {}, icon("info"), h("span", { text: d.setup })));
     // A server you added runs either as a command on the Pi or at a URL: show the settings for whichever it is.
@@ -934,6 +935,50 @@ class ToolCard {
       h("span.field-label", { text: "Its tools" }),
       h("span.field-help", { text: "Only let a tool run without asking if it can't change anything, or send what's in the conversation anywhere." }),
       h("div.server-tools", {}, h("div.server-tools-head", {}, h("span", { text: "Tool" }), h("span", { text: "Use" }), h("span", { text: "Asks first" })), rows)
+    );
+  }
+
+  // Tools that are new or changed since you approved them: what changed, and a button to approve them.
+  heldEditor() {
+    const d = this.data;
+    const pretty = (value) => JSON.stringify(value, null, 2);
+    const compare = (label, before, now) =>
+      h("div.compare", {}, h("span.compare-label", { text: label }), h("span.compare-tag", { text: "Before" }), h("pre.before", { text: before }), h("span.compare-tag", { text: "Now" }), h("pre.now", { text: now }));
+    const items = d.held.map((t) => {
+      const parts = [h("span.held-name", {}, breakable(t.name), h("span.tag", { text: t.approved ? "Changed" : "New" }))];
+      if (!t.approved) {
+        parts.push(h("pre.now", { text: t.now.description }), h("pre.now", { text: pretty(t.now.parameters) }));
+      } else {
+        if (t.now.description !== t.approved.description) parts.push(compare("Description", t.approved.description, t.now.description));
+        if (pretty(t.now.parameters) !== pretty(t.approved.parameters)) parts.push(compare("Arguments", pretty(t.approved.parameters), pretty(t.now.parameters)));
+      }
+      return h("div.held-tool", {}, parts);
+    });
+    const error = h("p.form-error", { role: "alert" });
+    const approve = h("button.button.primary", {
+      type: "button",
+      text: d.held.length === 1 ? "Approve it" : `Approve all ${d.held.length}`,
+      "data-save": true,
+      disabled: !this.editable,
+      onclick: async () => {
+        approve.disabled = true;
+        try {
+          const tools = Object.fromEntries(d.held.map((t) => [t.name, t.fingerprint]));
+          showTools(await call("POST", `/api/tools/${encodeURIComponent(d.id)}/approve`, { tools }));
+          toast(`Approved. Athena can use ${d.held.length === 1 ? "it" : "them"} now.`);
+        } catch (e) {
+          error.textContent = e.message;
+          approve.disabled = !this.editable;
+        }
+      },
+    });
+    return h(
+      "section.held",
+      {},
+      h("p.note.setup", {}, icon("info"), h("span", { text: "These tools are new, or have changed since you approved them, so Athena won't use them until you approve them. Check that each only describes what the tool does: a description can also carry instructions to the model." })),
+      items,
+      error,
+      h("div.tool-actions", {}, approve)
     );
   }
 

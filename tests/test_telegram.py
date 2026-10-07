@@ -29,6 +29,7 @@ class FakeBot:
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = FakeMessage(self, text, kwargs)
+        msg.chat_id = chat_id
         self.sent.append(msg)
         return msg
 
@@ -245,3 +246,21 @@ async def test_session_starts_a_new_session(config):
     app = bot.build()
     names = {name for h in app.handlers[0] if hasattr(h, "commands") for name in h.commands}
     assert {"session", "reset"} <= names  # /reset still works, for anyone used to it
+
+
+async def test_you_hear_when_a_servers_tools_change(config):
+    from pi_assistant.tool_approvals import ToolChange, ToolVersion
+
+    bot = make_bot(config, None)
+    fake = FakeBot()
+    now = ToolVersion("Add two numbers <b>fast</b>.", {})
+    bot._tools_changed(fake, "demo", [ToolChange("add", now, ToolVersion("Add.", {})), ToolChange("drop_<all>", now)])
+    while not fake.sent:
+        await asyncio.sleep(0.01)
+    [msg] = fake.sent
+    assert msg.chat_id == ME and msg.kwargs["parse_mode"] == "HTML"
+    assert (
+        "<b>demo</b> has new or changed tools: <code>add</code> (changed), <code>drop_&lt;all&gt;</code> (new)"
+        in msg.text
+    )
+    assert "approve them on the dashboard" in msg.text

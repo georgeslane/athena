@@ -14,6 +14,7 @@ from pi_assistant.app import build_services
 from pi_assistant.config import load_config
 from pi_assistant.dashboard import COOKIE, FILES, SIGN_IN_TRIES
 from pi_assistant.doctor import FAIL, OK, WARN, check_dashboard
+from pi_assistant.tool_approvals import ToolVersion
 
 PASSWORD = "dashboard-password-123"
 DEMO = Path(__file__).parent / "fixtures" / "demo_mcp_server.py"
@@ -315,6 +316,36 @@ async def test_adding_and_removing_a_server(athena):
         tools = await wait_applied(http)
         assert "second" not in [t["id"] for t in tools["tools"]]
         assert athena.tools.get("second__get_env") is None
+        assert not athena.mcp.approvals.knows("second")  # one added later with its name starts afresh
+
+
+async def test_changed_tools_wait_for_your_approval(athena):
+    # As if `add` said something else when you approved it.
+    before = ToolVersion("Add two numbers.", {"type": "object", "properties": {}})
+    athena.mcp.approvals.approve("demo", {"add": before})
+    await athena.mcp.reload({"demo"})
+    assert athena.tools.get("add") is None  # held back from the model
+    async with client(athena) as http:
+        demo = tool((await http.get("/api/tools")).json(), "demo")
+        assert (demo["state"], demo["detail"]) == ("attention", "1 tool changed: waiting for you")
+        [held] = demo["held"]
+        assert held["name"] == "add" and held["approved"] == {
+            "description": before.description,
+            "parameters": before.parameters,
+        }
+        assert held["now"]["parameters"]["properties"]["a"]["type"] == "integer"
+
+        stale = await http.post("/api/tools/demo/approve", json={"tools": {"add": "an-older-version"}})
+        assert stale.status_code == 409 and "have another look" in stale.json()["error"]
+        assert (await http.post("/api/tools/demo/approve", json={"tools": ["add"]})).status_code == 400
+        assert athena.tools.get("add") is None
+
+        athena.rewarm.clear()
+        approved = await http.post("/api/tools/demo/approve", json={"tools": {"add": held["fingerprint"]}})
+        assert approved.status_code == 200
+        demo = tool(approved.json(), "demo")
+        assert demo["state"] == "on" and demo["held"] == []
+    assert athena.tools.get("add") is not None and athena.rewarm.is_set()  # the prompt has changed
 
 
 async def test_changes_that_cant_be_made_say_why(athena):

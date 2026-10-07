@@ -218,6 +218,12 @@ Pinning `mcp-server-fetch==2026.8.18` pins the server, but not the 44 packages i
 
 After changing a recommended server's version in `config.example.toml`, remake its lock with `uv run python -m pi_assistant.server_envs`.
 
+### When a server's tools change
+
+A tool's description and arguments go into every prompt, and a server can change them whenever it's updated: a hosted server like GitHub's at any time. A changed description can carry instructions to the model, so Athena remembers each tool as it was when you approved it. A tool that's new, or has changed since then, is held back from the model until you approve it. Athena sends you a Telegram message about it, and the server's card on the dashboard says **waiting for you**. Open the card to see what changed, then press **Approve**. Tools that haven't changed keep working meanwhile, and so do tools the config hides, which aren't checked until you use them.
+
+A server's tools are approved as they are the first time it connects, since you've just chosen it and can see them on the dashboard. Removing a server forgets its approvals.
+
 ### Recommended servers
 
 The dashboard lists each of these, ready to switch on, and `config.example.toml` has them ready to copy into your `config.toml`, switched off until you set them up. To add others, see [Adding a server](#adding-a-server).
@@ -425,6 +431,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/agent.py` | Agent loop: prompt building, tool calls, approvals |
 | `src/pi_assistant/llm.py` | OpenAI-compatible client |
 | `src/pi_assistant/mcp_manager.py` | MCP connections (stdio, Streamable HTTP, SSE) |
+| `src/pi_assistant/tool_approvals.py` | Which version of each MCP tool you've approved |
 | `src/pi_assistant/server_envs.py`, `mcp-locks/` | Locked environments for servers started with `uvx`, and the recommended servers' locks |
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
 | `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
@@ -454,6 +461,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
 - **The dashboard doesn't load:** run `doctor` and see what it says under "Dashboard". If it's answering there, check `sudo tailscale serve status` shows `localhost:8092`, and that Tailscale is connected on your phone or Mac.
 - **The dashboard says "Can't reach Athena":** the service has stopped or is restarting. `journalctl -u pi-assistant -f` says why.
+- **A server says "waiting for you":** some of its tools are new or have changed since you approved them. Open its card on the dashboard to see what changed and approve them.
 - **A server's switch won't stay on:** the dashboard says what it needs first, such as a key. If it's on but shows an error, open it: the error and the server's log (`data/logs/mcp-<name>.log`) usually say why.
 - **The status board says "Offline" while Athena runs:** run `doctor` and see what it says under "Status API". Problems with the board itself are covered in pi-display-microservice's README.
 - **`zsh: no such file or directory: …/Library/Application`:** the Mac was set up by a version of `scripts/mac/install.sh` with a quoting bug. On the Mac, pull the repo and run `bash scripts/mac/install.sh` again: it keeps your folders and the Pi's key.
@@ -468,6 +476,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
 - Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)). A local server still runs as your user, though, so it could read files in your home folder, including `.env`.
+- A server's tools that are new or have changed since you approved them are held back from the model until you approve them on the dashboard ([When a server's tools change](#when-a-servers-tools-change)).
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
 - The Pi reaches your Mac over SSH with a key of its own, which `~/.ssh/authorized_keys` on the Mac restricts to starting the files and Calendar servers: no shell, no port forwarding. The files server is read-only, limited to the folders you chose, and never shows hidden files.
 - The email server only sends to addresses in `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`, and can't delete or move mail, even if you approve. The GitHub token can only read public repositories.
