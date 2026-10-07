@@ -20,9 +20,8 @@ STUBS = {
     "apt-get": RECORD,
     # Ollama's installer, piped to sh, "updates" Ollama: it stops being too old.
     "curl": RECORD + 'case "$*" in *ollama.com/install.sh*) echo "rm -f \'$STUB_FILES/ollama-too-old\'";; esac\n',
-    # OLLAMA_VERSION is what `ollama --version` says. While $STUB_FILES/ollama-too-old exists, pulls fail.
+    # While $STUB_FILES/ollama-too-old exists, pulls fail.
     "ollama": RECORD
-    + 'if [ "$1" = --version ] && [ -n "$OLLAMA_VERSION" ]; then echo "ollama version is $OLLAMA_VERSION"; fi\n'
     + 'if [ "$1" = pull ] && [ -e "$STUB_FILES/ollama-too-old" ]; then\n'
     + '  echo "Error: pull model manifest: 412: this model requires a newer version of Ollama"; exit 1\nfi\n'
     + 'if [ "$1" = pull ] && [ "$2" = missing ]; then echo "Error: file does not exist"; exit 1; fi\n',
@@ -129,15 +128,6 @@ def test_update_retires_the_old_status_board(sandbox):
         "sudo systemctl daemon-reload",
     ]
     assert "pi-display-microservice" in result.stdout
-
-
-@pytest.mark.parametrize(("version", "updated"), [("", True), ("0.30.4", True), ("0.36.0", False), ("0.41.2", False)])
-def test_install_updates_an_ollama_too_old_for_the_embeddings_model(sandbox, version, updated):
-    _, _, run = sandbox
-    result, calls = run("install.sh", OLLAMA_VERSION=version)
-    assert result.returncode == 0, result.stderr
-    assert ("curl -fsSL https://ollama.com/install.sh" in calls) == updated
-    assert "ollama pull embeddinggemma-2:740m-bf16" in calls
 
 
 # -- switch-embeddings.sh --------------------------------------------------------------------------------

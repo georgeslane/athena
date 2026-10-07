@@ -1,0 +1,35 @@
+# Checks the locked dependencies of Athena and of the recommended MCP servers (mcp-locks/) for
+# known vulnerabilities, using OSV. It runs on every push and pull request, and every Monday too,
+# since new vulnerabilities are found in code that hasn't changed. A failure emails you.
+name: Audit
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+
+# Read-only, with no secrets: nothing here needs to change the repo or reach anything private.
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      # Actions from elsewhere are pinned to an exact commit, so a new release can't change what runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Audit Athena and each MCP server
+        run: |
+          status=0
+          for project in . mcp-locks/*/; do
+            echo "::group::$project"
+            uv audit --project "$project" --frozen --preview-features audit-command || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"

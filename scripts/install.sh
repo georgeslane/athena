@@ -12,8 +12,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EMBED_MODEL="${EMBED_MODEL:-embeddinggemma-2:740m-bf16}"
-OLLAMA_MIN=0.36.0  # the oldest Ollama that runs EmbeddingGemma 2
+EMBED_MODEL="${EMBED_MODEL:-embeddinggemma}"
 SERVICE=/etc/systemd/system/pi-assistant.service
 
 for arg in "$@"; do
@@ -54,9 +53,7 @@ export PATH="$HOME/.local/bin:$PATH"
 uv --version
 
 step "Installing Ollama (serves the embeddings model locally)"
-# Ollama's installer also updates it, which an older Ollama needs to run the embeddings model.
-ollama_version="$(ollama --version 2>/dev/null | grep -o '[0-9][0-9.]*' | head -1 || true)"
-if [ -z "$ollama_version" ] || [ "$(printf '%s\n' "$OLLAMA_MIN" "$ollama_version" | sort -V | head -1)" != "$OLLAMA_MIN" ]; then
+if ! command -v ollama >/dev/null 2>&1; then
   curl -fsSL https://ollama.com/install.sh | sh
 fi
 # Keep the embeddings model loaded and only listen on localhost.
@@ -75,10 +72,6 @@ ollama pull "$EMBED_MODEL"
 step "Installing Python dependencies"
 cd "$REPO_DIR"
 uv sync --no-dev
-
-step "Pre-fetching the example MCP servers"
-uvx mcp-server-time==2026.8.18 --help >/dev/null 2>&1 || warn "couldn't pre-fetch mcp-server-time"
-uvx mcp-server-fetch==2026.8.18 --help >/dev/null 2>&1 || warn "couldn't pre-fetch mcp-server-fetch"
 
 step "Disabling git push (secrets and memories live in this folder)"
 bash scripts/disable-git-push.sh

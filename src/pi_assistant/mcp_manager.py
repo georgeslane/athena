@@ -26,6 +26,7 @@ from mcp_types import Implementation
 
 from pi_assistant import __version__
 from pi_assistant.config import MCPServerConfig
+from pi_assistant.server_envs import ServerEnvError, ServerEnvs, parse_uvx
 from pi_assistant.tools import Tool, matches_any, safe_tool_name
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ class ServerStatus:
     error: str | None = None
     # Every tool the server offers, as (name, description), including any the config hides.
     offered: list[tuple[str, str]] = field(default_factory=list)
+    # For servers started with uvx: where the lock on its dependencies came from ("reviewed", from
+    # mcp-locks/, or "first use"), or "unlocked" if uvx is given options that can't be locked.
+    lock: str | None = None
 
 
 def result_to_text(result: Any) -> str:
@@ -73,6 +77,7 @@ class _Connection:
         self.cfg = cfg
         self.status = ServerStatus(name)
         self.client: Client | None = None
+        self.launch: list[str] | None = None  # the command that starts it, if not the configured one
         self.remote_tools: list[Any] = []
         self.ready = asyncio.Event()  # connected, or given up
         self.closing = asyncio.Event()
@@ -80,11 +85,19 @@ class _Connection:
 
 
 class MCPManager:
-    def __init__(self, servers: dict[str, MCPServerConfig], base_dir: Path | None = None, log_dir: Path | None = None):
+    def __init__(
+        self,
+        servers: dict[str, MCPServerConfig],
+        base_dir: Path | None = None,
+        log_dir: Path | None = None,
+        envs: ServerEnvs | None = None,
+    ):
         self.configured = dict(servers)  # including those switched off
         self.base_dir = base_dir or Path.cwd()
         # Local servers' stderr goes to <log_dir>/mcp-<name>.log (or our stderr if None).
         self.log_dir = log_dir
+        # Servers started with uvx run from locked environments made by this (as given, if None).
+        self.envs = envs
         self._connections: dict[str, _Connection] = {}
         self._tools: list[Tool] = []
         self._lock = asyncio.Lock()
@@ -163,6 +176,8 @@ class MCPManager:
     async def _run(self, conn: _Connection) -> None:
         log_path = self.log_dir / f"mcp-{conn.name}.log" if self.log_dir and conn.cfg.command else None
         try:
+            if not await self._install(conn):
+                return
             async with AsyncExitStack() as stack:
                 try:
                     async with asyncio.timeout(conn.cfg.timeout_seconds):
@@ -185,13 +200,33 @@ class MCPManager:
             conn.status.connected = False
             conn.ready.set()
 
-    def _client_for(self, cfg: MCPServerConfig, http_client: Any, errlog: TextIO) -> Client:
+    async def _install(self, conn: _Connection) -> bool:
+        """Lock and install a uvx server's environment if needed. False if that failed, with why in its status."""
+        if conn.cfg.command != "uvx" or self.envs is None:
+            return True
+        server = parse_uvx(conn.cfg.args)
+        if server is None:
+            conn.status.lock = "unlocked"
+            log.warning("MCP server '%s' runs with uvx options that can't be locked, so it isn't", conn.name)
+            return True
+        try:
+            conn.launch = await self.envs.prepare(conn.name, server)
+        except (ServerEnvError, TimeoutError) as exc:
+            conn.status.error = str(exc) if isinstance(exc, ServerEnvError) else "installing it took too long"
+            log.warning("MCP server '%s' unavailable: %s", conn.name, conn.status.error)
+            return False
+        conn.status.lock = self.envs.lock_origin(conn.name)
+        return True
+
+    def _client_for(self, conn: _Connection, http_client: Any, errlog: TextIO) -> Client:
+        cfg = conn.cfg
         info = Implementation(name="pi-assistant", version=__version__)
         if cfg.command:
             cwd = str((self.base_dir / cfg.cwd).resolve()) if cfg.cwd else None
+            command, *args = conn.launch or [cfg.command, *cfg.args]
             # Servers get a minimal environment (PATH, HOME, ...) plus `env` from the config,
             # so your Telegram token and API keys aren't visible to third-party code.
-            params = StdioServerParameters(command=cfg.command, args=cfg.args, env=cfg.env or None, cwd=cwd)
+            params = StdioServerParameters(command=command, args=args, env=cfg.env or None, cwd=cwd)
             return Client(
                 stdio_client(params, errlog=errlog), read_timeout_seconds=cfg.timeout_seconds, client_info=info
             )
@@ -208,11 +243,12 @@ class MCPManager:
         if log_path:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             errlog = stack.enter_context(open(log_path, "a", buffering=1))
-            errlog.write(f"\n--- {datetime.now():%Y-%m-%d %H:%M:%S} starting {cfg.command} {' '.join(cfg.args)}\n")
+            command = " ".join(conn.launch or [cfg.command or "", *cfg.args])
+            errlog.write(f"\n--- {datetime.now():%Y-%m-%d %H:%M:%S} starting {command}\n")
         http_client = None
         if cfg.url and cfg.http_transport == "http":
             http_client = await stack.enter_async_context(create_mcp_http_client(headers=cfg.headers or None))
-        client = await stack.enter_async_context(self._client_for(cfg, http_client, errlog))
+        client = await stack.enter_async_context(self._client_for(conn, http_client, errlog))
         listing = await client.list_tools()
         remote_tools = list(listing.tools)
         while listing.next_cursor:
