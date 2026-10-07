@@ -13,7 +13,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
                    │   memory ◄────────┤                      │      │                             │
                    │   (SQLite + vec)  │  MCP client ─────────┼─────►│ MCP servers: your files     │
                    │                   │      │               │ SSH  │   (read-only), Calendar and │
-                   │ Ollama: EmbeddingGemma 2 ▼               │      │   Reminders (iMCP)          │
+                   │ Ollama: embeddinggemma   ▼               │      │   Reminders (iMCP)          │
                    │ MCP servers: time, fetch, email, SEC ... │      └─────────────────────────────┘
                    └──────────────────────────────────────────┘
 ```
@@ -45,7 +45,7 @@ cd ~/pi-assistant
 bash scripts/install.sh
 ```
 
-The script installs uv and Ollama (or updates an Ollama too old for the embeddings model), pulls EmbeddingGemma 2, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. For a Display HAT Mini, see [Status board](#status-board).
+The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. For a Display HAT Mini, see [Status board](#status-board).
 
 Then:
 
@@ -346,20 +346,22 @@ To update a server later, read what changed, change its pinned version and resta
 - **Past conversations:** after each reply, your message and the reply are added to memory, in an index of their own. `search_memory` finds them, so Athena can look up what you talked about in an earlier session, but they aren't added to messages automatically, so an old answer can't be mistaken for a current one. Anything said while the embeddings server was down is added when it's back.
 - **Forgetting:** `/forget <id>` deletes one memory. **Forget everything** on the dashboard deletes them all, with the conversation history.
 - **Duplicates:** a fact closer than `duplicate_distance` to one already saved isn't saved again.
-- **Embeddings model:** [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (`embeddinggemma-2:740m-bf16`: 768 dimensions, a 1.5 GB download) runs on the Pi's CPU through Ollama 0.36 or later.
+- **Embeddings model:** `embeddinggemma` (768 dimensions, about 600 MB of RAM) runs on the Pi's CPU through Ollama.
 - **Storage:** everything (history, memory and usage statistics) lives in `data/assistant.db`. Back up that one file.
 
 ### Changing the embeddings model
 
-Every memory is stored as a vector from the embeddings model, and vectors from different models can't be compared, so switching means re-embedding all of them. Each model also scores distances on its own scale: EmbeddingGemma 2's are about half EmbeddingGemma's, so `recall_max_distance` and `duplicate_distance` change with it. One script does all of this:
+Every memory is stored as a vector from the embeddings model, and vectors from different models can't be compared, so switching means re-embedding all of them. Each model also scores distances on its own scale, so `recall_max_distance` and `duplicate_distance` change with it. One script does all of this:
 
 ```bash
-bash scripts/switch-embeddings.sh embeddinggemma-2:740m-bf16
+bash scripts/switch-embeddings.sh MODEL
 ```
 
 It downloads the model (offering to update Ollama if it's too old for it), stops Athena, and tests the new model against the current one on 40 questions about made-up memories. It shows how often each finds the right memory, how fast it is and the cut-offs that suit it, then says what it will change and asks. If you agree, it sets the model and cut-offs in `config.toml` (keeping a copy in `config.toml.bak`) and re-embeds every memory. If that fails part way, nothing changes. Athena starts again either way.
 
-To test models without switching, run `uv run pi-assistant embeddings test -m embeddinggemma-2:740m-bf16 -m embeddinggemma-2:740m`. Ollama's `740m` is a 4-bit version of the same model (`nvfp4`): smaller, but less precise. `bf16` is the precision Google publishes and recommends; avoid `float16` builds, which can return broken vectors. Athena refuses to save those. If you change `dimensions`, start a fresh database instead.
+To test models without switching, run `uv run pi-assistant embeddings test -m MODEL -m ANOTHER`. Avoid `float16` builds, which can return broken vectors: Athena refuses to save those. If you change `dimensions`, start a fresh database instead.
+
+[EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) isn't usable yet: Ollama's builds of it need its MLX engine, which doesn't run on Linux ([ollama#18825](https://github.com/ollama/ollama/issues/18825)). On text it finds the same memories as `embeddinggemma` in the test above, and its distances are about half as large (a recall cut-off of about 0.31). Its full model gives the same vectors for text as its 270M text-only one, so once Ollama fixes this, `embeddinggemma-2:270m` is the one to use.
 
 ## Choosing a model
 
