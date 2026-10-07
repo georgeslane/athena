@@ -207,6 +207,17 @@ Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has eithe
 
 After changing servers by hand, send `/reload` in Telegram, which reads the tools' settings in `config.toml` again, or press **Reconnect all** on the dashboard. Check them with `uv run pi-assistant doctor`. Each local server's stderr is written to `data/logs/mcp-<name>.log`. If a server on the Mac stops answering, for example after the Mac restarts, send `/reload`.
 
+### How servers are installed
+
+Pinning `mcp-server-fetch==2026.8.18` pins the server, but not the 44 packages it depends on, which `uvx` would install at whatever version is newest. So Athena doesn't run servers through `uvx`. Each server whose `command` is `uvx` gets a small project of its own in `data/mcp/<name>/`, whose `uv.lock` records the exact version and hash of every package, and Athena runs the server from that.
+
+- **Reviewed locks:** the recommended servers' locks are in `mcp-locks/` in this repo, so any change to them shows up in a pull request. Athena uses one when it's for the version in your `config.toml`. Any other server is locked the first time it starts, and stays that way until you change its version.
+- **Installing:** every package's hash is checked, only ready-built packages (wheels) are installed, so no package's own code runs while it's installed, and uv asks [OSV](https://osv.dev) whether any of them is known malware first. If one is, or OSV can't be reached, the server isn't installed. That happens once for each lock: after that, starting a server needs no network.
+- **Known vulnerabilities:** `doctor` checks each server's locked packages against OSV, and so does CI, for Athena and the recommended servers, on every push and every Monday. A failure emails you.
+- **What isn't locked:** servers started with `uvx` options other than `--from` (doctor says which), and servers started another way, such as `npx`, `ssh` or a URL.
+
+After changing a recommended server's version in `config.example.toml`, remake its lock with `uv run python -m pi_assistant.server_envs`.
+
 ### Recommended servers
 
 The dashboard lists each of these, ready to switch on, and `config.example.toml` has them ready to copy into your `config.toml`, switched off until you set them up. To add others, see [Adding a server](#adding-a-server).
@@ -227,7 +238,7 @@ The dashboard lists each of these, ready to switch on, and `config.example.toml`
 
 What asks first follows one rule: a tool asks if it can change something, or can send what's in the conversation somewhere someone else could read it. Reading your own files, calendar and databases keeps everything on your network, and reading your Trading 212 account only asks Trading 212 for what it already holds. Looking things up in public sources (your news feeds, the SEC, GitHub's public repos) sends only the lookup itself, to that service. Fetching a URL, searching the web and sending email can reach anyone, and adding a calendar event can email an alarm to any address, so those ask. To make any server ask first, set `confirm = ["*"]` on it.
 
-Versions are pinned, as in `mcp-email-server==1.11.0`, so a new release can't change what runs on your Pi until you choose to update.
+Versions are pinned, as in `mcp-email-server==1.11.0`, so a new release can't change what runs on your Pi until you choose to update. So are the packages each server depends on: see [How servers are installed](#how-servers-are-installed).
 
 Tools only run when the model uses them, but every tool's description is part of every prompt, so the model knows what it can use. With everything above switched on, the descriptions come to about 10,000 tokens, against about 1,300 for the system prompt and the first three servers. Email, SEC filings and GitHub account for two-thirds of that, while Trading 212's five tools add about 650 and the database tools about 200.
 
@@ -288,11 +299,7 @@ They can only read, and SQLite itself enforces that. Each file is opened read-on
 
 [EdgarTools](https://github.com/dgunning/edgartools) searches and reads filings to the US Securities and Exchange Commission: annual and quarterly reports, financial statements, insider trades and fund holdings. The SEC asks callers to say who they are, so give your name and email, like `Jane Doe jane@example.com`: on the dashboard, or as `EDGAR_IDENTITY` in `.env`.
 
-It needs about 300 MB of Python packages, mostly data libraries, which take longer to install on a Pi than the assistant waits for a server to start. So install them before switching it on:
-
-```bash
-uvx --from "edgartools[ai]==5.60.0" edgartools-mcp --help
-```
+It needs about 300 MB of Python packages, mostly data libraries, so the first time it starts takes a few minutes on a Pi while they're installed. The dashboard shows it as starting until then.
 
 ### GitHub
 
@@ -337,7 +344,7 @@ To give the assistant a new ability, look for an MCP server that provides it. Mo
    - Send `/tools` in Telegram to see them there too.
    - Run `uv run pi-assistant eval -m <your model>` to check the model still picks the right tools.
 
-To update a server later, read what changed, change its pinned version and restart. If no safe server exists for something, the assistant can have a built-in tool instead, like `read_news` in `src/pi_assistant/news.py`. A built-in tool is a name, a description, a JSON schema for its arguments and a Python function, added in `build_services`. A tool that asks first can also have a `preview` function, which checks the arguments and says in words what the call will do, for the approval message. `trading212_place_order` has one.
+To update a server later, read what changed, change its pinned version and restart: Athena locks the new version's dependencies when it starts it. If no safe server exists for something, the assistant can have a built-in tool instead, like `read_news` in `src/pi_assistant/news.py`. A built-in tool is a name, a description, a JSON schema for its arguments and a Python function, added in `build_services`. A tool that asks first can also have a `preview` function, which checks the arguments and says in words what the call will do, for the approval message. `trading212_place_order` has one.
 
 ## Memory
 
@@ -418,6 +425,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/agent.py` | Agent loop: prompt building, tool calls, approvals |
 | `src/pi_assistant/llm.py` | OpenAI-compatible client |
 | `src/pi_assistant/mcp_manager.py` | MCP connections (stdio, Streamable HTTP, SSE) |
+| `src/pi_assistant/server_envs.py`, `mcp-locks/` | Locked environments for servers started with `uvx`, and the recommended servers' locks |
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
 | `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
@@ -459,6 +467,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - Secrets stay in `.env` (mode 600). `config.toml`, `.env` and `data/` are git-ignored.
 - `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
+- Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)). A local server still runs as your user, though, so it could read files in your home folder, including `.env`.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
 - The Pi reaches your Mac over SSH with a key of its own, which `~/.ssh/authorized_keys` on the Mac restricts to starting the files and Calendar servers: no shell, no port forwarding. The files server is read-only, limited to the folders you chose, and never shows hidden files.
 - The email server only sends to addresses in `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`, and can't delete or move mail, even if you approve. The GitHub token can only read public repositories.
