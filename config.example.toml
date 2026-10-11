@@ -63,7 +63,17 @@ recall_top_k = 4
 recall_max_distance = 0.31             # auto-recall leaves out memories further away than this (lower = stricter)
 duplicate_distance = 0.03              # a new fact closer than this to a saved one isn't saved again
 search_top_k = 8
-chunk_chars = 1200                     # chunk size for `pi-assistant ingest`
+chunk_chars = 1200                     # passage size, for documents and `pi-assistant ingest`
+
+[documents]
+# Documents from folders on your Mac, which Athena indexes when you press Index now on the
+# dashboard (Memory), so you can search them by meaning. The Mac needs setting up first
+# (README, "Documents"): on the Pi, scripts/connect-mac.sh ADDRESS USER laptop makes the
+# "athena-laptop" entry, and on the Mac, scripts/mac/install.sh --documents starts the server.
+command = "ssh"
+args = ["athena-laptop", "documents"]
+folders = []                           # chosen on the dashboard
+max_chars_per_file = 300000            # longer documents are indexed up to here
 
 [display]
 # The status board for a Pimoroni Display HAT Mini is its own service, pi-display-microservice,
@@ -151,15 +161,8 @@ command = "uvx"
 args = ["duckduckgo-mcp-server==0.7.0"]
 include = ["search"]
 
-# Your Mac: search and read the folders you choose (read-only), over SSH. Set up with
-# scripts/connect-mac.sh on the Pi and scripts/mac/install.sh on the Mac.
-[mcp_servers.files]
-enabled = false
-command = "ssh"
-args = ["athena-mac", "files"]
-confirm = []                           # read-only, and only the folders you chose
-
-# Your Mac: Calendar and Reminders, through iMCP, set up with the files server.
+# Your Mac: Calendar and Reminders, through iMCP, over SSH. Set up with scripts/connect-mac.sh
+# on the Pi and scripts/mac/install.sh --calendar on the Mac (README, "Your Macs").
 [mcp_servers.apple]
 enabled = false
 command = "ssh"

@@ -47,7 +47,12 @@ async def test_plain_answer_is_saved_to_history(config, memory):
     }
     assert sent["messages"][-1]["content"].startswith("<context>\nCurrent time:")
     assert sent["messages"][-1]["content"].endswith("\n\nhi")
-    assert {t["function"]["name"] for t in sent["tools"]} == {"remember", "search_memory", "forget_memory"}
+    assert {t["function"]["name"] for t in sent["tools"]} == {
+        "remember",
+        "search_memory",
+        "read_document",
+        "forget_memory",
+    }
     assert agent.history.load("chat1") == [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "Hello George!"},

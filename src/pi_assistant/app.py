@@ -14,6 +14,7 @@ from pi_assistant.agent import Agent
 from pi_assistant.config import Config, parse_config
 from pi_assistant.dashboard import DashboardServer
 from pi_assistant.databases import Databases
+from pi_assistant.documents import DocumentIndex
 from pi_assistant.history import ConversationStore, Session
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
@@ -93,6 +94,8 @@ class Services:
         # After the memory tools, in this order, so the tools' order (and the prompt) stays the same.
         self.tools.add_provider(lambda: self.builtins.tools)
         self.tools.add_provider(self.mcp.tools)
+        # Your documents, indexed from your Mac when you ask on the dashboard.
+        self.documents = DocumentIndex(self.config.documents, self.memory, self.config.log_dir)
         self.dashboard = DashboardServer(self) if self.config.dashboard.enabled else None
         # Set to have the model server read the prompt again now, e.g. after the tools change.
         self.rewarm = asyncio.Event()
@@ -137,6 +140,7 @@ class Services:
             self._indexer.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._indexer
+        await self.documents.stop()
         await self.mcp.stop()
         if self.mcp.approvals:
             self.mcp.approvals.close()
@@ -163,9 +167,10 @@ class Services:
             try:
                 async with self.agent.paused():
                     old, self.builtins = self.builtins, Builtins.build(cfg)
-                    for section in ("news", "trading212", "sqlite", "mcp_servers"):
+                    for section in ("news", "trading212", "sqlite", "mcp_servers", "documents"):
                         setattr(self.config, section, getattr(cfg, section))
                     await self.mcp.configure(cfg.mcp_servers, reconnect=reconnect)
+                    self.documents.configure(cfg.documents)
                 await old.close()
             finally:
                 self.applying = False
@@ -184,6 +189,7 @@ class Services:
                 self._indexer.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._indexer
+            await self.documents.stop()
             await asyncio.to_thread(self.memory.store.clear)
             session = await asyncio.to_thread(self.history.clear)
         self.rewarm.set()

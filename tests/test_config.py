@@ -23,7 +23,7 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
     assert cfg.llm.api_key == "secret"
     assert cfg.db_path == tmp_path / "data" / "assistant.db"
     servers = cfg.mcp_servers
-    assert set(servers) == {"time", "fetch", "search", "files", "apple", "github", "sec", "email"}
+    assert set(servers) == {"time", "fetch", "search", "apple", "github", "sec", "email"}
     # Only the two that need no setup start switched on.
     assert {name for name, server in servers.items() if server.enabled} == {"time", "fetch"}
     assert servers["time"].command == "uvx"

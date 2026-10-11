@@ -18,6 +18,11 @@ The page talks to Athena with JSON:
   DELETE /api/tools/<id>        remove a server that isn't one of the recommended ones
   POST   /api/tools/<id>/approve  let the model use tools held back because they changed: {"tools": {name: fingerprint}}
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
+  GET    /api/memory            what's in memory, and the documents indexed from your Mac
+  POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning
+  GET    /api/documents/browse  ?path=: the folders inside a folder on your Mac, to choose from
+  POST   /api/documents/folders {"add": path} or {"remove": path}: the folders to index
+  POST   /api/documents/index   index them now, and /api/documents/stop to stop
   POST   /api/login             {"password": ...}, and /api/logout
 
 Requests that change something must send JSON, from the dashboard's own page. A web page
@@ -43,6 +48,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from pi_assistant.config import Config
+from pi_assistant.documents import DocumentsError
+from pi_assistant.memory import KINDS
 from pi_assistant.settings import EnvFile, Running, Settings, SettingsError
 from pi_assistant.status import StatusFeed
 from pi_assistant.status_api import wait_seconds
@@ -210,6 +217,12 @@ class DashboardServer(Server):
         if path == "/api/reconnect" and method == "POST":
             self._apply(None, reconnect=True)
             return _json(self.tools())
+        if path == "/api/memory" and method == "GET":
+            return _json(self.memory())
+        if path == "/api/memory/search" and method == "POST":
+            return _json(await self.search(_body(request)))
+        if path.startswith("/api/documents/"):
+            return await self._documents(request, path.removeprefix("/api/documents/"), method)
         if path.startswith("/api/tools/") and path.endswith("/approve") and method == "POST":
             name = path.removeprefix("/api/tools/").removesuffix("/approve")
             tools = _body(request).get("tools")
@@ -232,6 +245,72 @@ class DashboardServer(Server):
                     self.s.mcp.approvals.forget(name)  # a server added later with this name starts afresh
                 return response
         raise HTTPError(404 if method == "GET" else 405, "There's nothing like that here.")
+
+    async def _documents(self, request: Request, action: str, method: str) -> Response:
+        documents = self.s.documents
+        try:
+            if action == "browse" and method == "GET":
+                return _json(await documents.browse(request.query.get("path", "")))
+            if action == "folders" and method == "POST":
+                body = _body(request)
+                async with self._lock:
+                    folders = _changed_folders(list(self.s.config.documents.folders), body)
+                    try:
+                        cfg = self.settings.set_values({"documents.folders": folders})
+                    except SettingsError as exc:
+                        raise HTTPError(400, str(exc)) from None
+                self.s.config.documents = cfg.documents
+                documents.configure(cfg.documents)
+                return _json(self.memory())
+            if action == "index" and method == "POST":
+                documents.start()
+                return _json(self.memory())
+            if action == "stop" and method == "POST":
+                await documents.stop()
+                return _json(self.memory())
+        except DocumentsError as exc:
+            status = 502 if action == "browse" else 409 if action == "index" and documents.running else 400
+            raise HTTPError(status, str(exc)) from None
+        raise HTTPError(404 if method == "GET" else 405, "There's nothing like that here.")
+
+    async def search(self, body: dict[str, Any]) -> dict[str, Any]:
+        query = str(body.get("query") or "").strip()
+        kind = body.get("kind") or None
+        if not query or len(query) > 500:
+            raise HTTPError(400, "Say what to look for, in up to 500 characters.")
+        if kind not in (None, *KINDS):
+            raise HTTPError(400, f"kind must be one of {', '.join(KINDS)}.")
+        memory = self.s.memory
+        try:
+            found = await memory.find(query, 12, kind)
+        except Exception as exc:
+            log.warning("Dashboard search failed: %s", exc)
+            raise HTTPError(
+                502, f"Couldn't search: is the embeddings server ({memory.embedder.cfg.base_url}) up?"
+            ) from None
+        return {
+            "query": query,
+            "results": [
+                {
+                    "kind": f.kind,
+                    "text": f.text,
+                    "path": memory.show_path(f.path) if f.path else None,
+                    "date": f.saved,
+                    "relevance": round(1 - f.distance, 3),
+                    "id": f.id,
+                }
+                for f in found
+            ],
+        }
+
+    def memory(self) -> dict[str, Any]:
+        counts = self.s.memory.store.count()
+        return {
+            "editable": self.settings.editable,
+            "facts": counts.get("fact", 0),
+            "conversations": counts.get("conversation", 0),
+            "documents": self.s.documents.summary(),
+        }
 
     async def _change(self, change: Any) -> Response:
         async with self._lock:
@@ -282,7 +361,7 @@ class DashboardServer(Server):
             "model": {"name": cfg.llm.model, **self._model},
             "memory": {
                 "facts": counts.get("fact", 0),
-                "documents": counts.get("document", 0),
+                "documents": len(self.s.memory.store.document_sources()),
                 "conversations": counts.get("conversation", 0),
             },
             "tools": {
@@ -436,3 +515,24 @@ def _held(change: ToolChange) -> dict[str, Any]:
         "now": version(change.now),
         "approved": version(change.approved) if change.approved else None,
     }
+
+
+def _changed_folders(folders: list[str], body: dict[str, Any]) -> list[str]:
+    """The folders to index, with one added or removed. A folder is a path on your Mac: ~/… or /…"""
+    if isinstance(body.get("remove"), str):
+        if body["remove"] not in folders:
+            raise HTTPError(400, f"{body['remove']} isn't one of the folders.")
+        return [f for f in folders if f != body["remove"]]
+    folder = body.get("add")
+    if not isinstance(folder, str) or not folder.strip():
+        raise HTTPError(400, 'Send {"add": path} or {"remove": path}.')
+    folder = folder.strip().rstrip("/") or "/"
+    if (
+        not (folder == "~" or folder.startswith(("~/", "/")))
+        or len(folder) > 1000
+        or any(c in folder for c in "\0\n\r")
+    ):
+        raise HTTPError(400, "Give the folder's full path on your Mac, such as ~/Documents.")
+    if folder in folders:
+        raise HTTPError(400, f"{folder} is one of the folders already.")
+    return [*folders, folder]

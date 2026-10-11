@@ -78,7 +78,7 @@ class Integration:
     asks: str = ""  # which of its tools ask first
 
 
-_MAC_SETUP = "Runs on your Mac, which needs setting up first: see the README, “Your Mac”."
+_MAC_SETUP = "Runs on your Mac, which needs setting up first: see the README, “Your Macs”."
 
 CATALOG: tuple[Integration, ...] = (
     Integration(
@@ -179,15 +179,6 @@ CATALOG: tuple[Integration, ...] = (
         "mcp_servers.search",
         defaults={"enabled": False, "command": "uvx", "args": ["duckduckgo-mcp-server==0.7.0"], "include": ["search"]},
         asks="Every search asks first, because what you search for leaves your network.",
-    ),
-    Integration(
-        "files",
-        "Files on your Mac",
-        "Searches and reads the folders you chose on your Mac. It can't change anything.",
-        "mcp_servers.files",
-        defaults={"enabled": False, "command": "ssh", "args": ["athena-mac", "files"], "confirm": []},
-        setup=_MAC_SETUP,
-        asks="Never asks: it's read-only, and only sees the folders you chose.",
     ),
     Integration(
         "apple",
