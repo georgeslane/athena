@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from pi_assistant import __version__
-from pi_assistant.config import Config, ConfigError, load_config
+from pi_assistant.config import Config, ConfigError, EmbeddingsConfig, load_config
 
 
 def _setup_logging(level: int) -> None:
@@ -153,9 +153,10 @@ async def _embeddings_test(args: argparse.Namespace) -> int:
     from pi_assistant.search_eval import QUESTIONS, print_report, run_search_test
 
     cfg = load_config(args.config)
+    server = _embeddings_server(cfg, args.on_mac)
     reports = []
     for model in args.model or [cfg.embeddings.model]:
-        reports.append(await run_search_test(cfg.embeddings, model))
+        reports.append(await run_search_test(server, model))
         print_report(reports[-1], cfg.memory)
     print(f"\n({len(QUESTIONS)} questions about made-up memories: a rough guide, not a benchmark.)")
     return 0 if all(not r.error for r in reports) else 1
@@ -170,7 +171,9 @@ async def _embeddings_use(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     indexed, count = _index_info(cfg)
     old, new = indexed or cfg.embeddings.model, args.model  # the index's model, if config.toml was changed first
-    if new == old == cfg.embeddings.model:
+    target = _embeddings_server(cfg, args.on_mac).model_copy(update={"model": new})
+    moving = target.base_url != cfg.embeddings.base_url
+    if new == old == cfg.embeddings.model and not moving:
         print(f"Athena already uses {new}. To check it: pi-assistant embeddings test")
         return 0
     if _athena_running():
@@ -183,13 +186,15 @@ async def _embeddings_use(args: argparse.Namespace) -> int:
     print(f"Testing {old} (now) and {new} on the same made-up memories...")
     current = await run_search_test(cfg.embeddings, old)
     print_report(current, cfg.memory)
-    report = await run_search_test(cfg.embeddings, new)
+    report = await run_search_test(target)
     print_report(report, cfg.memory)
     if report.error:
         print(f"\nNothing was changed: {new} didn't work.")
         return 1
 
     changes: dict[str, object] = {"embeddings.model": new}
+    if moving:  # empty: the model server, which config.toml then follows if it moves
+        changes |= {"embeddings.base_url": "", "embeddings.api_key": ""}
     recall = report.best_recall_cutoff()
     if recall != cfg.memory.recall_max_distance:
         changes["memory.recall_max_distance"] = recall
@@ -199,6 +204,8 @@ async def _embeddings_use(args: argparse.Namespace) -> int:
     print("\nThis will:")
     if cfg.embeddings.model != new:
         print(f"  - change embeddings.model from {cfg.embeddings.model} to {new}")
+    if moving:
+        print(f"  - get embeddings from the model server ({target.base_url}), not {cfg.embeddings.base_url}")
     if "memory.recall_max_distance" in changes:
         print(f"  - change memory.recall_max_distance from {cfg.memory.recall_max_distance} to {recall}")
     if "memory.duplicate_distance" in changes:
@@ -235,8 +242,23 @@ async def _embeddings_use(args: argparse.Namespace) -> int:
             return 1
         raise
     print(f"\nDone: {n} memories re-embedded with {new}. config.toml was backed up to config.toml.bak.")
-    print(f"If you won't go back to {old}, `ollama rm {old}` frees its disk space.")
+    if _is_local_ollama(cfg.embeddings.base_url):
+        if moving:
+            print("Athena no longer needs Ollama on the Pi: `sudo systemctl disable --now ollama` frees its memory.")
+        else:
+            print(f"If you won't go back to {old}, `ollama rm {old}` frees its disk space.")
     return 0
+
+
+def _embeddings_server(cfg: Config, on_mac: bool) -> EmbeddingsConfig:
+    """The embeddings settings to test or switch to: as configured, or with the model's server (oMLX on the Mac)."""
+    if not on_mac:
+        return cfg.embeddings
+    return cfg.embeddings.model_copy(update={"base_url": cfg.llm.base_url, "api_key": cfg.llm.api_key})
+
+
+def _is_local_ollama(url: str) -> bool:
+    return any(host in url for host in ("127.0.0.1:11434", "localhost:11434"))
 
 
 def _index_info(cfg: Config) -> tuple[str | None, int]:
@@ -303,8 +325,11 @@ def main(argv: list[str] | None = None) -> None:
     emb = p_emb.add_subparsers(dest="action", required=True)
     p_test = emb.add_parser("test", help="how well a model finds memories, and the cut-offs that suit it")
     p_test.add_argument("--model", "-m", action="append", help="model (repeatable; default: the configured one)")
+    on_mac = "on the model's own server ([llm] base_url, such as oMLX on the Mac), not the embeddings server"
+    p_test.add_argument("--on-mac", action="store_true", help=f"test models {on_mac}")
     p_use = emb.add_parser("use", help="test a model, then switch to it and re-embed every memory")
     p_use.add_argument("model")
+    p_use.add_argument("--on-mac", action="store_true", help=f"a model {on_mac}")
     p_use.add_argument("--yes", "-y", action="store_true", help="don't ask first")
     p_eval = sub.add_parser("eval", help="compare models on tool calling")
     p_eval.add_argument("--model", "-m", action="append", help="model id (repeatable; default: the configured model)")

@@ -9,11 +9,11 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
  ────────────      ┌──────────────────────────────────────────┐      ┌─────────────────────────────┐
   you  ◄────────►  │ pi-assistant (this repo)                 │      │ oMLX                        │
        long poll   │   Telegram bot ─► agent loop ────────────┼─────►│   Gemma 4 26B A4B (4-bit)   │
-                   │                   │  tool calls          │ HTTP │   OpenAI-compatible /v1     │
-                   │   memory ◄────────┤                      │      │                             │
+                   │                   │  tool calls          │ HTTP │   EmbeddingGemma 2          │
+                   │   memory ◄────────┤                      │      │   OpenAI-compatible /v1     │
                    │   (SQLite + vec)  │  MCP client ─────────┼─────►│ MCP servers: your files     │
                    │                   │      │               │ SSH  │   (read-only), Calendar and │
-                   │ Ollama: embeddinggemma   ▼               │      │   Reminders (iMCP)          │
+                   │                          ▼               │      │   Reminders (iMCP)          │
                    │ MCP servers: time, fetch, email, SEC ... │      └─────────────────────────────┘
                    └──────────────────────────────────────────┘
 ```
@@ -25,7 +25,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Tool calling with MCP**: connects to any MCP server, on the Pi, on your Mac over SSH, or remote over HTTP. Per-server filters choose which tools the model sees.
 - **A general assistant**: [recommended servers](#mcp-servers) let it search and read files on your Mac, use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own. Built-in tools read your [Trading 212](#trading-212) account and place the trades you approve, and query [SQLite databases](#databases) you choose.
 - **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
-- **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions. Related memories are added to each message automatically. Embeddings come from EmbeddingGemma on the Pi through Ollama, and are stored in SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec).
+- **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions. Related memories are added to each message automatically. Embeddings come from [EmbeddingGemma 2](#embeddings), served by oMLX on the Mac with the model, and are stored in SQLite on the Pi with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Sessions**: `/session` clears the conversation from the model's context, so replies stay quick, while the memory keeps everything you've talked about.
 - **Your notes as memory**: `pi-assistant ingest ~/notes` indexes Markdown and text files so the assistant can search them.
 - **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
@@ -35,7 +35,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 
 ## Install on the Pi
 
-You need a Raspberry Pi 4/5 running 64-bit Raspberry Pi OS (Bookworm or later), a model served by oMLX (or any OpenAI-compatible server) that the Pi can reach, and a Telegram bot token from [@BotFather](https://t.me/BotFather) (`/newbot`).
+You need a Raspberry Pi 4/5 running 64-bit Raspberry Pi OS (Bookworm or later), a model served by oMLX (or any OpenAI-compatible server) that the Pi can reach, with the [embeddings model](#embeddings) beside it, and a Telegram bot token from [@BotFather](https://t.me/BotFather) (`/newbot`).
 
 Over SSH:
 
@@ -45,7 +45,7 @@ cd ~/pi-assistant
 bash scripts/install.sh
 ```
 
-The script installs uv and Ollama, pulls `embeddinggemma`, installs the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. For a Display HAT Mini, see [Status board](#status-board).
+The script installs uv and the Python dependencies, turns off `git push` for this clone, creates `config.toml` and `.env`, and registers a systemd service. It doesn't start the service. It's safe to re-run. For a Display HAT Mini, see [Status board](#status-board).
 
 Then:
 
@@ -236,7 +236,7 @@ Local servers run in a sandbox made with [bubblewrap](https://github.com/contain
 Nothing it starts outlives it.
 
 - **`network = false`** cuts it off from the network too. The time server has this.
-- **Network on means everywhere.** A server with network access can reach anything the Pi can, including services on the Pi itself, such as Ollama. The sandbox can't limit it to particular sites.
+- **Network on means everywhere.** A server with network access can reach anything the Pi can, including services on the Pi itself, such as Athena's status API. The sandbox can't limit it to particular sites.
 - **`read_only_paths = ["/home/pi/notes"]`** lets a server read files or folders it needs.
 - **`sandbox = false`** runs a server without one. It can then read everything you can, so `doctor` warns about it.
 
@@ -377,22 +377,35 @@ To update a server later, read what changed, change its pinned version and resta
 - **Past conversations:** after each reply, your message and the reply are added to memory, in an index of their own. `search_memory` finds them, so Athena can look up what you talked about in an earlier session, but they aren't added to messages automatically, so an old answer can't be mistaken for a current one. Anything said while the embeddings server was down is added when it's back.
 - **Forgetting:** `/forget <id>` deletes one memory. **Forget everything** on the dashboard deletes them all, with the conversation history.
 - **Duplicates:** a fact closer than `duplicate_distance` to one already saved isn't saved again.
-- **Embeddings model:** `embeddinggemma` (768 dimensions, about 600 MB of RAM) runs on the Pi's CPU through Ollama.
+- **Embeddings model:** EmbeddingGemma 2 (768 dimensions), on the Mac: see [Embeddings](#embeddings).
 - **Storage:** everything (history, memory and usage statistics) lives in `data/assistant.db`. Back up that one file.
+
+### Embeddings
+
+Memories, past conversations and documents are searched by meaning, with vectors from an embeddings model. Athena uses [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), served by oMLX on the Mac, the same server as the model. So `[embeddings]` needs no address or key of its own: with `base_url` and `api_key` empty, it uses `[llm]`'s.
+
+1. **Update oMLX** to 0.7.1 or later: the first version that serves EmbeddingGemma 2.
+2. **Download the model:** in oMLX, add `mlx-community/embeddinggemma-2-bf16` (1.5 GB) beside your model.
+3. **Check it:** on the Pi, run `uv run pi-assistant embeddings test`. If oMLX calls it something else, the error lists the names it has. Put the right one in `embeddings.model`.
+
+The Mac does this much faster than the Pi could. Indexing a folder of documents takes minutes there, not hours. And it leaves the Pi's memory free. Athena already needs the Mac for the model, so this adds nothing new for it to depend on.
 
 ### Changing the embeddings model
 
 Every memory is stored as a vector from the embeddings model, and vectors from different models can't be compared, so switching means re-embedding all of them. Each model also scores distances on its own scale, so `recall_max_distance` and `duplicate_distance` change with it. One script does all of this:
 
 ```bash
-bash scripts/switch-embeddings.sh MODEL
+bash scripts/switch-embeddings.sh embeddinggemma-2-bf16 --on-mac   # a model on the model's server (oMLX)
+bash scripts/switch-embeddings.sh MODEL                            # a model in Ollama on the Pi
 ```
 
-It downloads the model (offering to update Ollama if it's too old for it), stops Athena, and tests the new model against the current one on 40 questions about made-up memories. It shows how often each finds the right memory, how fast it is and the cut-offs that suit it, then says what it will change and asks. If you agree, it sets the model and cut-offs in `config.toml` (keeping a copy in `config.toml.bak`) and re-embeds every memory. If that fails part way, nothing changes. Athena starts again either way.
+For a model in Ollama on the Pi, it downloads it first, offering to update Ollama if it's too old for it. Then it stops Athena, and tests the new model against the current one on 40 questions about made-up memories. It shows how often each finds the right memory, how fast it is and the cut-offs that suit it, then says what it will change and asks. If you agree, it sets the model and cut-offs in `config.toml` (keeping a copy in `config.toml.bak`) and re-embeds every memory. If that fails part way, nothing changes. Athena starts again either way.
 
-To test models without switching, run `uv run pi-assistant embeddings test -m MODEL -m ANOTHER`. Avoid `float16` builds, which can return broken vectors: Athena refuses to save those. If you change `dimensions`, start a fresh database instead.
+To test models without switching, run `uv run pi-assistant embeddings test -m MODEL -m ANOTHER`, with `--on-mac` for models on the model's server. Avoid `float16` builds, which can return broken vectors: Athena refuses to save those. If you change `dimensions`, start a fresh database instead.
 
-[EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) isn't usable yet: Ollama's builds of it need its MLX engine, which doesn't run on Linux ([ollama#18825](https://github.com/ollama/ollama/issues/18825)). On text it finds the same memories as `embeddinggemma` in the test above, and its distances are about half as large (a recall cut-off of about 0.31). Its full model gives the same vectors for text as its 270M text-only one, so once Ollama fixes this, `embeddinggemma-2:270m` is the one to use.
+**From the Pi's Ollama to the Mac:** a Pi set up before embeddings moved to the Mac uses `embeddinggemma` in Ollama on the Pi. After [setting up EmbeddingGemma 2 in oMLX](#embeddings), switch with the first command above. Your memories are re-embedded on the Mac, so nothing is lost. Then `sudo systemctl disable --now ollama` frees the Pi's memory.
+
+EmbeddingGemma 2 can't run on the Pi itself yet: Ollama's builds of it need its MLX engine, which doesn't run on Linux ([ollama#18825](https://github.com/ollama/ollama/issues/18825)). On text, it finds the same memories as `embeddinggemma` in the test above, and its distances are about half as large, so its cut-offs are lower: about 0.31 for recall and 0.03 for duplicates.
 
 ## Choosing a model
 
@@ -473,6 +486,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 
 - **Start with `uv run pi-assistant doctor`.** Then check `journalctl -u pi-assistant -f` and `data/logs/mcp-*.log`.
 - **"Can't reach the model server":** oMLX isn't running, is only listening on localhost, or the hostname doesn't resolve from the Pi. Try `curl http://my-mac.local:8000/v1/models` from the Pi.
+- **"The embeddings server doesn't have …":** oMLX is older than 0.7.1, or hasn't downloaded `mlx-community/embeddinggemma-2-bf16`, or calls it something else: the error lists what it has.
 - **Memories show up in replies about something else, or don't when they should:** the recall cut-off doesn't suit the embeddings model. Run `uv run pi-assistant embeddings test` and set `recall_max_distance` to the cut-off it suggests.
 - **"The memory index was built with … but the config now uses …":** `config.toml` names a different embeddings model from the one your memories were stored with. Run the switch script it names, or put the old model back.
 - **The model answers instead of using tools:** check that tool calling works in `doctor`, then compare models with `eval`.

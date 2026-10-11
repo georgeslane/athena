@@ -12,7 +12,6 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EMBED_MODEL="${EMBED_MODEL:-embeddinggemma}"
 SERVICE=/etc/systemd/system/pi-assistant.service
 
 for arg in "$@"; do
@@ -51,23 +50,6 @@ if ! command -v uv >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/uv" ]]; then
 fi
 export PATH="$HOME/.local/bin:$PATH"
 uv --version
-
-step "Installing Ollama (serves the embeddings model locally)"
-if ! command -v ollama >/dev/null 2>&1; then
-  curl -fsSL https://ollama.com/install.sh | sh
-fi
-# Keep the embeddings model loaded and only listen on localhost.
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-printf '[Service]\nEnvironment="OLLAMA_HOST=127.0.0.1:11434"\nEnvironment="OLLAMA_KEEP_ALIVE=-1"\n' |
-  sudo tee /etc/systemd/system/ollama.service.d/pi-assistant.conf >/dev/null
-sudo systemctl daemon-reload
-sudo systemctl enable ollama >/dev/null 2>&1 || true
-sudo systemctl restart ollama
-for _ in $(seq 1 30); do
-  curl -sf http://127.0.0.1:11434/api/version >/dev/null && break
-  sleep 1
-done
-ollama pull "$EMBED_MODEL"
 
 step "Installing Python dependencies"
 cd "$REPO_DIR"
