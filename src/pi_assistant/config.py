@@ -56,9 +56,10 @@ class TelegramConfig(_Section):
 
 
 class EmbeddingsConfig(_Section):
-    base_url: str = "http://localhost:11434/v1"
-    model: str = "embeddinggemma"
-    api_key: str = "ollama"
+    # Empty: the same server as the model, with its key ([llm] base_url and api_key), such as oMLX.
+    base_url: str = ""
+    model: str = "embeddinggemma-2-bf16"
+    api_key: str = ""
     dimensions: int = 768
     # EmbeddingGemma expects task prefixes; other models may want "" for both.
     query_prefix: str = "task: search result | query: "
@@ -72,9 +73,9 @@ class MemoryConfig(_Section):
     recall_top_k: int = 4
     # Cosine distances (0 = identical, 2 = opposite). Both depend on the embeddings model:
     # `pi-assistant embeddings test` measures them. Recalled memories further away than this are dropped,
-    recall_max_distance: float = 0.55
+    recall_max_distance: float = 0.31
     # and a new fact closer than this to a saved one is treated as the same fact.
-    duplicate_distance: float = 0.04
+    duplicate_distance: float = 0.03
     search_top_k: int = 8
     chunk_chars: int = 1200
 
@@ -209,6 +210,14 @@ class Config(_Section):
     base_dir: Path = Field(default_factory=Path.cwd, exclude=True)
     # The config file itself, which the dashboard edits. None if the config didn't come from a file.
     path: Path | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _embeddings_from_the_model_server(self) -> Config:
+        """With no base_url of their own, embeddings come from the model's server, with the model's key."""
+        if not self.embeddings.base_url:
+            self.embeddings.base_url = self.llm.base_url
+            self.embeddings.api_key = self.embeddings.api_key or self.llm.api_key
+        return self
 
     def resolve(self, path: str | Path) -> Path:
         p = Path(path).expanduser()

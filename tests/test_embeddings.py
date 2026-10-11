@@ -57,7 +57,8 @@ async def test_a_model_that_ignores_meaning_does_worse(embeddings_server):
     ("model", "error"),
     [
         ("fake-nan", "unusable vector"),
-        ("missing-model", "ollama pull missing-model"),
+        # Embeddings models first, to help find the name the server gives the one you want.
+        ("missing-model", "doesn't have missing-model. It has: nomic-embed-text, a-chat-model, fake-a, fake-b"),
     ],
 )
 async def test_a_broken_or_missing_model_is_reported(embeddings_server, model, error):
@@ -67,7 +68,7 @@ async def test_a_broken_or_missing_model_is_reported(embeddings_server, model, e
 
 async def test_an_unreachable_server_is_reported():
     report = await run_search_test(_cfg("http://127.0.0.1:9/v1"))
-    assert report.error == "couldn't reach the embeddings server"
+    assert report.error == "couldn't reach the embeddings server (http://127.0.0.1:9/v1)"
 
 
 def test_the_suggested_cut_offs():
@@ -250,3 +251,33 @@ def test_testing_models_from_the_command_line(athena, capsys):
     out = capsys.readouterr().out
     assert "fake-a\n" in out and "fake-b\n" in out and "auto-recall:  at your cut-off of 0.55" in out
     assert _run(athena, "test", "-m", "missing-model") == 1
+
+
+def test_moving_embeddings_to_the_model_server(athena, embeddings_server, capsys, monkeypatch):
+    """The Pi's own embeddings server (fake-a) to the model's server, such as oMLX on the Mac (fake-b)."""
+    from conftest import FakeEmbeddingsServer
+
+    monkeypatch.setenv("LLM_API_KEY", "")  # .env fills it in, and monkeypatch puts it back afterwards
+    monkeypatch.delenv("LLM_API_KEY")
+    mac = FakeEmbeddingsServer()
+    try:
+        text = athena.read_text().replace('base_url = "http://127.0.0.1:9/v1"', f'base_url = "{mac.url}"')
+        athena.write_text(text.replace('model = "test-model"', 'model = "test-model"\napi_key = "${LLM_API_KEY}"'))
+        (athena.parent / ".env").write_text("LLM_API_KEY=mac-key\n")
+        asyncio.run(_remember(athena, "Sam is allergic to peanuts."))
+
+        assert _run(athena, "test", "--on-mac", "-m", "fake-b") == 0
+        assert mac.requests and all(r["model"] == "fake-b" for r in mac.requests)
+
+        assert _run(athena, "use", "fake-b", "--on-mac", "--yes") == 0
+        out = capsys.readouterr().out
+        assert f"get embeddings from the model server ({mac.url}), not {embeddings_server.url}" in out
+        cfg = load_config(athena)
+        assert (cfg.embeddings.base_url, cfg.embeddings.api_key, cfg.embeddings.model) == (mac.url, "mac-key", "fake-b")
+        assert 'base_url = ""' in athena.read_text() and "mac-key" not in athena.read_text()  # the key stays in .env
+        assert asyncio.run(_search(athena, "Who is allergic to peanuts?")) == "Sam is allergic to peanuts."
+
+        assert _run(athena, "use", "fake-b", "--on-mac") == 0
+        assert "already uses fake-b" in capsys.readouterr().out
+    finally:
+        mac.close()

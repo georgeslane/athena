@@ -84,6 +84,7 @@ def test_install(sandbox):
     assert "sudo apt-get install -y -qq git curl ca-certificates sqlite3 bubblewrap" in calls
     assert "uv sync --no-dev" in calls
     assert not [c for c in calls if "display" in c]  # the status board is its own project now
+    assert not [c for c in calls if "ollama" in c]  # embeddings come from the Mac
     unit = (files / "pi-assistant.service").read_text()
     assert f"ExecStart={repo}/.venv/bin/pi-assistant run" in unit
     assert "User=pi" in unit
@@ -189,8 +190,19 @@ def test_an_ollama_too_old_for_the_model_is_updated_if_you_say_so(sandbox, answe
         assert calls == ["ollama pull new-model"]
 
 
+def test_switching_to_a_model_on_the_mac(sandbox):
+    _, _, run = sandbox
+    result, calls = run("switch-embeddings.sh", "embeddinggemma-2-bf16", "--on-mac")
+    assert result.returncode == 0, result.stderr
+    assert calls == [  # nothing to download on the Pi, and Ollama there is left as it is
+        "sudo systemctl stop pi-assistant",
+        "uv run pi-assistant embeddings use embeddinggemma-2-bf16 --on-mac",
+        "sudo systemctl start pi-assistant",
+    ]
+
+
 def test_switching_needs_one_model(sandbox):
     _, _, run = sandbox
-    for args in [(), ("a", "b")]:
+    for args in [(), ("a", "b"), ("--on-mac",), ("a", "--other")]:
         result, calls = run("switch-embeddings.sh", *args)
         assert result.returncode == 2 and "Usage" in result.stderr and calls == []

@@ -13,7 +13,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 
-from openai import APIConnectionError
+from openai import APIConnectionError, AsyncOpenAI
 
 from pi_assistant.config import EmbeddingsConfig, MemoryConfig
 from pi_assistant.memory import Embedder
@@ -240,7 +240,7 @@ async def run_search_test(cfg: EmbeddingsConfig, model: str | None = None) -> Se
         questions = await embedder.embed([q for q, _ in QUESTIONS] + UNRELATED, "query")
         pairs = await embedder.embed([t for pair in DUPLICATES + DIFFERENT for t in pair], "document")
     except Exception as exc:
-        report.error = describe_embeddings_error(exc, cfg.model)
+        report.error = await describe_embeddings_error(exc, cfg)
         return report
     finally:
         await embedder.close()
@@ -261,13 +261,31 @@ async def run_search_test(cfg: EmbeddingsConfig, model: str | None = None) -> Se
     return report
 
 
-def describe_embeddings_error(exc: Exception, model: str) -> str:
+async def describe_embeddings_error(exc: Exception, cfg: EmbeddingsConfig) -> str:
     text = str(exc)
-    if "not found" in text.lower():
-        return f"the embeddings server doesn't have {model}. For Ollama: ollama pull {model}"
+    if "not found" in text.lower() or "does not exist" in text.lower():
+        found = f"the embeddings server ({cfg.base_url}) doesn't have {cfg.model}"
+        models = await server_models(cfg)
+        if models:
+            found += f". It has: {', '.join(models[:12])}"
+        if ":11434" in cfg.base_url:
+            found += f". For Ollama: ollama pull {cfg.model}"
+        return found
     if isinstance(exc, APIConnectionError):
-        return "couldn't reach the embeddings server"
+        return f"couldn't reach the embeddings server ({cfg.base_url})"
     return f"{type(exc).__name__}: {text}"
+
+
+async def server_models(cfg: EmbeddingsConfig) -> list[str]:
+    """The models a server lists, embeddings models first: to find the name it gives the one you want."""
+    client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key or "none", timeout=10, max_retries=0)
+    try:
+        ids = [m.id for m in (await client.models.list()).data]
+    except Exception:
+        return []
+    finally:
+        await client.close()
+    return sorted(ids, key=lambda m: ("embed" not in m.lower(), m))
 
 
 def print_report(r: SearchReport, memory: MemoryConfig) -> None:

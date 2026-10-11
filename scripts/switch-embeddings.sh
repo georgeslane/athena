@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# Switch Athena's embeddings model. It downloads the model, tests it against the one you use
-# now and shows what would change. If you agree, it re-embeds every memory with it. Athena is
-# stopped while that runs and started again afterwards, whatever happens.
+# Switch Athena's embeddings model. It tests the model against the one you use now and shows
+# what would change. If you agree, it re-embeds every memory with it. Athena is stopped while
+# that runs and started again afterwards, whatever happens.
 #
-#   bash scripts/switch-embeddings.sh embeddinggemma-2:740m-bf16
+#   bash scripts/switch-embeddings.sh embeddinggemma-2-bf16 --on-mac   # served by oMLX on the Mac
+#   bash scripts/switch-embeddings.sh embeddinggemma                    # Ollama on the Pi, downloaded first
 set -euo pipefail
 
 main() {
-  local model="${1:-}"
-  if [ -z "$model" ] || [ $# -gt 1 ]; then
-    echo "Usage: bash scripts/switch-embeddings.sh MODEL   (for example embeddinggemma-2:740m-bf16)" >&2
-    exit 2
-  fi
+  local model="" on_mac=""
+  for arg in "$@"; do
+    case "$arg" in
+      --on-mac) on_mac=1 ;;
+      -*) usage ;;
+      *) if [ -z "$model" ]; then model="$arg"; else usage; fi ;;
+    esac
+  done
+  [ -n "$model" ] || usage
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   export PATH="$HOME/.local/bin:$PATH"
   PULL_LOG="$(mktemp)"
   trap cleanup EXIT
 
-  if ! pull "$model"; then
+  # A model on the Mac is already there: oMLX downloads it. One on the Pi comes from Ollama.
+  if [ -z "$on_mac" ] && ! pull "$model"; then
     if ! grep -qi "newer version" "$PULL_LOG"; then
       echo "Couldn't download $model, so nothing was changed." >&2
       exit 1
@@ -37,12 +43,18 @@ main() {
 
   sudo systemctl stop pi-assistant
   STOPPED=1
-  if uv run pi-assistant embeddings use "$model"; then
-    # Ollama keeps models loaded (OLLAMA_KEEP_ALIVE=-1): restarting it lets go of the old one.
-    sudo systemctl restart ollama
-  else
+  if ! uv run pi-assistant embeddings use "$model" ${on_mac:+--on-mac}; then
     exit 1
   fi
+  if [ -z "$on_mac" ]; then
+    # Ollama keeps models loaded (OLLAMA_KEEP_ALIVE=-1): restarting it lets go of the old one.
+    sudo systemctl restart ollama
+  fi
+}
+
+usage() {
+  echo "Usage: bash scripts/switch-embeddings.sh MODEL [--on-mac]   (for example embeddinggemma-2-bf16 --on-mac)" >&2
+  exit 2
 }
 
 PULL_LOG=""

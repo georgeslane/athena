@@ -154,6 +154,12 @@ class FakeEmbeddingsServer:
                     {"object": "list", "data": data, "model": model, "usage": {"prompt_tokens": 0, "total_tokens": 0}},
                 )
 
+            def do_GET(self) -> None:
+                if self.path.rstrip("/").endswith("/models"):
+                    models = ["fake-a", "fake-b", "fake-noise", "fake-nan", "a-chat-model", "nomic-embed-text"]
+                    return self._send(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in models]})
+                self._send(404, {"error": {"message": "not found"}})
+
             def _send(self, status: int, payload: dict) -> None:
                 raw = json.dumps(payload).encode()  # NaN goes out as NaN, as a broken server's would
                 self.send_response(status)

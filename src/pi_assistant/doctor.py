@@ -19,6 +19,7 @@ from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager, ServerStatus
 from pi_assistant.memory import Embedder, MemoryStore
 from pi_assistant.sandbox import Sandbox, SandboxError
+from pi_assistant.search_eval import describe_embeddings_error
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.siri import MIN_TOKEN_CHARS
 from pi_assistant.status_api import is_loopback
@@ -84,8 +85,9 @@ async def run_doctor(cfg: Config) -> bool:
         vec = await asyncio.wait_for(embedder.embed_one("hello world", "query"), 60)
         report(OK, f"working; {len(vec)} dimensions")
     except Exception as exc:
-        report(FAIL, f"{type(exc).__name__}: {exc}")
-        report(WARN, f"Is Ollama running? Try: ollama pull {cfg.embeddings.model}")
+        report(FAIL, await describe_embeddings_error(exc, cfg.embeddings))
+        if ":11434" not in cfg.embeddings.base_url:
+            report(WARN, 'Check the model server serves the embeddings model too (README, "Embeddings").')
     finally:
         await embedder.close()
 
