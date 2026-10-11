@@ -19,6 +19,7 @@ from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.news import NewsReader
+from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.settings import PROTECTED_SECRETS
 from pi_assistant.stats import UsageStats
@@ -241,7 +242,14 @@ def build_services(cfg: Config) -> Services:
     tools = ToolRegistry()
     for tool in memory.tools():
         tools.add(tool)
-    mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, ServerEnvs.for_config(cfg), ToolApprovals(cfg.db_path))
+    mcp = MCPManager(
+        cfg.mcp_servers,
+        cfg.base_dir,
+        cfg.log_dir,
+        ServerEnvs.for_config(cfg),
+        ToolApprovals(cfg.db_path),
+        Sandbox.detect(),
+    )
 
     prompt_path = cfg.resolve(cfg.agent.system_prompt_file)
     template = None
