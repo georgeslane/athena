@@ -57,7 +57,7 @@ class TelegramConfig(_Section):
 
 class EmbeddingsConfig(_Section):
     base_url: str = "http://localhost:11434/v1"
-    model: str = "embeddinggemma-2:740m-bf16"
+    model: str = "embeddinggemma"
     api_key: str = "ollama"
     dimensions: int = 768
     # EmbeddingGemma expects task prefixes; other models may want "" for both.
@@ -72,9 +72,9 @@ class MemoryConfig(_Section):
     recall_top_k: int = 4
     # Cosine distances (0 = identical, 2 = opposite). Both depend on the embeddings model:
     # `pi-assistant embeddings test` measures them. Recalled memories further away than this are dropped,
-    recall_max_distance: float = 0.31
+    recall_max_distance: float = 0.55
     # and a new fact closer than this to a saved one is treated as the same fact.
-    duplicate_distance: float = 0.03
+    duplicate_distance: float = 0.04
     search_top_k: int = 8
     chunk_chars: int = 1200
 

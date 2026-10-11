@@ -1,0 +1,9 @@
+# Made by Athena for the MCP server 'email'. Don't edit it: change the server in config.toml.
+[project]
+name = "athena-mcp-email"
+version = "0"
+requires-python = ">=3.11"
+dependencies = ["mcp-email-server==1.11.0"]
+
+[tool.uv]
+package = false

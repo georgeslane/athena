@@ -430,9 +430,9 @@ def test_setting_values_changes_only_those_lines(setup):
     cfg = settings.set_values({"embeddings.model": "other-model", "memory.recall_max_distance": 0.4})
     assert (cfg.embeddings.model, cfg.memory.recall_max_distance) == ("other-model", 0.4)
     assert changed_lines(before, config.read_text()) == [
-        '-model = "embeddinggemma-2:740m-bf16"',
+        '-model = "embeddinggemma"',
         '+model = "other-model"',
-        "-recall_max_distance = 0.31             # auto-recall leaves out memories further away than this "
+        "-recall_max_distance = 0.55             # auto-recall leaves out memories further away than this "
         "(lower = stricter)",
         "+recall_max_distance = 0.4             # auto-recall leaves out memories further away than this "
         "(lower = stricter)",
@@ -440,7 +440,7 @@ def test_setting_values_changes_only_those_lines(setup):
     # A setting that isn't there yet goes at the end of its section, and a section that isn't there is added.
     config.write_text(
         before.replace(
-            "duplicate_distance = 0.03              # a new fact closer than this to a saved one isn't saved again\n",
+            "duplicate_distance = 0.04              # a new fact closer than this to a saved one isn't saved again\n",
             "",
         )
     )

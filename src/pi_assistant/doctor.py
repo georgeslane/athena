@@ -16,8 +16,9 @@ from pi_assistant.config import Config
 from pi_assistant.dashboard import MIN_TOKEN_CHARS as MIN_PASSWORD_CHARS
 from pi_assistant.databases import Databases
 from pi_assistant.llm import LLMClient
-from pi_assistant.mcp_manager import MCPManager
+from pi_assistant.mcp_manager import MCPManager, ServerStatus
 from pi_assistant.memory import Embedder, MemoryStore
+from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.siri import MIN_TOKEN_CHARS
 from pi_assistant.status_api import is_loopback
 from pi_assistant.tools import Tool, ToolError
@@ -102,7 +103,8 @@ async def run_doctor(cfg: Config) -> bool:
     if not cfg.mcp_servers:
         report(WARN, "none configured")
     else:
-        mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir)
+        envs = ServerEnvs.for_config(cfg)
+        mcp = MCPManager(cfg.mcp_servers, cfg.base_dir, cfg.log_dir, envs)
         try:
             await mcp.start()
             for st in mcp.status():
@@ -111,6 +113,7 @@ async def run_doctor(cfg: Config) -> bool:
                     report(OK, f"{st.name}: {st.tools} tool{'' if st.tools == 1 else 's'} ({names})")
                 else:
                     report(FAIL, f"{st.name}: {st.error}")
+                await check_lock(envs, st, report)
             mcp_tools = mcp.tools()
         finally:
             await mcp.stop()
@@ -193,6 +196,24 @@ async def measure_prompt(llm: LLMClient, system_prompt: str, schemas: list[dict[
     cached = await llm.chat(messages("b"), schemas or None, max_tokens=1)
     tokens = cold.prompt_tokens - bare.prompt_tokens if cold.prompt_tokens and bare.prompt_tokens else None
     return PromptCost(len(schemas), tokens, cold.elapsed, max(0.0, cold.elapsed - bare.elapsed), cached.elapsed)
+
+
+async def check_lock(envs: ServerEnvs, st: ServerStatus, report: Callable[[str, str], None]) -> None:
+    """For a server started with uvx: whether its dependencies are locked, and if they have known vulnerabilities."""
+    if st.lock == "unlocked":
+        report(WARN, f"{st.name}: uvx is given options Athena can't lock, so its dependencies aren't pinned")
+        return
+    if st.lock is None:
+        return
+    audit = await envs.audit(st.name)
+    origin = "a reviewed lock (mcp-locks/)" if st.lock == "reviewed" else "a lock made when it was first used"
+    if audit.clean:
+        report(OK, f"{st.name}: dependencies pinned by {origin}; {audit.summary.lower()}")
+    elif audit.clean is None:
+        report(WARN, f"{st.name}: dependencies pinned by {origin}, but not checked: {audit.summary}")
+    else:
+        found = f"{audit.summary} ({', '.join(audit.affected)})"
+        report(FAIL, f"{st.name}: {found}. For details, run `uv audit --frozen` in data/mcp/{st.name}")
 
 
 def report_prompt(cost: PromptCost, report: Callable[[str, str], None]) -> None:
