@@ -35,6 +35,7 @@ from telegram.ext import (
 from pi_assistant.app import Services
 from pi_assistant.config import ConfigError
 from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
+from pi_assistant.memory import Found
 from pi_assistant.siri import VOICE_NOTE, SiriServer
 from pi_assistant.status import State
 from pi_assistant.tool_approvals import ToolChange
@@ -363,20 +364,23 @@ class TelegramBot:
 
     async def cmd_recall(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = " ".join(ctx.args or []).strip()
+        memory = self.s.memory
         if query:
-            hits = await self.s.memory.search(query, 8)
+            found = await memory.find(query, 8)
             header = f"Memories matching '{query}':"
         else:
-            hits = self.s.memory.store.recent(10)
+            found = [Found("fact", 1.0, h.text, id=h.id) for h in memory.store.recent(10)]
             header = "Most recent memories:"
-        if not hits:
+        if not found:
             await update.effective_message.reply_text("Nothing found.")  # type: ignore[union-attr]
             return
         lines = [header]
-        for h in hits:
-            text = h.text if len(h.text) < 300 else h.text[:300] + "..."
-            score = f" ({1 - h.distance:.2f})" if query else ""
-            lines.append(f"#{h.id}{score} {text}")
+        for f in found:
+            text = f.text if len(f.text) < 300 else f.text[:300] + "..."
+            score = f" ({1 - f.distance:.2f})" if query else ""
+            # A document goes by its path: its passages come and go with it when you index, so /forget isn't for them.
+            label = f"📄 {memory.show_path(f.path)}" if f.kind == "document" and f.path else f"#{f.id}"
+            lines.append(f"{label}{score} {text}")
         await self._send(ctx.bot, update.effective_chat.id, "\n".join(lines))  # type: ignore[union-attr]
 
     async def cmd_forget(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

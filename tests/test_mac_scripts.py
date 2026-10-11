@@ -77,76 +77,135 @@ def our_line(mac, key=KEY):
     return f"restrict,command=\"'{mac.app}/ssh-command'\" {key}"
 
 
-def test_install_sets_up_both_servers_for_the_pi_key_only(mac):
-    result = mac.install("--pi-key", KEY, "--folder", "~/Documents")
+def plist(mac, name):
+    return plistlib.loads((mac.agents / f"local.athena.{name}.plist").read_bytes())
+
+
+def offered(mac):
+    return sorted(p.name.removeprefix("local.athena.").removesuffix(".plist") for p in mac.agents.glob("*.plist"))
+
+
+def test_a_mac_that_offers_its_documents(mac):
+    result = mac.install("--pi-key", KEY, "--documents")
     assert result.returncode == 0, result.stderr
 
-    assert (mac.app / "folders").read_text() == f"{mac.home}/Documents\n"
+    assert offered(mac) == ["documents"]
+    assert (mac.app / "servers").read_text() == "documents\n"
+    assert (mac.app / "scope").read_text() == f"{mac.home}\n"  # your home folder, unless you narrow it
     assert mac.keys.read_text() == our_line(mac) + "\n"
     assert oct(mac.keys.stat().st_mode & 0o777) == "0o600"
     assert oct((mac.home / ".ssh").stat().st_mode & 0o777) == "0o700"
 
+    server = plist(mac, "documents")
+    assert server["Label"] == "local.athena.documents"
+    assert server["ProgramArguments"] == [f"{mac.app}/run-documents"]
+    listener = server["Sockets"]["Listener"]
+    assert listener["SockPathName"] == f"{mac.app}/documents.sock" and listener["SockPathMode"] == 0o600
+    assert server["inetdCompatibility"] == {"Wait": False}  # a server per connection
     uid = os.getuid()
-    for name in ["files", "apple"]:
-        plist = plistlib.loads((mac.agents / f"local.athena.{name}.plist").read_bytes())
-        assert plist["Label"] == f"local.athena.{name}"
-        assert plist["ProgramArguments"] == [f"{mac.app}/run-{name}"]
-        listener = plist["Sockets"]["Listener"]
-        assert listener["SockPathName"] == f"{mac.app}/{name}.sock" and listener["SockPathMode"] == 0o600
-        assert plist["inetdCompatibility"] == {"Wait": False}  # a server per connection
-        assert f"launchctl bootstrap gui/{uid} {mac.agents}/local.athena.{name}.plist" in mac.calls("launchctl")
+    assert f"launchctl bootstrap gui/{uid} {mac.agents}/local.athena.documents.plist" in mac.calls("launchctl")
 
     # stderr goes to a log, so it can't garble the conversation with the Pi.
-    assert (mac.app / "run-files").read_text().splitlines()[1:] == [
-        f'exec 2>>"{mac.home}/Library/Logs/Athena/files.log"',
-        f'exec "{mac.app}/venv/bin/python" -m pi_assistant.mac_files --folders-file "{mac.app}/folders"',
+    assert (mac.app / "run-documents").read_text().splitlines()[1:] == [
+        f'exec 2>>"{mac.home}/Library/Logs/Athena/documents.log"',
+        f'exec "{mac.app}/venv/bin/python" -m pi_assistant.mac_documents --scope-file "{mac.app}/scope"',
     ]
     assert mac.calls("uv") == [f"uv sync --project {REPO} --frozen --no-dev --extra mac --no-editable --quiet"]
     assert f"UV_PROJECT_ENVIRONMENT={mac.app}/venv" in mac.log.read_text()
-    assert "Remote Login is off" in result.stdout and "iMCP isn't installed" in result.stdout
+    assert "Remote Login is off" in result.stdout and "iMCP" not in result.stdout
+    assert "open Memory, choose folders" in result.stdout
 
 
-def test_the_key_can_only_reach_the_two_servers(mac):
-    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents").check_returncode()
+def test_a_mac_that_offers_its_calendar(mac):
+    result = mac.install("--pi-key", KEY, "--calendar")
+    assert result.returncode == 0, result.stderr
+    assert offered(mac) == ["apple"] and not (mac.app / "scope").exists()
+    assert mac.calls("uv") == []  # iMCP is its own app: there's no Python environment to make
+    assert "iMCP isn't installed" in result.stdout and "Open iMCP" in result.stdout
 
-    assert mac.ssh_command("files").returncode == 1  # the nc stand-in finds nothing listening
-    for attempt in ["sh -c id", "files; rm -rf ~", "", "../files"]:
+
+def test_the_key_can_only_reach_this_macs_servers(mac):
+    mac.install("--pi-key", KEY, "--documents").check_returncode()
+
+    assert mac.ssh_command("documents").returncode == 1  # the nc stand-in finds nothing listening
+    for attempt in ["sh -c id", "documents; rm -rf ~", "", "../documents", "apple"]:
         result = mac.ssh_command(attempt)
         assert result.returncode == 1 and "there's no server called" in result.stderr
     connections = [call for call in mac.calls("nc") if " -U " in call]
-    assert connections == [f"nc -U {mac.app}/files.sock"]  # only the one for "files"
+    assert connections == [f"nc -U {mac.app}/documents.sock"]  # only the one for "documents"
+    assert "The servers are: documents." in mac.ssh_command("apple").stderr
 
 
 @pytest.mark.parametrize("shell", [sh for sh in ["/bin/sh", "/bin/bash", "/bin/zsh"] if Path(sh).exists()])
 def test_the_forced_command_survives_the_space_in_its_path(mac, shell):
     # sshd runs it through your login shell, and "Application Support" has a space in it.
-    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents").check_returncode()
-    mac.ssh_command("files", shell=shell)
-    assert mac.calls("nc")[-1] == f"nc -U {mac.app}/files.sock"
+    mac.install("--pi-key", KEY, "--documents").check_returncode()
+    mac.ssh_command("documents", shell=shell)
+    assert mac.calls("nc")[-1] == f"nc -U {mac.app}/documents.sock"
+
+
+def test_narrowing_what_the_pi_may_see(mac):
+    (mac.home / "Desktop").mkdir()
+    mac.install(
+        "--pi-key", KEY, "--documents", "--scope", "~/Documents", "--scope", f"{mac.home}/Desktop"
+    ).check_returncode()
+    assert (mac.app / "scope").read_text() == f"{mac.home}/Documents\n{mac.home}/Desktop\n"
+    mac.install().check_returncode()  # no options: the same
+    assert (mac.app / "scope").read_text() == f"{mac.home}/Documents\n{mac.home}/Desktop\n"
+
+    result = mac.install("--documents", "--scope", f"{mac.home}/Nowhere")
+    assert result.returncode != 0 and "Not a folder" in result.stderr
+    result = mac.install("--calendar", "--scope", f"{mac.home}/Documents")
+    assert result.returncode != 0 and "--scope is only for --documents" in result.stderr
 
 
 def test_rerunning_fixes_the_key_line_of_an_older_install(mac):
-    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents").check_returncode()
+    mac.install("--pi-key", KEY, "--documents").check_returncode()
     mac.keys.write_text(f'restrict,command="{mac.app}/ssh-command" {KEY}\n')  # what versions before this wrote
-    assert mac.ssh_command("files").returncode == 127  # the shell split the path at the space
+    assert mac.ssh_command("documents").returncode == 127  # the shell split the path at the space
 
     mac.install().check_returncode()  # no options: the same key, with its line fixed
     assert mac.keys.read_text() == our_line(mac) + "\n"
-    mac.ssh_command("files")
-    assert mac.calls("nc")[-1] == f"nc -U {mac.app}/files.sock"
+    mac.ssh_command("documents")
+    assert mac.calls("nc")[-1] == f"nc -U {mac.app}/documents.sock"
 
 
-def test_rerunning_keeps_folders_and_a_new_key_replaces_the_old_one(mac):
+def test_rerunning_keeps_what_the_mac_offers_and_a_new_key_replaces_the_old_one(mac):
     mac.keys.parent.mkdir(mode=0o700)
     mac.keys.write_text("ssh-ed25519 AAAAyourlaptop you@laptop\n")
-    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents").check_returncode()
+    mac.install("--pi-key", KEY, "--documents", "--calendar").check_returncode()
 
-    mac.install().check_returncode()  # no options: same folders, same key
-    assert (mac.app / "folders").read_text() == f"{mac.home}/Documents\n"
+    mac.install().check_returncode()  # no options: the same servers, the same key
+    assert offered(mac) == ["apple", "documents"]
     assert mac.keys.read_text() == f"ssh-ed25519 AAAAyourlaptop you@laptop\n{our_line(mac)}\n"
 
     mac.install("--pi-key", OTHER_KEY).check_returncode()
     assert mac.keys.read_text() == f"ssh-ed25519 AAAAyourlaptop you@laptop\n{our_line(mac, OTHER_KEY)}\n"
+
+    mac.install("--calendar").check_returncode()  # documents switched off
+    assert offered(mac) == ["apple"] and not (mac.app / "run-documents").exists()
+    assert not (mac.app / "scope").exists()
+    assert f"launchctl bootout gui/{os.getuid()}/local.athena.documents" in mac.calls("launchctl")
+
+
+def test_an_older_install_with_the_files_server_moves_on(mac):
+    """Before documents, a Mac offered "files" (searching folders with Spotlight) and "apple"."""
+    mac.agents.mkdir(parents=True)
+    mac.app.mkdir(parents=True)
+    for name in ["files", "apple"]:
+        (mac.agents / f"local.athena.{name}.plist").write_text("<plist/>")
+        (mac.app / f"run-{name}").write_text("#!/bin/sh\n")
+    (mac.app / "folders").write_text(f"{mac.home}/Documents\n")
+    mac.keys.parent.mkdir(mode=0o700)
+    mac.keys.write_text(our_line(mac) + "\n")
+
+    result = mac.install()  # what the README says to do after updating the repo
+    assert result.returncode == 0, result.stderr
+    assert offered(mac) == ["apple"]  # Calendar carries on
+    assert not (mac.app / "run-files").exists() and not (mac.app / "folders").exists()
+    assert f"launchctl bootout gui/{os.getuid()}/local.athena.files" in mac.calls("launchctl")
+    assert "Athena now indexes your documents instead" in result.stdout
+    assert mac.keys.read_text() == our_line(mac) + "\n"
 
 
 @pytest.mark.parametrize(
@@ -159,22 +218,25 @@ def test_rerunning_keeps_folders_and_a_new_key_replaces_the_old_one(mac):
     ],
 )
 def test_refuses_anything_but_a_plain_public_key(mac, key):
-    result = mac.install("--pi-key", key, "--folder", f"{mac.home}/Documents")
+    result = mac.install("--pi-key", key, "--documents")
     assert result.returncode != 0 and "doesn't look like a public key" in result.stderr
     assert not mac.keys.exists()
 
 
-def test_needs_a_key_and_real_folders(mac):
-    result = mac.install("--folder", f"{mac.home}/Documents")
+def test_needs_a_key_and_to_know_what_to_offer(mac):
+    result = mac.install("--documents")
     assert result.returncode != 0 and "--pi-key" in result.stderr
-    result = mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Nowhere")
-    assert result.returncode != 0 and "Not a folder" in result.stderr
     result = mac.install("--pi-key", KEY)
-    assert result.returncode != 0 and "--folder" in result.stderr
+    assert result.returncode != 0 and "Say what this Mac offers" in result.stderr
+    result = mac.install("--pi-key", KEY, "--server", "nothing")
+    assert result.returncode != 0 and "no server called 'nothing'" in result.stderr
+    result = mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents")
+    assert result.returncode != 0 and "you choose folders on Athena's dashboard now" in result.stderr
+    assert not mac.agents.exists()
 
 
 def test_only_runs_on_a_mac(mac):
-    result = mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents", STUB_UNAME="Linux")
+    result = mac.install("--pi-key", KEY, "--documents", STUB_UNAME="Linux")
     assert result.returncode != 0 and "This is for the Mac" in result.stderr
 
 
@@ -183,24 +245,25 @@ def test_adding_a_server_is_one_line(mac, tmp_path):
     script.parent.mkdir(parents=True)
     original = (REPO / "scripts" / "mac" / "install.sh").read_text()
     script.write_text(original.replace('  "apple|', '  "notes|/opt/notes-mcp --read-only"\n  "apple|', 1))
-    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents", script=script).check_returncode()
+    mac.install("--pi-key", KEY, "--server", "notes", "--calendar", script=script).check_returncode()
 
     assert (mac.app / "run-notes").read_text().splitlines()[-1] == "exec /opt/notes-mcp --read-only"
-    assert plistlib.loads((mac.agents / "local.athena.notes.plist").read_bytes())["Label"] == "local.athena.notes"
+    assert plist(mac, "notes")["Label"] == "local.athena.notes"
     mac.ssh_command("notes")
     assert mac.calls("nc")[-1] == f"nc -U {mac.app}/notes.sock"
-    assert "The servers are: files, notes, apple." in mac.ssh_command("other").stderr
+    assert "The servers are: notes, apple." in mac.ssh_command("other").stderr
 
 
 def test_uninstall_removes_everything_it_added(mac):
     mac.keys.parent.mkdir(mode=0o700)
     mac.keys.write_text("ssh-ed25519 AAAAyourlaptop you@laptop\n")
-    mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents").check_returncode()
+    mac.install("--pi-key", KEY, "--documents", "--calendar").check_returncode()
 
     mac.install("--uninstall").check_returncode()
     assert not mac.app.exists() and not list(mac.agents.iterdir())
     assert mac.keys.read_text() == "ssh-ed25519 AAAAyourlaptop you@laptop\n"
-    assert f"launchctl bootout gui/{os.getuid()}/local.athena.files" in mac.calls("launchctl")
+    for name in ["documents", "apple"]:
+        assert f"launchctl bootout gui/{os.getuid()}/local.athena.{name}" in mac.calls("launchctl")
 
 
 # -- the Pi's end: scripts/connect-mac.sh --------------------------------------------------
@@ -233,5 +296,20 @@ def test_connect_mac_makes_a_key_and_an_ssh_entry(tmp_path):
         assert f"  {line}\n" in config
     assert (home / ".ssh" / "athena_mac.pub").read_text().strip() == public  # the same key
 
-    for bad in [("my mac", "georges"), ("my-mac\nHost *", "georges"), ("my-mac", "")]:
+    # A second Mac, under a name of its own, with the same key.
+    laptop = connect("my-laptop.tail1234.ts.net", "georges", "laptop")
+    assert laptop.returncode == 0, laptop.stderr
+    assert "ssh athena-laptop hello" in laptop.stdout and f'--pi-key "{public}"' in laptop.stdout
+    config = (home / ".ssh" / "config").read_text()
+    assert config.count("Host athena-mac\n") == 1 and config.count("Host athena-laptop\n") == 1
+    laptop_entry = config.split("Host athena-laptop\n")[1]
+    assert "  HostName my-laptop.tail1234.ts.net\n" in laptop_entry and "IdentityFile ~/.ssh/athena_mac" in laptop_entry
+
+    for bad in [
+        ("my mac", "georges"),
+        ("my-mac\nHost *", "georges"),
+        ("my-mac", ""),
+        ("my-mac", "georges", "Laptop!"),
+        ("my-mac", "georges", "laptop", "extra"),
+    ]:
         assert connect(*bad).returncode == 2

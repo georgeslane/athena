@@ -11,11 +11,13 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
        long poll   │   Telegram bot ─► agent loop ────────────┼─────►│   Gemma 4 26B A4B (4-bit)   │
                    │                   │  tool calls          │ HTTP │   EmbeddingGemma 2          │
                    │   memory ◄────────┤                      │      │   OpenAI-compatible /v1     │
-                   │   (SQLite + vec)  │  MCP client ─────────┼─────►│ MCP servers: your files     │
-                   │                   │      │               │ SSH  │   (read-only), Calendar and │
-                   │                          ▼               │      │   Reminders (iMCP)          │
-                   │ MCP servers: time, fetch, email, SEC ... │      └─────────────────────────────┘
-                   └──────────────────────────────────────────┘
+                   │   (SQLite + vec)  │  MCP client ─────────┼─────►│ Calendar and Reminders      │
+                   │       ▲           │      │               │ SSH  │   (iMCP)                    │
+                   │       │                  ▼               │      └─────────────────────────────┘
+                   │       │   MCP servers: time, fetch, ...  │      ┌─────────────────────────────┐
+                   │   documents indexer ─────────────────────┼─────►│ Your laptop: documents      │
+                   │   (when you ask, on the dashboard)       │ SSH  │   (read-only)               │
+                   └──────────────────────────────────────────┘      └─────────────────────────────┘
 ```
 
 ## What it does
@@ -23,11 +25,11 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it.
 - **Ask by voice**: say "Hey Siri, Ask Athena" on your iPhone or Mac. Siri reads the answer out, and your question and the answer also appear in the Telegram chat.
 - **Tool calling with MCP**: connects to any MCP server, on the Pi, on your Mac over SSH, or remote over HTTP. Per-server filters choose which tools the model sees.
-- **A general assistant**: [recommended servers](#mcp-servers) let it search and read files on your Mac, use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own. Built-in tools read your [Trading 212](#trading-212) account and place the trades you approve, and query [SQLite databases](#databases) you choose.
+- **A general assistant**: [recommended servers](#mcp-servers) let it use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own. Built-in tools read your [Trading 212](#trading-212) account and place the trades you approve, and query [SQLite databases](#databases) you choose.
 - **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
-- **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions. Related memories are added to each message automatically. Embeddings come from [EmbeddingGemma 2](#embeddings), served by oMLX on the Mac with the model, and are stored in SQLite on the Pi with [sqlite-vec](https://github.com/asg017/sqlite-vec).
+- **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions, and your documents. Related facts are added to each message automatically. Embeddings come from [EmbeddingGemma 2](#embeddings), served by oMLX on the Mac with the model, and are stored in SQLite on the Pi with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Sessions**: `/session` clears the conversation from the model's context, so replies stay quick, while the memory keeps everything you've talked about.
-- **Your notes as memory**: `pi-assistant ingest ~/notes` indexes Markdown and text files so the assistant can search them.
+- **Your documents, searched by meaning**: choose folders on your Mac in the dashboard, and Athena indexes them when you ask. Ask it in Telegram about something in them, and it says which file and can summarise it. The dashboard's search finds them too. See [Documents](#documents).
 - **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
 - **A dashboard**: a web page for your iPhone or Mac, over Tailscale. It shows what Athena is doing, how much it's used and how full the model's context is, for the session and in total. From it you can switch tools and MCP servers on and off, set them up and give them keys, without editing `config.toml`. See [Dashboard](#dashboard).
 - **A status board**: with a Pimoroni Display HAT Mini, the Pi's screen shows what the assistant is doing: idle, working on your request, or waiting for your approval. The board is its own service, [pi-display-microservice](#status-board), which reads Athena's status API.
@@ -91,9 +93,10 @@ Then:
 
 ## Dashboard
 
-A web page for Athena, on your iPhone or Mac. It has two tabs:
+A web page for Athena, on your iPhone or Mac. It has three tabs:
 
 - **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory.
+- **Memory:** search what Athena remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents).
 - **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
 
 It follows your device's light or dark mode. In Safari on an iPhone, Share > Add to Home Screen makes it an app.
@@ -251,8 +254,7 @@ The dashboard lists each of these, ready to switch on, and `config.example.toml`
 | The time | `mcp-server-time` | Pi | Never |
 | Web pages | `mcp-server-fetch` | Pi | Every fetch |
 | Web search | [DuckDuckGo](https://github.com/nickclyde/duckduckgo-mcp-server) | Pi | Every search |
-| [Files on your Mac](#your-mac-files-calendar-and-reminders) | `mac_files`, in this repo: read-only | Mac, over SSH | Never |
-| [Calendar and Reminders](#your-mac-files-calendar-and-reminders) | [iMCP](https://github.com/mattt/iMCP) | Mac, over SSH | Adding events and reminders |
+| [Calendar and Reminders](#your-macs-calendar-reminders-and-documents) | [iMCP](https://github.com/mattt/iMCP) | Mac, over SSH | Adding events and reminders |
 | [News](#news) | `read_news`, built in | Pi | Never |
 | [Trading 212](#trading-212) | `trading212_*`, built in | Pi | Placing and cancelling orders |
 | [Databases](#databases) | `database_*`, built in: read-only SQLite | Pi | Never |
@@ -268,31 +270,42 @@ Tools only run when the model uses them, but every tool's description is part of
 
 On most messages that costs almost nothing, because oMLX caches the part of the prompt it has already read, and the assistant keeps the cache warm: at startup, after each reply, when the tools change, and every 10 minutes (`llm.warm_up_minutes`). But when the cache is cold, for example just after the Mac restarts, the next message waits while the Mac reads the whole prompt again. On an M1 Pro that could be a minute with every server on. To see what yours costs, run `doctor`: its last section measures how many tokens the tools add, how long your Mac takes to read them, and whether oMLX's cache is working. If it's slow, switch off servers you rarely use, or narrow their `include` lists.
 
-### Your Mac: files, Calendar and Reminders
+### Your Macs: Calendar, Reminders and documents
 
-Two servers run on your Mac: `mac_files` from this repo, which can search folders you choose with Spotlight and read text, PDF, Word, RTF and HTML files in them, and [iMCP](https://github.com/mattt/iMCP), for Calendar and Reminders. The Pi connects to them over SSH, with a key that can only reach those two servers: no shell, no port forwarding, nothing else. On the Mac, launchd starts a server for each connection inside your login session, so macOS asks for access to your folders and calendars as it would for any app.
+Athena reaches your Macs over SSH, with a key of its own that each Mac limits to Athena's servers there: no shell, no port forwarding, nothing else. On each Mac, launchd starts a server for each connection inside your login session, so macOS asks for access to your calendars or folders as it would for any app. Each Mac offers what you choose:
 
-`mac_files` can't change, move or delete anything. It can't see outside the folders you choose, even through a symlink, or hidden files and folders inside them, such as `.env` or `.git`.
+- **Calendar and Reminders**, through [iMCP](https://github.com/mattt/iMCP), on a Mac that's always on, such as the one running oMLX. The Pi calls it `athena-mac`.
+- **Your documents**, on the Mac they're on, such as your laptop, which Athena reads only when you index them. The Pi calls it `athena-laptop`. See [Documents](#documents).
 
-1. **On the Pi**, make the key and the `athena-mac` SSH entry, using the Mac's name on your tailnet and your user name on the Mac:
+One Mac can offer both.
 
-   ```bash
-   bash scripts/connect-mac.sh my-mac.tail1234.ts.net georges
-   ```
-
-   It prints the command for step 3, with the Pi's public key in it.
-2. **On the Mac**, clone this repo, install iMCP with `brew install --cask mattt/tap/iMCP`, and turn on Remote Login: System Settings > General > Sharing > Remote Login, allowing only your user.
-3. **On the Mac**, in the repo, run the command step 1 printed, with the folders the assistant may read. For iCloud Drive, add `--folder "$HOME/Library/Mobile Documents/com~apple~CloudDocs"`:
+1. **On the Pi**, make the key (just once) and an SSH entry for each Mac, using its name on your tailnet and your user name on it. Name the one with your documents `laptop`:
 
    ```bash
-   bash scripts/mac/install.sh --pi-key "ssh-ed25519 AAAA... athena@pi" --folder ~/Documents
+   bash scripts/connect-mac.sh my-mac.tail1234.ts.net georges            # athena-mac
+   bash scripts/connect-mac.sh my-laptop.tail1234.ts.net georges laptop  # athena-laptop
    ```
 
-4. **On the Mac**, open iMCP. Turn on Calendar and Reminders only, allow access when macOS asks, and turn on "Start at login" in its settings.
-5. **On the Pi**, run `ssh athena-mac hello`. It should say there's no server called 'hello', which means the key works. Then switch on **Files on your Mac** and **Calendar and Reminders** on the dashboard's Tools tab, and run `doctor`.
-6. **On the Mac**, the first time the Pi uses each server, macOS asks for access to your folders (for "python3") and to the local network (for "imcp-server"). Allow them, over Screen Sharing if the Mac has no screen.
+   Each prints the command for step 3, with the Pi's public key in it.
+2. **On each Mac**, clone this repo and turn on Remote Login: System Settings > General > Sharing > Remote Login, allowing only your user. For Calendar, also install iMCP: `brew install --cask mattt/tap/iMCP`.
+3. **On each Mac**, in the repo, run the command step 1 printed, saying what that Mac offers: `--calendar`, `--documents`, or both:
 
-The Mac needs to stay on and logged in. After updating the repo on the Mac, run `scripts/mac/install.sh` again, without options to keep the same folders. `bash scripts/mac/install.sh --uninstall` removes it all, including the Pi's key.
+   ```bash
+   bash scripts/mac/install.sh --pi-key "ssh-ed25519 AAAA... athena@pi" --calendar    # the Mac that's always on
+   bash scripts/mac/install.sh --pi-key "ssh-ed25519 AAAA... athena@pi" --documents   # your laptop
+   ```
+
+4. **For Calendar**, open iMCP on that Mac. Turn on Calendar and Reminders only, allow access when macOS asks, and turn on "Start at login" in its settings. That Mac needs to stay on and logged in.
+5. **On the Pi**, check each link: `ssh athena-mac hello` and `ssh athena-laptop hello` should each say there's no server called 'hello', which means the key works. Then switch on **Calendar and Reminders** on the dashboard's Tools tab, choose folders under **Memory**, and run `doctor`.
+6. **The first time** the Pi uses each server, macOS asks on that Mac for access: to the local network for "imcp-server", and to your folders for "python3". Allow them, over Screen Sharing if the Mac has no screen.
+
+After updating the repo on a Mac, run `bash scripts/mac/install.sh` again: without options, it keeps what that Mac offers and the Pi's key. A Mac set up before documents had a files server, which searched folders with Spotlight. Running the script again removes it. On the Pi, remove it too: on the dashboard's Tools tab, open **files** and press **Remove server**. `bash scripts/mac/install.sh --uninstall` removes everything, including the Pi's key.
+
+**A laptop with Remote Login on** can be reached on any network it joins, and macOS lets you sign in over SSH with your password as well as with a key. To allow keys only, for every SSH login to the laptop, not just Athena's, run this on it:
+
+```bash
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' | sudo tee /etc/ssh/sshd_config.d/050-keys-only.conf
+```
 
 ### News
 
@@ -361,7 +374,7 @@ To give the assistant a new ability, look for an MCP server that provides it. Mo
 
    - **npm servers:** these need Node.js on the Pi (`sudo apt install nodejs npm`). Use `command = "npx"` and `args = ["-y", "some-server@1.2.3"]`.
    - **Hosted servers:** these take `url` and `headers` instead, like the GitHub one.
-   - **Servers that need your Mac's apps or files** run on the Mac. Add a line to `SERVERS` at the top of `scripts/mac/install.sh` and run it again on the Mac. Then on the Pi, use `command = "ssh"` and `args = ["athena-mac", "<its name>"]`.
+   - **Servers that need your Mac's apps or files** run on the Mac. Add a line to `SERVERS` at the top of `scripts/mac/install.sh` and run it again on the Mac with `--server <its name>`. Then on the Pi, use `command = "ssh"` and `args = ["athena-mac", "<its name>"]`.
    - **`confirm`:** leave it out, so every tool asks first, unless the tools only read your own data or look things up in public sources. Anything that changes something, or can send to anyone (email, messages, any URL), should ask.
 4. **Check it:**
    - On the dashboard, open the server to see its tools, and choose which Athena can use and which ask first. Or send `/reload`, then run `uv run pi-assistant doctor`, which lists the server's tools and shows how much they add to every prompt.
@@ -372,11 +385,12 @@ To update a server later, read what changed, change its pinned version and resta
 
 ## Memory
 
-- **Auto-recall:** before each message, the closest memories (up to `recall_top_k`, within `recall_max_distance`) go into a `<context>` block together with the current time. Use `/recall something` to see similarity scores. If unrelated memories keep appearing, lower `recall_max_distance`. If relevant ones are missed, raise it.
+- **Auto-recall:** before each message, the closest facts (up to `recall_top_k`, within `recall_max_distance`) go into a `<context>` block together with the current time. Use `/recall something` to see similarity scores. If unrelated memories keep appearing, lower `recall_max_distance`. If relevant ones are missed, raise it.
 - **Saving:** the model saves durable facts on its own, guided by `prompts/system.md`. `/remember` lets you add them yourself.
 - **Past conversations:** after each reply, your message and the reply are added to memory, in an index of their own. `search_memory` finds them, so Athena can look up what you talked about in an earlier session, but they aren't added to messages automatically, so an old answer can't be mistaken for a current one. Anything said while the embeddings server was down is added when it's back.
 - **Forgetting:** `/forget <id>` deletes one memory. **Forget everything** on the dashboard deletes them all, with the conversation history.
 - **Duplicates:** a fact closer than `duplicate_distance` to one already saved isn't saved again.
+- **Documents:** passages of your documents, indexed from your Mac when you ask (see [Documents](#documents)), and any notes you add with `pi-assistant ingest`. They're searched when the model asks, not added to every message.
 - **Embeddings model:** EmbeddingGemma 2 (768 dimensions), on the Mac: see [Embeddings](#embeddings).
 - **Storage:** everything (history, memory and usage statistics) lives in `data/assistant.db`. Back up that one file.
 
@@ -406,6 +420,30 @@ To test models without switching, run `uv run pi-assistant embeddings test -m MO
 **From the Pi's Ollama to the Mac:** a Pi set up before embeddings moved to the Mac uses `embeddinggemma` in Ollama on the Pi. After [setting up EmbeddingGemma 2 in oMLX](#embeddings), switch with the first command above. Your memories are re-embedded on the Mac, so nothing is lost. Then `sudo systemctl disable --now ollama` frees the Pi's memory.
 
 EmbeddingGemma 2 can't run on the Pi itself yet: Ollama's builds of it need its MLX engine, which doesn't run on Linux ([ollama#18825](https://github.com/ollama/ollama/issues/18825)). On text, it finds the same memories as `embeddinggemma` in the test above, and its distances are about half as large, so its cut-offs are lower: about 0.31 for recall and 0.03 for duplicates.
+
+## Documents
+
+Athena can search the documents on your Mac by meaning, and tell you which file has what you're after. You choose folders on the dashboard, under **Memory**, and press **Index now**: Athena reads them then, and never on its own.
+
+- **Asking Athena:** in Telegram, ask something like "find my council tax letter" or "what did the boiler quote say?". It finds the file with `search_memory` and gives you its path. It can summarise the file, or answer from it, with `read_document`. That reads the text Athena keeps, so it works while your Mac is asleep.
+- **Searching on the dashboard:** the **Search** box under **Memory** finds documents, remembered facts and past conversations, and shows each document's path, when it last changed and the passage that matched.
+- **What's read:** plain text and Markdown, PDF, Word, RTF, OpenDocument and HTML, up to `max_chars_per_file` (300,000 characters) of each. A scanned PDF has no text to read. Pages, Numbers and Keynote files aren't read.
+- **Indexing again** reads only documents that are new or have changed, and takes out those that have gone. Stopping part way keeps what's done.
+- **Removing a folder** takes its documents out of Athena's memory at once. They stay on your Mac.
+
+**Setting up the Mac:** see [Your Macs](#your-macs-calendar-reminders-and-documents). In short:
+1. On the Pi, run `bash scripts/connect-mac.sh <your laptop's address> <your user> laptop`.
+2. On the laptop, turn on Remote Login and run the `scripts/mac/install.sh ... --documents` command step 1 printed.
+3. On the dashboard, under **Memory**, choose folders and press **Index now**. The first time, macOS asks on the laptop for access to the folders, for "python3": allow it.
+
+**What the Pi can see** is decided on your Mac, not the Pi:
+- By default, only what's in your home folder. To narrow it, use `--scope ~/Documents` with `--documents`; repeat it for more folders.
+- Never hidden files or folders, such as `.ssh` or `.env`, nor anything in `~/Library`, apart from iCloud Drive.
+- Folders inside apps and code (`.app` bundles, `node_modules`) are skipped.
+- A file that's only in iCloud, not downloaded to the Mac, is skipped rather than downloaded. Indexing says how many there are, and in Finder, Download Now makes them indexable.
+- It can't change, move or delete anything.
+
+**What's kept on the Pi:** each document's text, in passages, with its path, in `data/assistant.db`, which never leaves your network. Embeddings are made by oMLX on the Mac. **Forget everything** on the dashboard deletes it all with your memories, and indexing again brings it back.
 
 ## Choosing a model
 
@@ -469,7 +507,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
 | `src/pi_assistant/siri.py` | The endpoint the Siri shortcut calls |
-| `src/pi_assistant/mac_files.py` | The read-only files server that runs on your Mac |
+| `src/pi_assistant/documents.py` | Indexing your documents from your Mac, when you ask |
+| `src/pi_assistant/mac_documents.py` | The read-only documents server that runs on your Mac |
 | `src/pi_assistant/news.py` | The built-in news reader |
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, and the page itself (plain HTML, CSS and JavaScript) |
@@ -499,7 +538,9 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - **A server's switch won't stay on:** the dashboard says what it needs first, such as a key. If it's on but shows an error, open it: the error and the server's log (`data/logs/mcp-<name>.log`) usually say why.
 - **The status board says "Offline" while Athena runs:** run `doctor` and see what it says under "Status API". Problems with the board itself are covered in pi-display-microservice's README.
 - **`zsh: no such file or directory: …/Library/Application`:** the Mac was set up by a version of `scripts/mac/install.sh` with a quoting bug. On the Mac, pull the repo and run `bash scripts/mac/install.sh` again: it keeps your folders and the Pi's key.
-- **A server on the Mac fails:** run `ssh athena-mac hello` on the Pi. If that doesn't say there's no server called 'hello', the problem is SSH: check Remote Login is on and the Mac is awake. If it does, check `~/Library/Logs/Athena/` on the Mac, and that iMCP is running.
+- **A server on a Mac fails:** run `ssh athena-mac hello` on the Pi (or `ssh athena-laptop hello`). If that doesn't say there's no server called 'hello', the problem is SSH: check Remote Login is on and the Mac is awake. If it does, check `~/Library/Logs/Athena/` on the Mac, and that iMCP is running.
+- **"Couldn't reach your Mac" when indexing:** the laptop is asleep, off your tailnet, or not set up yet (see [Your Macs](#your-macs-calendar-reminders-and-documents)). What SSH said is at the end of the message, and in `data/logs/documents.log` on the Pi.
+- **"macOS hasn't allowed access" when indexing:** allow "python3" when the laptop asks, or in System Settings > Privacy & Security > Files and Folders, then index again.
 - **"Trading 212 didn't accept the API key":** check the key and secret in `.env`, and that the key is for the account `environment` says (live or practice). If the key is restricted to trusted IPs, check your home's address hasn't changed: compare `curl -s https://api.ipify.org` on the Pi with the key's settings in Trading 212.
 - **The Siri shortcut fails:** check `doctor` says Siri is "listening", and that Tailscale is connected on the device you're asking from. Try the `curl` command from the Siri section. A 401 means the token in the shortcut doesn't match `SIRI_TOKEN`.
 
@@ -513,7 +554,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - Local servers run in a [sandbox](#sandbox) without your home folder, so they can't read `.env`, your memories or your SSH keys, and without the network if they don't need it. A server with network access can reach anything the Pi can, though, so the approval before a tool runs is still what stops your data being sent somewhere.
 - A server's tools that are new or have changed since you approved them are held back from the model until you approve them on the dashboard ([When a server's tools change](#when-a-servers-tools-change)).
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
-- The Pi reaches your Mac over SSH with a key of its own, which `~/.ssh/authorized_keys` on the Mac restricts to starting the files and Calendar servers: no shell, no port forwarding. The files server is read-only, limited to the folders you chose, and never shows hidden files.
+- The Pi reaches your Macs over SSH with a key of its own, which `~/.ssh/authorized_keys` on each Mac restricts to starting Athena's servers there: no shell, no port forwarding. The documents server is read-only, only sees what's in your home folder (or the scope you gave), never hidden files or `~/Library` apart from iCloud Drive, and is only started when you index or choose folders.
 - The email server only sends to addresses in `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`, and can't delete or move mail, even if you approve. The GitHub token can only read public repositories.
 - Reading your Trading 212 account doesn't ask, but placing or cancelling an order always does, and that can't be switched off. The key's own permissions have the last word: without permission to execute orders it can't trade at all, and restricted to your IP address it's useless anywhere else.
 - SQLite databases are opened read-only, and SQLite itself refuses anything but reading, so a query can't change them or write files.

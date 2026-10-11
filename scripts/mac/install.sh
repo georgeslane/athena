@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Let the assistant on the Pi search and read files in folders you choose on this Mac,
-# and use your Calendar and Reminders through iMCP. Run it on the Mac, from this repo,
-# as yourself:
+# Let the assistant on the Pi use this Mac, over SSH: your Calendar and Reminders through
+# iMCP, and your documents, which it indexes so you can search them by meaning. Run it on
+# the Mac, from this repo, as yourself, saying what this Mac offers:
 #
-#   bash scripts/mac/install.sh --pi-key "ssh-ed25519 AAAA... athena@pi" --folder ~/Documents
+#   bash scripts/mac/install.sh --pi-key "ssh-ed25519 AAAA... athena@pi" --calendar
+#   bash scripts/mac/install.sh --pi-key "ssh-ed25519 AAAA... athena@pi" --documents
 #
 #   --pi-key KEY     the public key that scripts/connect-mac.sh printed on the Pi
-#   --folder PATH    a folder the assistant may search and read; repeat for more
+#   --calendar       Calendar and Reminders, through iMCP
+#   --documents      your documents, from folders you choose on Athena's dashboard
+#   --server NAME    another server listed in SERVERS below
+#   --scope PATH     with --documents, what the Pi may see; repeat for more (default: your
+#                    home folder). Never hidden files or folders, nor ~/Library but iCloud Drive.
 #   --uninstall      remove everything this script set up
 #
-# The Pi connects over SSH with its own key, which can only reach these two MCP servers:
-# no shell, no port forwarding. launchd starts a server for each connection, inside your
-# login session, so macOS asks you once for access to your folders and calendars, as it
-# would for any app. Safe to re-run: folders you give replace the old list, and with
-# none the list is kept.
+# The Pi connects over SSH with its own key, which can only reach these servers: no shell,
+# no port forwarding. launchd starts a server for each connection, inside your login
+# session, so macOS asks you once for access to your folders and calendars, as it would for
+# any app. Safe to re-run: without --calendar or --documents, this Mac offers what it did.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -23,17 +27,13 @@ AGENTS_DIR="$HOME/Library/LaunchAgents"
 LABEL=local.athena
 KEY='(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9@._-]+)?'
 
-# The servers the Pi can reach, as "name|the command that runs it". To add one, add a
-# line, run this script again, and on the Pi add an MCP server with command = "ssh" and
-# args = ["athena-mac", "<name>"] (see README, "Adding a server").
+# The servers a Mac can offer, as "name|the command that runs it". To add one, add a line,
+# run this script again with --server <name>, and on the Pi add an MCP server with
+# command = "ssh" and args = ["athena-mac", "<name>"] (see README, "Adding a server").
 SERVERS=(
-  "files|\"$APP_DIR/venv/bin/python\" -m pi_assistant.mac_files --folders-file \"$APP_DIR/folders\""
+  "documents|\"$APP_DIR/venv/bin/python\" -m pi_assistant.mac_documents --scope-file \"$APP_DIR/scope\""
   "apple|/Applications/iMCP.app/Contents/MacOS/imcp-server"
 )
-names=()
-for server in "${SERVERS[@]}"; do
-  names+=("${server%%|*}")
-done
 
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*"; }
@@ -43,12 +43,17 @@ die() {
 }
 
 pi_key=""
-folders=()
+chosen=()
+scope=()
 uninstall=false
 while (($#)); do
   case "$1" in
     --pi-key) pi_key="${2:-}" && shift ;;
-    --folder) folders+=("${2:-}") && shift ;;
+    --calendar) chosen+=(apple) ;;
+    --documents) chosen+=(documents) ;;
+    --server) chosen+=("${2:-}") && shift ;;
+    --scope) scope+=("${2:-}") && shift ;;
+    --folder) die "--folder is gone: you choose folders on Athena's dashboard now. Use --documents (README, \"Documents\")." ;;
     --uninstall) uninstall=true ;;
     *) die "Unknown option: $1 (see the top of this script)" ;;
   esac
@@ -68,17 +73,36 @@ forget_pi_key() {
   fi
 }
 
+# Stops and removes a server this script started, by name.
+remove_server() {
+  launchctl bootout "gui/$uid/$LABEL.$1" 2>/dev/null || true
+  rm -f "$AGENTS_DIR/$LABEL.$1.plist" "$APP_DIR/run-$1" "$APP_DIR/$1.sock"
+}
+
 if $uninstall; then
-  for name in "${names[@]}"; do
-    launchctl bootout "gui/$uid/$LABEL.$name" 2>/dev/null || true
-    rm -f "$AGENTS_DIR/$LABEL.$name.plist"
+  for plist in "$AGENTS_DIR/$LABEL".*.plist; do
+    [[ -e "$plist" ]] || continue
+    name="${plist##*/"$LABEL".}"
+    remove_server "${name%.plist}"
   done
   forget_pi_key
   rm -rf "$APP_DIR"
-  echo "Removed: the Pi can no longer reach this Mac's files, Calendar or Reminders."
+  echo "Removed: the Pi can no longer reach this Mac's documents, Calendar or Reminders."
   exit 0
 fi
 
+if ((${#chosen[@]} == 0)); then
+  # Without --calendar or --documents, offer what this Mac did. An install from before they
+  # existed offered "files" and "apple": Calendar carries on, and files gives way to documents.
+  if [[ -s "$APP_DIR/servers" ]]; then
+    read -r -a chosen <"$APP_DIR/servers"
+  elif [[ -e "$AGENTS_DIR/$LABEL.apple.plist" ]]; then
+    chosen=(apple)
+  else
+    die "Say what this Mac offers: --calendar, --documents, or both."
+  fi
+fi
+((${#scope[@]} == 0)) || [[ " ${chosen[*]} " == *" documents "* ]] || die "--scope is only for --documents."
 if [[ -z "$pi_key" ]]; then
   # Without --pi-key, keep the key that's already allowed.
   pi_key="$(grep -sF "$APP_DIR/ssh-command" "$keys" | tail -1 | grep -oE "$KEY\$" || true)"
@@ -87,34 +111,68 @@ fi
 [[ "$pi_key" =~ ^$KEY$ ]] || die "That doesn't look like a public key. Copy the whole line connect-mac.sh printed."
 [[ "$APP_DIR" != *"'"* ]] || die "Your home folder's path has a ' in it, which this script can't handle."
 
-step "Choosing folders"
+# The servers this Mac offers, in a stable order, each once.
+names=()
+known=" "
+for server in "${SERVERS[@]}"; do
+  name="${server%%|*}"
+  known+="$name "
+  if [[ " ${chosen[*]} " == *" $name "* ]]; then
+    names+=("$name")
+  fi
+done
+for name in "${chosen[@]}"; do
+  [[ "$known" == *" $name "* ]] || die "There's no server called '$name' in SERVERS at the top of this script."
+done
 mkdir -p "$APP_DIR" "$LOG_DIR"
 chmod 700 "$APP_DIR"
-if ((${#folders[@]})); then
-  : >"$APP_DIR/folders.new"
-  for folder in "${folders[@]}"; do
-    folder="${folder/#\~/$HOME}"
-    [[ -d "$folder" ]] || die "Not a folder: $folder"
-    (cd "$folder" && pwd) >>"$APP_DIR/folders.new"
-  done
-  mv "$APP_DIR/folders.new" "$APP_DIR/folders"
-elif [[ ! -s "$APP_DIR/folders" ]]; then
-  die "Choose at least one folder with --folder."
-fi
-sed 's/^/  /' "$APP_DIR/folders"
+echo "${names[*]}" >"$APP_DIR/servers"
 
-step "Installing the files server's Python environment"
-export PATH="$HOME/.local/bin:$PATH"
-if ! command -v uv >/dev/null 2>&1; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+if [[ -e "$AGENTS_DIR/$LABEL.files.plist" ]]; then
+  step "Removing the files server"
+  remove_server files
+  rm -f "$APP_DIR/folders"
+  echo "  Athena now indexes your documents instead: choose folders on its dashboard (README, \"Documents\")."
 fi
-# Its own environment, separate from any you develop in, and a copy of the code rather
-# than a link to it, so switching branches here doesn't change what the Pi can do.
-UV_PROJECT_ENVIRONMENT="$APP_DIR/venv" uv sync --project "$REPO_DIR" --frozen --no-dev --extra mac --no-editable --quiet
+for plist in "$AGENTS_DIR/$LABEL".*.plist; do
+  [[ -e "$plist" ]] || continue
+  name="${plist##*/"$LABEL".}"
+  name="${name%.plist}"
+  [[ " ${names[*]} " == *" $name "* ]] || remove_server "$name"
+done
+
+if [[ " ${names[*]} " == *" documents "* ]]; then
+  step "Choosing what the Pi may see"
+  if ((${#scope[@]})); then
+    : >"$APP_DIR/scope.new"
+    for folder in "${scope[@]}"; do
+      folder="${folder/#\~/$HOME}"
+      [[ -d "$folder" ]] || die "Not a folder: $folder"
+      (cd "$folder" && pwd) >>"$APP_DIR/scope.new"
+    done
+    mv "$APP_DIR/scope.new" "$APP_DIR/scope"
+  elif [[ ! -s "$APP_DIR/scope" ]]; then
+    echo "$HOME" >"$APP_DIR/scope"
+  fi
+  sed 's/^/  /' "$APP_DIR/scope"
+  echo "  (never hidden files or folders, nor ~/Library apart from iCloud Drive)"
+
+  step "Installing the documents server's Python environment"
+  export PATH="$HOME/.local/bin:$PATH"
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  fi
+  # Its own environment, separate from any you develop in, and a copy of the code rather
+  # than a link to it, so switching branches here doesn't change what the Pi can do.
+  UV_PROJECT_ENVIRONMENT="$APP_DIR/venv" uv sync --project "$REPO_DIR" --frozen --no-dev --extra mac --no-editable --quiet
+else
+  rm -f "$APP_DIR/scope"
+fi
 
 step "Writing the servers and the SSH command"
 for server in "${SERVERS[@]}"; do
   name="${server%%|*}"
+  [[ " ${names[*]} " == *" $name "* ]] || continue
   [[ "$name" =~ ^[a-z0-9-]+$ ]] || die "Server names can only have lower-case letters, digits and dashes: $name"
   # launchd connects each server's stdin and stdout, and its stderr, to the Pi. So stderr
   # goes to a log first, where it can't garble the conversation.
@@ -195,21 +253,26 @@ if ! nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1; then
   warn "Remote Login is off. Turn it on in System Settings > General > Sharing > Remote Login,"
   warn "and under 'Allow access for', choose 'Only these users' and add yourself."
 fi
-if [[ ! -x /Applications/iMCP.app/Contents/MacOS/imcp-server ]]; then
+if [[ " ${names[*]} " == *" apple "* && ! -x /Applications/iMCP.app/Contents/MacOS/imcp-server ]]; then
   ready=false
   warn "iMCP isn't installed, so Calendar and Reminders won't work yet: brew install --cask mattt/tap/iMCP"
 fi
 
+printf '\n\033[1;32mDone.\033[0m %s This Mac offers: %s.\n' "$($ready || echo "Fix the warnings above, then:")" "${listed%, }"
+if [[ " ${names[*]} " == *" apple "* ]]; then
+  cat <<EOF
+  - Open iMCP. Turn on Calendar and Reminders only, and allow access when macOS asks. In its
+    settings, turn on "Start at login". This Mac needs to stay on and logged in.
+EOF
+fi
+if [[ " ${names[*]} " == *" documents "* ]]; then
+  cat <<EOF
+  - On Athena's dashboard, open Memory, choose folders and press Index now. macOS asks on this
+    Mac's screen for access to them, for "python3": allow it. This Mac only needs to be awake
+    and logged in while Athena indexes.
+EOF
+fi
 cat <<EOF
-
-$(printf '\033[1;32m')Done.$(printf '\033[0m') $($ready || echo "Fix the warnings above, then: ")
-  1. Open iMCP. Turn on Calendar and Reminders only, and allow access when macOS asks.
-     In its settings, turn on "Start at login".
-  2. On the Pi, run:  ssh athena-mac hello
-     It should say there's no server called 'hello', which means the key works.
-  3. The first time the Pi uses each server, macOS asks on this Mac's screen for access:
-     to your folders (for "python3"), and to the local network (for "imcp-server").
-     Allow them, over Screen Sharing if this Mac has no screen.
-
-This Mac needs to stay on and logged in for the assistant to reach it.
+  - On the Pi, check the link with: ssh athena-mac hello (or whichever name you gave this Mac)
+    It should say there's no server called 'hello', which means the key works.
 EOF

@@ -34,7 +34,7 @@ from pi_assistant.tools import Tool, matches_any, safe_tool_name
 
 log = logging.getLogger(__name__)
 
-RESERVED_NAMES = {"remember", "search_memory", "forget_memory"}  # the memory tools'
+RESERVED_NAMES = {"remember", "search_memory", "read_document", "forget_memory"}  # the memory tools'
 
 
 @dataclass

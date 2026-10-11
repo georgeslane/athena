@@ -264,3 +264,25 @@ async def test_you_hear_when_a_servers_tools_change(config):
         in msg.text
     )
     assert "approve them on the dashboard" in msg.text
+
+
+async def test_recall_shows_documents_by_path(config, memory, tmp_path):
+    from pi_assistant.memory import DOCUMENTS_HOME, IndexedDocument
+
+    bot = make_bot(config, None)
+    bot.s.memory = memory
+    await memory.remember("George's boiler is serviced every March.")
+    vector = (await memory.embedder.embed(["Hartley Heating quoted 95 pounds for the boiler service."], "document"))[0]
+    memory.store.set_meta(DOCUMENTS_HOME, "/Users/george")
+    memory.store.put_document(
+        IndexedDocument("/Users/george/Documents/Boiler quote.md", "~/Documents", 10, 1.0),
+        [("Hartley Heating quoted 95 pounds for the boiler service.", vector)],
+    )
+    ctx = SimpleNamespace(args=["boiler", "service"], bot=FakeBot())
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=ME), effective_message=None)
+    await bot.cmd_recall(update, ctx)
+    [msg] = ctx.bot.sent
+    lines = msg.text.split("\n")
+    assert lines[0] == "Memories matching 'boiler service':"
+    assert any(line.startswith("📄 ~/Documents/Boiler quote.md (") for line in lines)
+    assert any(line.startswith("#1 (") and "serviced every March" in line for line in lines)
