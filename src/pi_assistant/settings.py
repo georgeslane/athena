@@ -534,6 +534,8 @@ class Running:
     # For each built-in: its tools that are in use, and why it isn't running if it should be.
     builtins: dict[str, tuple[list[str], str | None]] = field(default_factory=dict)
     applying: bool = False  # changes are being applied
+    # For each MCP server: its tools that are new or changed since you approved them, as the page shows them.
+    held: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 class Settings:
@@ -593,10 +595,14 @@ class Settings:
         entry = self._entry(integ, name, enabled, section, custom=integ is None)
         entry["added"] = added
         connected, error, offered = running.servers.get(name, (False, None, []))
+        held = running.held.get(name, []) if connected and enabled else []
+        entry["held"] = held
         if not enabled:
             entry["state"], entry["detail"] = "off", "Off" if added else "Not set up yet"
         elif error:
             entry["state"], entry["detail"] = "error", error
+        elif connected and held:
+            entry["state"], entry["detail"] = "attention", f"{_count(len(held), 'tool')} changed: waiting for you"
         elif connected:
             on = [t for t, _ in offered if _tool_on(t, section)]
             entry["state"], entry["detail"] = "on", f"Connected · {_count(len(on), 'tool')}"

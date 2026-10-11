@@ -491,6 +491,18 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .tool-state[data-state="error"] .dot { background: var(--failed); }
 .tool-state[data-state="starting"] { color: var(--working); }
 .tool-state[data-state="starting"] .dot { background: var(--working); }
+.tool-state[data-state="attention"] { color: var(--approval); }
+.tool-state[data-state="attention"] .dot { background: var(--approval); }
+.held { display: grid; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.held-tool { display: grid; gap: 8px; min-width: 0; }
+.held-name { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 13.5px; font-weight: 600; }
+.held-name .tag { font-family: inherit; font-size: 10.5px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--approval); border: 1px solid currentColor; border-radius: 6px; padding: 1px 5px; }
+.held pre { margin: 0; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); }
+.held pre.before { color: var(--muted); border-left: 3px solid color-mix(in srgb, var(--failed) 70%, transparent); }
+.held pre.now { border-left: 3px solid var(--approval); }
+.compare { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; align-items: start; }
+.compare-label { grid-column: 1 / -1; font-size: 12px; font-weight: 650; color: var(--muted); }
+.compare-tag { font-size: 11.5px; font-weight: 600; color: var(--muted); padding-top: 9px; }
 .tool[data-open="true"] .tool-state .text { white-space: normal; overflow-wrap: anywhere; }
 
 .tool-body { display: grid; gap: 16px; padding: 4px 16px 16px; border-top: 1px solid var(--border); padding-top: 14px; }

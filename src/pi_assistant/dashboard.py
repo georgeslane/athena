@@ -16,6 +16,7 @@ The page talks to Athena with JSON:
   POST   /api/tools/<id>        change one: {"enabled", "fields", "secrets", "tools"}
   POST   /api/tools             add an MCP server
   DELETE /api/tools/<id>        remove a server that isn't one of the recommended ones
+  POST   /api/tools/<id>/approve  let the model use tools held back because they changed: {"tools": {name: fingerprint}}
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
   POST   /api/login             {"password": ...}, and /api/logout
 
@@ -49,6 +50,7 @@ from pi_assistant.webserver import HTTPError, Request, Response, Server
 
 if TYPE_CHECKING:
     from pi_assistant.app import Services
+    from pi_assistant.tool_approvals import ToolChange
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +210,16 @@ class DashboardServer(Server):
         if path == "/api/reconnect" and method == "POST":
             self._apply(None, reconnect=True)
             return _json(self.tools())
+        if path.startswith("/api/tools/") and path.endswith("/approve") and method == "POST":
+            name = path.removeprefix("/api/tools/").removesuffix("/approve")
+            tools = _body(request).get("tools")
+            if not isinstance(tools, dict) or not tools or not all(isinstance(v, str) for v in tools.values()):
+                raise HTTPError(400, 'Say which tools to approve: {"tools": {"name": "fingerprint"}}.')
+            try:
+                self.s.approve_tools(name, tools)
+            except ValueError as exc:
+                raise HTTPError(409, str(exc)) from None
+            return _json(self.tools())
         if path.startswith("/api/tools/"):
             name = path.removeprefix("/api/tools/")
             if method == "POST":
@@ -215,7 +227,10 @@ class DashboardServer(Server):
                 offered = [t for st in self.s.mcp.status() if st.name == name for t, _ in st.offered]
                 return await self._change(lambda: self.settings.update(name, body, offered))
             if method == "DELETE":
-                return await self._change(lambda: self.settings.remove_server(name))
+                response = await self._change(lambda: self.settings.remove_server(name))
+                if self.s.mcp.approvals:
+                    self.s.mcp.approvals.forget(name)  # a server added later with this name starts afresh
+                return response
         raise HTTPError(404 if method == "GET" else 405, "There's nothing like that here.")
 
     async def _change(self, change: Any) -> Response:
@@ -279,10 +294,12 @@ class DashboardServer(Server):
         }
 
     def tools(self) -> dict[str, Any]:
+        servers = self.s.mcp.status()
         running = Running(
-            servers={st.name: (st.connected, st.error, st.offered) for st in self.s.mcp.status()},
+            servers={st.name: (st.connected, st.error, st.offered) for st in servers},
             builtins=self.s.builtins.running(),
             applying=self._applying,
+            held={st.name: [_held(c) for c in st.pending] for st in servers if st.pending},
         )
         try:
             listed = self.settings.describe(running)
@@ -408,3 +425,14 @@ def _check_same_origin(request: Request) -> None:
     hosts = {request.headers.get("host"), request.headers.get("x-forwarded-host")} - {None}
     if origin is not None and (origin == "null" or urlsplit(origin).netloc not in hosts):
         raise HTTPError(403, "Only the dashboard's own page can do that.")
+
+
+def _held(change: ToolChange) -> dict[str, Any]:
+    """A held-back tool as the page shows it: what it says now, and what it said when you approved it."""
+    version = lambda v: {"description": v.description, "parameters": v.parameters}  # noqa: E731
+    return {
+        "name": change.tool,
+        "fingerprint": change.now.fingerprint,
+        "now": version(change.now),
+        "approved": version(change.approved) if change.approved else None,
+    }
