@@ -3,6 +3,7 @@ skipped elsewhere, but required on CI, where both are set up."""
 
 import asyncio
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 
 from pi_assistant.config import MCPServerConfig
 from pi_assistant.mcp_manager import MCPManager
-from pi_assistant.sandbox import Sandbox, SandboxError
+from pi_assistant.sandbox import SSH_INCLUDES, Sandbox, SandboxError
 
 REPO = Path(__file__).resolve().parents[1]
 DEMO = str(REPO / "tests" / "fixtures" / "demo_mcp_server.py")
@@ -116,6 +117,20 @@ def test_a_python_uv_links_to_is_shown_with_uvs_pythons(home):
         assert binds(sandbox.wrap([str(venv / "bin" / program)], network=True)) == [str(pythons), str(venv)]
 
 
+def test_ssh_doesnt_see_the_settings_it_would_refuse(home, tmp_path, monkeypatch):
+    # In the sandbox, root's files belong to nobody, and ssh won't read settings it includes from
+    # /etc/ssh/ssh_config.d unless root or you own them. systemd puts one there on the Pi.
+    includes = tmp_path / "ssh_config.d"
+    includes.mkdir()
+    monkeypatch.setattr("pi_assistant.sandbox.SSH_INCLUDES", includes)
+    sandbox = Sandbox("/usr/bin/bwrap", home)
+    for ssh in ("ssh", "/usr/bin/ssh"):
+        args = sandbox.wrap([ssh, "athena-mac", "apple"], network=True)
+        assert args[args.index(str(includes)) - 1] == "--tmpfs"
+        assert args.index(str(includes)) < args.index("--")
+    assert str(includes) not in sandbox.wrap(["/usr/bin/node", "x.js"], network=True)
+
+
 async def test_without_bubblewrap_a_server_isnt_started(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     sandbox = Sandbox(None, Path.home())
@@ -177,7 +192,7 @@ async def test_a_sandboxed_process_cant_see_your_files_or_the_network():
     assert REAL is not None
     results = await REAL.self_test()
     assert results and all(ok for ok, _ in results), results
-    assert "Python servers can start in it" in [what for _, what in results]
+    assert {"Python servers can start in it", "ssh can read its settings in it"} <= {what for _, what in results}
 
 
 @needs_bwrap
@@ -208,6 +223,25 @@ async def test_a_python_uv_links_to_starts_in_the_sandbox(tmp_path):
     out, _ = await proc.communicate()
     assert proc.returncode == 0, out
     assert out.decode().strip() == str(venv)
+
+
+@needs_bwrap
+async def test_ssh_reads_its_settings_in_the_sandbox():
+    """ssh, which links Athena to your Macs, with a settings file root owns in /etc/ssh/ssh_config.d, as
+    systemd puts there on the Pi. CI puts one there too."""
+    assert REAL is not None
+    ssh = shutil.which("ssh")
+    assert ssh, "ssh isn't installed"
+    if os.environ.get("CI"):
+        assert any(p.stat().st_uid == 0 for p in SSH_INCLUDES.glob("*.conf")), "CI should put one there"
+    proc = await asyncio.create_subprocess_exec(
+        *REAL.wrap([ssh, "-G", "athena-mac"], network=False),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    assert proc.returncode == 0, out
+    assert b"hostname athena-mac" in out.lower(), out
 
 
 @needs_bwrap

@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 HIDDEN = ("/tmp", "/home", "/root", "/run/user", "/var/tmp")  # emptied in the sandbox, along with your home folder
 INSTALL_HINT = "Install bubblewrap (sudo apt install bubblewrap), or set sandbox = false for the server."
+SSH_INCLUDES = Path("/etc/ssh/ssh_config.d")  # settings files the system's settings for ssh include
 
 
 class SandboxError(Exception):
@@ -79,6 +80,11 @@ class Sandbox:
                 args += ["--tmpfs", str(hidden)]
         for path in self._shown([*self.needed(command), *read_only, *([cwd] if cwd else [])]):
             args += ["--ro-bind-try", str(path), str(path)]
+        if Path(command[0]).name == "ssh" and SSH_INCLUDES.is_dir() and not SSH_INCLUDES.is_symlink():
+            # ssh won't read a settings file it includes unless root or you own it, and in here what root
+            # owns belongs to nobody, as only your user exists. So it doesn't see these (systemd puts one
+            # there), and reads /etc/ssh/ssh_config and ~/.ssh/config, which has your Macs.
+            args += ["--tmpfs", str(SSH_INCLUDES)]
         args += ["--unshare-all", *(["--share-net"] if network else [])]
         args += ["--die-with-parent", "--new-session", "--chdir", str(cwd or self.home), "--", *command]
         return args
@@ -113,7 +119,7 @@ class Sandbox:
 
     async def self_test(self) -> list[tuple[bool, str]]:
         """Checks, for doctor, that a sandboxed process can't see a file in your home folder, or reach the network,
-        and that a Python server can start in one."""
+        and that Python servers can start in one, and ssh read its settings there."""
         await self.check()
         results = []
         canary = self.home / f".athena-sandbox-check-{os.getpid()}"
@@ -133,8 +139,16 @@ class Sandbox:
         if sys.executable:
             # Athena's own Python, whose environment uv made the same way as servers' environments.
             code, output = await _run(self.wrap([sys.executable, "-c", "pass"], network=False))
-            why = f": {output.strip().splitlines()[-1]}" if code and output.strip() else ""
-            results.append((code == 0, f"Python servers {'can' if code == 0 else 'can’t'} start in it{why}"))
+            results.append(
+                (code == 0, f"Python servers {'can' if code == 0 else 'can’t'} start in it{_why(code, output)}")
+            )
+        ssh = shutil.which("ssh")
+        if ssh:
+            # ssh, for your Macs' servers, reading its settings: -G prints them, without connecting.
+            code, output = await _run(self.wrap([ssh, "-G", "athena-mac"], network=False))
+            results.append(
+                (code == 0, f"ssh {'can' if code == 0 else 'can’t'} read its settings in it{_why(code, output)}")
+            )
         return results
 
 
@@ -151,6 +165,11 @@ async def _run(command: list[str]) -> tuple[int, str]:
         return 127, str(exc)
     output, _ = await proc.communicate()
     return proc.returncode or 0, output.decode(errors="replace")
+
+
+def _why(code: int, output: str) -> str:
+    """For a check that failed, the last thing it said."""
+    return f": {output.strip().splitlines()[-1]}" if code and output.strip() else ""
 
 
 def _base_python(venv: Path) -> list[Path]:
