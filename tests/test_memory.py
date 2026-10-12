@@ -189,3 +189,58 @@ async def test_reindexing_includes_past_exchanges(memory, tmp_path):
     assert await memory.reindex() == 1
     assert (await memory.search("park level station"))[0].kind == "conversation"
     history.close()
+
+
+# -- documents: an index of their own ---------------------------------------------------------------
+
+
+async def test_documents_are_searched_when_asked_not_recalled_with_every_message(memory, tmp_path):
+    doc = tmp_path / "garden.md"
+    doc.write_text("Roses get pruned in February.")
+    await memory.ingest_file(doc)
+    await memory.remember("George prunes the roses himself.")
+    assert {h.kind for h in await memory.search("pruning roses February")} == {"fact", "document"}
+    assert [h.kind for h in await memory.recall("pruning roses February")] == ["fact"]
+
+
+def test_documents_move_out_of_the_facts_index(tmp_path):
+    """Before documents had an index of their own, they shared the facts' one."""
+    import sqlite_vec
+
+    from pi_assistant.memory import connect_db
+
+    store = MemoryStore(tmp_path / "m.db", 4, "model")
+    store.add("A fact.", [1, 0, 0, 0], "fact")
+    store.close()
+    conn = connect_db(tmp_path / "m.db", vectors=True)
+    with conn:  # what an older Athena wrote for an ingested note
+        cur = conn.execute(
+            "INSERT INTO memories (kind, source, text, created_at) VALUES ('document', 'n.md', 'A note.', 'x')"
+        )
+        conn.execute(
+            "INSERT INTO memory_vectors (rowid, embedding) VALUES (?, ?)",
+            (cur.lastrowid, sqlite_vec.serialize_float32([0, 1, 0, 0])),
+        )
+    conn.close()
+
+    store = MemoryStore(tmp_path / "m.db", 4, "model")
+    assert [h.text for h in store.search([0, 1, 0, 0], 5, ("document",))] == ["A note."]
+    assert [h.text for h in store.search([0, 1, 0, 0], 5, ("fact",))] == ["A fact."]
+    store.close()
+    MemoryStore(tmp_path / "m.db", 4, "model").close()  # and again: nothing left to move
+
+
+def test_a_document_is_replaced_whole(tmp_path):
+    from pi_assistant.memory import IndexedDocument
+
+    store = MemoryStore(tmp_path / "m.db", 4, "model")
+    store.put_document(IndexedDocument("/Users/g/a.txt", "~", 10, 1.0), [("one", [1, 0, 0, 0]), ("two", [0, 1, 0, 0])])
+    store.put_document(IndexedDocument("/Users/g/a.txt", "~", 12, 2.0), [("three", [0, 0, 1, 0])])
+    assert store.document_chunks("/Users/g/a.txt") == ["three"]
+    assert [h.text for h in store.search([1, 0, 0, 0], 5, ("document",))] == ["three"]  # no stale vectors
+    doc = store.documents()["/Users/g/a.txt"]
+    assert (doc.size, doc.modified, doc.chunks) == (12, 2.0, 1)
+
+    store.clear()  # forgetting everything forgets documents too
+    assert store.documents() == {} and store.document_sources() == []
+    store.close()

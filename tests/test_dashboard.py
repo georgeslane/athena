@@ -217,7 +217,7 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
         "error": None,
         "checked": 0,
     }
-    assert overview["tools"] == {"count": 6, "servers": 1, "connected": 1, "applying": False}
+    assert overview["tools"] == {"count": 7, "servers": 1, "connected": 1, "applying": False}
     assert overview["status"]["state"] == "idle" and overview["status"]["last_task"] == "Thanks"
 
 
@@ -462,3 +462,97 @@ async def test_an_unexpected_failure_is_a_500_not_a_dropped_connection(athena, m
         response = await http.get("/api/overview")
     assert response.status_code == 500 and response.json() == {"error": "Something went wrong. Athena's log says what."}
     assert "on fire" not in response.text and "on fire" in caplog.text
+
+
+# -- the Memory tab: search, and documents from your Mac ----------------------------------------------
+
+
+@pytest.fixture
+def your_mac(tmp_path, monkeypatch):
+    """Your Mac's home folder, whose documents server runs here, as Athena on the Pi would start it."""
+    import os
+
+    home = Path(os.path.realpath(tmp_path)) / "mac"
+    (home / "Documents" / "Taxes").mkdir(parents=True)
+    (home / "Documents" / "Taxes" / "council.txt").write_text("Council tax band D for the flat on Elm Street.\n")
+    (home / "Documents" / "boiler.md").write_text("The boiler service is due in March.\n")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def point_at(athena, home):
+    """Have Athena start the documents server here, in config.toml as you'd set it for SSH."""
+    args = ["-m", "pi_assistant.mac_documents", "--scope", str(home)]
+    athena.config = athena.dashboard.settings.set_values({"documents.command": sys.executable, "documents.args": args})
+    athena.documents.configure(athena.config.documents)
+
+
+async def test_choosing_folders_to_index(athena, your_mac):
+    point_at(athena, your_mac)
+    async with client(athena) as http:
+        memory = (await http.get("/api/memory")).json()
+        assert memory["documents"]["folders"] == [] and memory["editable"]
+        assert (await http.post("/api/documents/index", json={})).json()["error"] == "Choose a folder to index first."
+
+        start = (await http.get("/api/documents/browse")).json()
+        assert {"name": "Documents", "path": "~/Documents"} in start["folders"]
+        inside = (await http.get("/api/documents/browse", params={"path": "~/Documents"})).json()
+        assert inside == {
+            "path": "~/Documents",
+            "folders": [{"name": "Taxes", "path": "~/Documents/Taxes"}],
+            "documents": 1,
+        }
+
+        added = await http.post("/api/documents/folders", json={"add": "~/Documents/"})
+        assert added.status_code == 200
+        assert added.json()["documents"]["folders"][0]["folder"] == "~/Documents"
+        for bad in [{"add": "Documents"}, {"add": "~/Documents"}, {"add": "~/a\nb"}, {"remove": "~/Desktop"}, {}]:
+            response = await http.post("/api/documents/folders", json=bad)
+            assert response.status_code == 400, bad
+    assert 'folders = ["~/Documents"]' in athena.config.path.read_text()  # saved in config.toml
+
+
+async def test_indexing_and_searching_from_the_dashboard(athena, your_mac):
+    point_at(athena, your_mac)
+    async with client(athena) as http:
+        await http.post("/api/documents/folders", json={"add": "~/Documents"})
+        assert (await http.post("/api/documents/stop", json={})).status_code == 200  # nothing to stop
+        started = (await http.post("/api/documents/index", json={})).json()
+        assert started["documents"]["running"]
+        await until(lambda: not athena.documents.running)
+        memory = (await http.get("/api/memory")).json()["documents"]
+        assert memory["run"]["state"] == "done", memory["run"]["error"]
+        assert memory["folders"] == [{"folder": "~/Documents", "files": 2, "passages": 2, "no_text": 0}]
+        assert memory["mac"] and memory["indexed"]
+
+        found = (await http.post("/api/memory/search", json={"query": "council tax band", "kind": "document"})).json()
+        top = found["results"][0]
+        assert (top["kind"], top["path"]) == ("document", "~/Documents/Taxes/council.txt")
+        assert top["text"].startswith("Council tax band D")
+        everything = (await http.post("/api/memory/search", json={"query": "boiler service March"})).json()
+        assert everything["results"][0]["path"] == "~/Documents/boiler.md"
+        for bad in [{"query": ""}, {"query": "x" * 501}, {"query": "x", "kind": "files"}]:
+            assert (await http.post("/api/memory/search", json=bad)).status_code == 400
+
+        overview = (await http.get("/api/overview")).json()
+        assert overview["memory"]["documents"] == 2  # documents, not their passages
+
+        # Removing the folder takes its documents out of memory straight away.
+        removed = (await http.post("/api/documents/folders", json={"remove": "~/Documents"})).json()
+        assert removed["documents"]["folders"] == [] and athena.memory.store.document_sources() == []
+
+
+async def test_a_mac_that_cant_be_reached(athena):
+    athena.config.documents.command = sys.executable
+    athena.config.documents.args = [
+        "-c",
+        "import sys; print('ssh: Could not resolve hostname athena-laptop', file=sys.stderr); sys.exit(255)",
+    ]
+    athena.documents.configure(athena.config.documents)
+    async with client(athena) as http:
+        response = await http.get("/api/documents/browse")
+    assert response.status_code == 502
+    assert (
+        "Couldn't reach your Mac" in response.json()["error"]
+        and "Could not resolve hostname" in response.json()["error"]
+    )

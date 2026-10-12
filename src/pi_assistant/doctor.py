@@ -15,6 +15,7 @@ from pi_assistant.app import build_services
 from pi_assistant.config import Config
 from pi_assistant.dashboard import MIN_TOKEN_CHARS as MIN_PASSWORD_CHARS
 from pi_assistant.databases import Databases
+from pi_assistant.documents import DOCUMENTS_INDEXED, DocumentsError, connect_mac
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager, ServerStatus
 from pi_assistant.memory import Embedder, MemoryStore
@@ -135,6 +136,11 @@ async def run_doctor(cfg: Config) -> bool:
         if disabled:
             report(WARN, f"disabled: {', '.join(disabled)}")
 
+    # Documents from your Mac, if you've chosen folders -------------------------------------------
+    if cfg.documents.folders:
+        print(f"\nDocuments ({' '.join([cfg.documents.command, *cfg.documents.args])})")
+        await check_documents(cfg, report)
+
     # 5. Telegram -------------------------------------------------------------------------------
     print("\nTelegram")
     if not cfg.telegram.bot_token:
@@ -210,6 +216,31 @@ async def measure_prompt(llm: LLMClient, system_prompt: str, schemas: list[dict[
     cached = await llm.chat(messages("b"), schemas or None, max_tokens=1)
     tokens = cold.prompt_tokens - bare.prompt_tokens if cold.prompt_tokens and bare.prompt_tokens else None
     return PromptCost(len(schemas), tokens, cold.elapsed, max(0.0, cold.elapsed - bare.elapsed), cached.elapsed)
+
+
+async def check_documents(cfg: Config, report: Callable[[str, str], None]) -> None:
+    """Whether the Mac with your documents answers, and what's indexed from it."""
+    try:
+        async with connect_mac(cfg.documents, cfg.log_dir / "documents.log") as mac:
+            about = await mac.call("about")
+        report(OK, f"{about.get('host') or 'your Mac'} answers; it lets Athena see {', '.join(about.get('scope', []))}")
+    except DocumentsError as exc:
+        report(FAIL, str(exc))
+    try:
+        store = MemoryStore(cfg.db_path, cfg.embeddings.dimensions, cfg.embeddings.model)
+        try:
+            indexed = [d for d in store.documents().values() if d.folder in cfg.documents.folders]
+            when = store.get_meta(DOCUMENTS_INDEXED)
+        finally:
+            store.close()
+    except Exception as exc:
+        report(FAIL, f"{type(exc).__name__}: {exc}")
+        return
+    folders = ", ".join(cfg.documents.folders)
+    if indexed and when:
+        report(OK, f"{len(indexed)} documents indexed from {folders}, last on {when[:16].replace('T', ' at ')} UTC")
+    else:
+        report(WARN, f"{folders}: not indexed yet. Press Index now on the dashboard, under Memory.")
 
 
 async def check_sandbox(sandbox: Sandbox, cfg: Config, report: Callable[[str, str], None]) -> None:

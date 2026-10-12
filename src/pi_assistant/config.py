@@ -80,6 +80,17 @@ class MemoryConfig(_Section):
     chunk_chars: int = 1200
 
 
+class DocumentsConfig(_Section):
+    # The Mac your documents are on, and its documents server (scripts/mac/install.sh --documents),
+    # started over SSH. scripts/connect-mac.sh ADDRESS USER laptop makes the "athena-laptop" entry.
+    command: str = "ssh"
+    args: list[str] = Field(default_factory=lambda: ["athena-laptop", "documents"])
+    # Folders on that Mac to index, chosen on the dashboard (Memory). Indexed only when you ask.
+    folders: list[str] = Field(default_factory=list)
+    max_chars_per_file: int = 300_000  # longer documents are indexed up to this many characters
+    timeout_seconds: float = 300
+
+
 class AgentConfig(_Section):
     assistant_name: str = "Athena"
     user_name: str = "the user"
@@ -197,6 +208,7 @@ class Config(_Section):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    documents: DocumentsConfig = Field(default_factory=DocumentsConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)

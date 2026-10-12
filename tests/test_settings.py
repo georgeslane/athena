@@ -100,7 +100,6 @@ def test_everything_is_listed_without_secret_values(setup, monkeypatch):
         "time",
         "fetch",
         "search",
-        "files",
         "apple",
         "github",
         "sec",
@@ -158,9 +157,9 @@ def test_shows_what_is_running(setup):
 def test_switching_a_server_on_changes_one_line_and_keeps_the_comments(setup):
     settings, config, _ = setup
     before = config.read_text()
-    cfg = settings.update("files", {"enabled": True})
+    cfg = settings.update("apple", {"enabled": True})
     assert changed_lines(before, config.read_text()) == ["-enabled = false", "+enabled = true"]
-    assert cfg.mcp_servers["files"].enabled
+    assert cfg.mcp_servers["apple"].enabled
     backup = config.parent / "config.toml.bak"
     assert backup.read_text() == before and stat.S_IMODE(backup.stat().st_mode) == 0o600
     assert stat.S_IMODE(config.stat().st_mode) == 0o644  # as it was
@@ -514,3 +513,15 @@ def test_env_values_that_cant_be_written_safely_are_refused(tmp_path):
     with pytest.raises(SettingsError):
         env.update({"BAD NAME": "x"})
     assert not (tmp_path / ".env").exists()
+
+
+def test_the_old_files_server_can_be_removed(setup):
+    """A Pi set up before documents has a files server, which the Macs no longer offer."""
+    settings, config, _ = setup
+    config.write_text(
+        config.read_text() + '\n[mcp_servers.files]\nenabled = true\ncommand = "ssh"\nargs = ["athena-mac", "files"]\n'
+    )
+    files = entry(settings, "files")
+    assert files["custom"] and files["title"] == "files"  # one of your own now, so it can be removed
+    cfg = settings.remove_server("files")
+    assert "files" not in cfg.mcp_servers and "[mcp_servers.files]" not in config.read_text()

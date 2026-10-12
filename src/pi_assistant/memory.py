@@ -2,12 +2,14 @@
 
 Three kinds of entries:
   * facts         - short statements the assistant saves with the ``remember`` tool
-  * documents     - chunks of your own notes, added with ``pi-assistant ingest``
+  * documents     - chunks of your documents, indexed from folders on your Mac (documents.py),
+                    or added with ``pi-assistant ingest``
   * conversations - each message you've sent and Athena's reply, added after it answers
 
-Facts and documents share one index, which is searched automatically for every message.
-Conversations have an index of their own, searched only when the model asks
-(``search_memory``), so an old answer isn't mistaken for a current one.
+Each kind has an index of its own. Facts are searched automatically for every message.
+Documents and conversations are searched only when the model asks (``search_memory``):
+a document is too long to add to every message, and an old answer could be mistaken for a
+current one.
 """
 
 from __future__ import annotations
@@ -36,8 +38,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 Kind = Literal["fact", "document", "conversation"]
-VECTOR_TABLES = {"fact": "memory_vectors", "document": "memory_vectors", "conversation": "conversation_vectors"}
+VECTOR_TABLES = {"fact": "memory_vectors", "document": "document_vectors", "conversation": "conversation_vectors"}
+KINDS: tuple[Kind, ...] = ("fact", "document", "conversation")
 INDEXED_TO = "conversations_indexed_to"  # memory_meta: the last message whose exchange is in memory
+DOCUMENTS_HOME = "documents_home"  # memory_meta: the home folder on the Mac documents come from, to show paths with ~
+READ_CHARS = 5000  # how much of a document read_document returns at a time
+ICLOUD_PATH, ICLOUD_DRIVE = "~/Library/Mobile Documents/com~apple~CloudDocs", "iCloud Drive"
 TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".text", ".org", ".rst"}
 
 
@@ -99,6 +105,29 @@ class Embedder:
 
 
 @dataclass
+class Found:
+    """Something a search found: a fact, a past conversation, or a document by its best passage."""
+
+    kind: Kind
+    distance: float
+    text: str
+    id: int | None = None  # facts and conversations
+    path: str | None = None  # documents
+    saved: str = ""  # the date it was saved, or for a document, the date it last changed
+
+
+@dataclass
+class IndexedDocument:
+    path: str  # its full path on your Mac
+    folder: str  # the folder it was indexed from, as you chose it
+    size: int
+    modified: float  # when it last changed, as a Unix time
+    chunks: int = 0
+    indexed_at: str = ""
+    note: str | None = None  # why it has no chunks, such as a scanned PDF without text
+
+
+@dataclass
 class MemoryHit:
     id: int
     kind: str
@@ -148,6 +177,17 @@ class MemoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS memories_source ON memories(source);
                 CREATE TABLE IF NOT EXISTS memory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                -- Documents indexed from your Mac: what each was like when it was read, so indexing
+                -- again only reads what's changed. Its chunks are memories with it as their source.
+                CREATE TABLE IF NOT EXISTS documents (
+                    path TEXT PRIMARY KEY,
+                    folder TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    modified REAL NOT NULL,
+                    chunks INTEGER NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    note TEXT
+                );
                 """
             )
             for table in sorted(set(VECTOR_TABLES.values())):
@@ -155,6 +195,17 @@ class MemoryStore:
                     f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} "
                     f"USING vec0(embedding float[{self.dimensions}] distance_metric=cosine)"
                 )
+            # Documents used to share facts' index: move any that are still there into their own.
+            for (memory_id,) in self._conn.execute("SELECT id FROM memories WHERE kind = 'document'").fetchall():
+                row = self._conn.execute(
+                    "SELECT embedding FROM memory_vectors WHERE rowid = ?", (memory_id,)
+                ).fetchone()
+                if row:
+                    self._conn.execute("DELETE FROM memory_vectors WHERE rowid = ?", (memory_id,))
+                    self._conn.execute("DELETE FROM document_vectors WHERE rowid = ?", (memory_id,))
+                    self._conn.execute(
+                        "INSERT INTO document_vectors (rowid, embedding) VALUES (?, ?)", (memory_id, row[0])
+                    )
             meta = dict(self._conn.execute("SELECT key, value FROM memory_meta").fetchall())
             current = {"embedding_model": self.embedding_model, "dimensions": str(self.dimensions)}
             if "dimensions" not in meta:  # a new index
@@ -232,20 +283,15 @@ class MemoryStore:
         ).fetchall()
         return [MemoryHit(*row) for row in rows]
 
-    def search(
-        self, embedding: Sequence[float], k: int, kind: Kind | None = None, *, conversations: bool = False
-    ) -> list[MemoryHit]:
-        """The ``k`` entries nearest ``embedding``: facts and documents, plus conversations if asked."""
+    def search(self, embedding: Sequence[float], k: int, kinds: Sequence[Kind] = ("fact",)) -> list[MemoryHit]:
+        """The ``k`` entries of these kinds nearest ``embedding``."""
         with self._lock:
-            if kind == "conversation":
-                return self._nearest("conversation_vectors", embedding, k)
-            # Over-fetch when filtering by kind, since the KNN step can't filter.
-            hits = self._nearest("memory_vectors", embedding, k * 4 if kind else k)
-            if conversations and not kind:
-                hits += self._nearest("conversation_vectors", embedding, k)
-        if kind:
-            hits = [h for h in hits if h.kind == kind]
-        return sorted(hits, key=lambda h: h.distance)[:k]
+            hits = [
+                hit
+                for table in sorted({VECTOR_TABLES[kind] for kind in kinds})
+                for hit in self._nearest(table, embedding, k)
+            ]
+        return sorted((h for h in hits if h.kind in kinds), key=lambda h: h.distance)[:k]
 
     def get(self, memory_id: int) -> MemoryHit | None:
         with self._lock:
@@ -263,11 +309,9 @@ class MemoryStore:
 
     def delete_source(self, source: str) -> int:
         with self._lock, self._conn:
-            ids = [r[0] for r in self._conn.execute("SELECT id FROM memories WHERE source = ?", (source,))]
-            for table in set(VECTOR_TABLES.values()):
-                self._conn.executemany(f"DELETE FROM {table} WHERE rowid = ?", [(i,) for i in ids])
-            self._conn.execute("DELETE FROM memories WHERE source = ?", (source,))
-        return len(ids)
+            n = self._conn.execute("SELECT COUNT(*) FROM memories WHERE source = ?", (source,)).fetchone()[0]
+            self._delete_source(source)
+        return n
 
     def clear(self) -> None:
         """Delete every memory, and start a fresh index for the current embeddings model.
@@ -283,7 +327,9 @@ class MemoryStore:
                     BEGIN IMMEDIATE;
                     DROP TABLE IF EXISTS memory_vectors;
                     DROP TABLE IF EXISTS conversation_vectors;
+                    DROP TABLE IF EXISTS document_vectors;
                     DELETE FROM memories;
+                    DELETE FROM documents;
                     DELETE FROM memory_meta;
                     COMMIT;
                     """
@@ -317,6 +363,64 @@ class MemoryStore:
                 "SELECT id, kind, source, text, created_at, 0.0 FROM memories ORDER BY id"
             ).fetchall()
         return [MemoryHit(*r) for r in rows]
+
+    # -- documents indexed from your Mac -----------------------------------------------------
+
+    def documents(self) -> dict[str, IndexedDocument]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path, folder, size, modified, chunks, indexed_at, note FROM documents"
+            ).fetchall()
+        return {row[0]: IndexedDocument(*row) for row in rows}
+
+    def put_document(self, doc: IndexedDocument, chunks: Sequence[tuple[str, Sequence[float]]]) -> None:
+        """Replace a document's chunks and its record, together, so a search never finds half of each."""
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock, self._conn:
+            self._delete_source(doc.path)
+            for text, embedding in chunks:
+                self._insert(text, embedding, "document", doc.path, now)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (doc.path, doc.folder, doc.size, doc.modified, len(chunks), now, doc.note),
+            )
+
+    def move_document(self, path: str, folder: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE documents SET folder = ? WHERE path = ?", (folder, path))
+
+    def remove_documents(self, paths: Sequence[str]) -> None:
+        with self._lock, self._conn:
+            for path in paths:
+                self._delete_source(path)
+                self._conn.execute("DELETE FROM documents WHERE path = ?", (path,))
+
+    def document_chunks(self, path: str) -> list[str]:
+        """A document's chunks, in order."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT text FROM memories WHERE kind = 'document' AND source = ? ORDER BY id", (path,)
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def document_sources(self) -> list[str]:
+        """Every document in memory: those indexed from your Mac, and any added with `pi-assistant ingest`."""
+        with self._lock:
+            rows = self._conn.execute("SELECT DISTINCT source FROM memories WHERE kind = 'document'").fetchall()
+        return [row[0] for row in rows if row[0]]
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO memory_meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def _delete_source(self, source: str) -> None:
+        ids = [r[0] for r in self._conn.execute("SELECT id FROM memories WHERE source = ?", (source,))]
+        for table in set(VECTOR_TABLES.values()):
+            self._conn.executemany(f"DELETE FROM {table} WHERE rowid = ?", [(i,) for i in ids])
+        self._conn.execute("DELETE FROM memories WHERE source = ?", (source,))
 
     def count(self) -> dict[str, int]:
         with self._lock:
@@ -421,21 +525,76 @@ class MemoryService:
         if not text:
             raise ValueError("nothing to remember")
         vector = await self.embedder.embed_one(text, "document")
-        for hit in self.store.search(vector, 1, kind="fact"):
+        for hit in self.store.search(vector, 1, ("fact",)):
             if hit.distance < self.cfg.duplicate_distance:
                 return hit.id, False
         return self.store.add(text, vector, "fact", source), True
 
-    async def search(
-        self, query: str, k: int | None = None, kind: Kind | None = None, *, conversations: bool = True
-    ) -> list[MemoryHit]:
+    async def search(self, query: str, k: int | None = None, kind: Kind | None = None) -> list[MemoryHit]:
+        """The entries nearest the query: of one kind, or of every kind."""
         vector = await self.embedder.embed_one(query, "query")
-        return self.store.search(vector, k or self.cfg.search_top_k, kind, conversations=conversations)
+        return self.store.search(vector, k or self.cfg.search_top_k, (kind,) if kind else KINDS)
 
     async def recall(self, query: str) -> list[MemoryHit]:
-        """Memories relevant enough to show the model automatically: facts and documents, not old conversations."""
-        hits = await self.search(query, self.cfg.recall_top_k, conversations=False)
+        """Memories relevant enough to show the model automatically: facts, not documents or old conversations."""
+        hits = await self.search(query, self.cfg.recall_top_k, "fact")
         return [h for h in hits if h.distance <= self.cfg.recall_max_distance]
+
+    async def find(self, query: str, limit: int | None = None, kind: Kind | None = None) -> list[Found]:
+        """What a search finds, for the model and the dashboard: each document once, by its best passage."""
+        limit = limit or self.cfg.search_top_k
+        hits = await self.search(query, limit * 5, kind)  # a document's passages are folded into one below
+        indexed = self.store.documents()
+        found: list[Found] = []
+        files: set[str] = set()
+        for hit in hits:
+            if hit.kind != "document":
+                found.append(Found(hit.kind, hit.distance, hit.text, id=hit.id, saved=hit.created_at[:10]))
+            elif hit.source and hit.source not in files:
+                files.add(hit.source)
+                doc = indexed.get(hit.source)
+                changed = datetime.fromtimestamp(doc.modified).date().isoformat() if doc else hit.created_at[:10]
+                found.append(Found("document", hit.distance, hit.text, path=hit.source, saved=changed))
+        return found[:limit]
+
+    def show_path(self, path: str, home: str | None = None) -> str:
+        """A document's path as you'd write it on its Mac: with ~ for your home folder, and iCloud Drive by name."""
+        home = (home if home is not None else self.store.get_meta(DOCUMENTS_HOME) or "").rstrip("/")
+        if not home or not path.startswith(home + "/"):
+            return path
+        shown = "~/" + path[len(home) + 1 :]
+        return ICLOUD_DRIVE + shown[len(ICLOUD_PATH) :] if shown.startswith(ICLOUD_PATH + "/") else shown
+
+    def find_document(self, name: str) -> str:
+        """The document a path or a file name means. ValueError, saying why, if none or several do."""
+        name = name.strip()
+        sources = self.store.document_sources()
+        home = self.store.get_meta(DOCUMENTS_HOME) or ""
+        exact = [s for s in sources if name in (s, self.show_path(s, home))]
+        if exact:
+            return exact[0]
+        named = [s for s in sources if Path(s).name.lower() == Path(name).name.lower()]
+        if len(named) == 1:
+            return named[0]
+        if named:
+            options = ", ".join(self.show_path(s, home) for s in named[:5])
+            raise ValueError(f"Several documents are called {Path(name).name}: {options}. Give the whole path.")
+        raise ValueError(f"There's no document called {name} in memory. Use search_memory to find one.")
+
+    def _describe(self, found: Found) -> dict[str, Any]:
+        relevance = round(1 - found.distance, 3)
+        if found.kind == "document":
+            assert found.path
+            passage = found.text if len(found.text) <= 600 else found.text[:599].rstrip() + "…"
+            return {
+                "kind": "document",
+                "file": self.show_path(found.path),
+                "changed": found.saved,
+                "relevance": relevance,
+                "passage": passage,
+            }
+        text = found.text if len(found.text) <= 800 else found.text[:799].rstrip() + "…"
+        return {"kind": found.kind, "id": found.id, "text": text, "saved": found.saved, "relevance": relevance}
 
     def forget(self, memory_id: int) -> bool:
         return self.store.delete(memory_id)
@@ -485,32 +644,38 @@ class MemoryService:
     # -- tools exposed to the model -------------------------------------------------
 
     def tools(self) -> list[Tool]:
-        async def remember(args: dict[str, Any]) -> str:
-            memory_id, created = await self.remember(str(args.get("fact", "")))
-            return f"Saved as memory #{memory_id}." if created else f"Already known (memory #{memory_id})."
-
         async def search_memory(args: dict[str, Any]) -> str:
             query = str(args.get("query", "")).strip()
             if not query:
                 return "Error: query is required."
+            kind = args.get("kind") or None
+            if kind not in (None, *KINDS):
+                return f"Error: kind must be one of {', '.join(KINDS)}."
             limit = int(args.get("limit") or self.cfg.search_top_k)
-            hits = await self.search(query, max(1, min(limit, 20)))
-            if not hits:
-                return "No memories found."
-            return json.dumps(
-                [
-                    {
-                        "id": h.id,
-                        "kind": h.kind,
-                        "text": h.text,
-                        "source": h.source if h.kind == "document" else None,
-                        "saved": h.created_at[:10],
-                        "relevance": round(1 - h.distance, 3),
-                    }
-                    for h in hits
-                ],
-                ensure_ascii=False,
-            )
+            found = await self.find(query, max(1, min(limit, 20)), kind)
+            if not found:
+                return "Nothing found."
+            return json.dumps([self._describe(f) for f in found], ensure_ascii=False)
+
+        async def read_document(args: dict[str, Any]) -> str:
+            try:
+                path = self.find_document(str(args.get("file", "")))
+            except ValueError as exc:
+                return f"Error: {exc}"
+            text = "\n\n".join(self.store.document_chunks(path))
+            doc = self.store.documents().get(path)
+            if not text:
+                return f"[{self.show_path(path)}] It has no text" + (f": {doc.note}" if doc and doc.note else ".")
+            start = max(0, int(args.get("start") or 0))
+            part = text[start : start + READ_CHARS]
+            end = start + len(part)
+            more = f"; to continue, use start={end}" if end < len(text) else ""
+            changed = f", changed {datetime.fromtimestamp(doc.modified):%Y-%m-%d}" if doc else ""
+            return f"[{self.show_path(path)}{changed}: characters {start}-{end} of {len(text)}{more}]\n{part}"
+
+        async def remember(args: dict[str, Any]) -> str:
+            memory_id, created = await self.remember(str(args.get("fact", "")))
+            return f"Saved as memory #{memory_id}." if created else f"Already known (memory #{memory_id})."
 
         async def forget_memory(args: dict[str, Any]) -> str:
             try:
@@ -540,18 +705,36 @@ class MemoryService:
             Tool(
                 name="search_memory",
                 description=(
-                    "Search long-term memory: facts the user has told you, their notes and documents, and your "
-                    "past conversations with them (kind 'conversation', dated when they were said)."
+                    "Search long-term memory by meaning: facts the user has told you, your past conversations with "
+                    "them (dated when they were said), and their documents (files indexed from their Mac, each "
+                    "with its path and best passage)."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "What to look for, in natural language."},
+                        "kind": {"type": "string", "enum": list(KINDS), "description": "Only this kind."},
                         "limit": {"type": "integer", "description": "Maximum results (default 8)."},
                     },
                     "required": ["query"],
                 },
                 handler=search_memory,
+            ),
+            Tool(
+                name="read_document",
+                description=(
+                    "Read a document that search_memory found, to answer from it or summarise it. "
+                    "Long ones come in parts: to continue, pass the start shown at the top."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string", "description": "Its path, as search_memory gave it."},
+                        "start": {"type": "integer", "description": "Where to start reading (default 0)."},
+                    },
+                    "required": ["file"],
+                },
+                handler=read_document,
             ),
             Tool(
                 name="forget_memory",

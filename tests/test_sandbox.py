@@ -87,7 +87,7 @@ def test_what_else_a_server_can_be_given(home, tmp_path):
     (home / ".local" / "bin" / "x").symlink_to(tool / "x")
     assert str(tool) in binds(sandbox.wrap([str(home / ".local" / "bin" / "x")], network=False))
     # ssh (for the Mac's servers) gets ~/.ssh; things outside your home are visible anyway.
-    assert str(home / ".ssh") in binds(sandbox.wrap([str(home / "bin" / "ssh"), "athena-mac", "files"], network=True))
+    assert str(home / ".ssh") in binds(sandbox.wrap([str(home / "bin" / "ssh"), "athena-mac", "apple"], network=True))
     assert binds(sandbox.wrap(["/usr/bin/node", "x.js"], network=True, read_only=[Path("/opt/data")])) == [
         str(home / ".local" / "share" / "uv" / "python"),
         "/opt/data",
