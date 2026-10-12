@@ -86,12 +86,34 @@ def test_what_else_a_server_can_be_given(home, tmp_path):
     (tool / "x").touch()
     (home / ".local" / "bin" / "x").symlink_to(tool / "x")
     assert str(tool) in binds(sandbox.wrap([str(home / ".local" / "bin" / "x")], network=False))
-    # ssh (for the Mac's servers) gets ~/.ssh; things outside your home are visible anyway.
+    # ssh (for the Mac's servers) gets ~/.ssh; things outside your home are visible anyway, and what's
+    # in a folder it's shown is shown with it, so neither is mounted again.
     assert str(home / ".ssh") in binds(sandbox.wrap([str(home / "bin" / "ssh"), "athena-mac", "apple"], network=True))
-    assert binds(sandbox.wrap(["/usr/bin/node", "x.js"], network=True, read_only=[Path("/opt/data")])) == [
+    read_only = [Path("/opt/data"), notes / "2026", notes]
+    assert binds(sandbox.wrap(["/usr/bin/node", "x.js"], network=True, read_only=read_only)) == [
         str(home / ".local" / "share" / "uv" / "python"),
-        "/opt/data",
+        str(notes),
     ]
+
+
+def test_a_python_uv_links_to_is_shown_with_uvs_pythons(home):
+    # As uv lays them out on the Pi: environments find their Python through a link, cpython-3.14-…, to
+    # the newest 3.14, in uv's folder of Pythons. That folder is shown whole, so the link and where it
+    # leads are shown with it: bubblewrap won't mount on top of a link that's already showing.
+    pythons = home / ".local" / "share" / "uv" / "python"
+    newest = pythons / "cpython-3.14.7-linux-aarch64-gnu"
+    (newest / "bin").mkdir(parents=True)
+    (newest / "bin" / "python3.14").touch()
+    link = pythons / "cpython-3.14-linux-aarch64-gnu"
+    link.symlink_to(newest)
+    venv = home / "athena" / "data" / "mcp" / "search" / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {link / 'bin'}\nimplementation = CPython\n")
+    (venv / "bin" / "python").symlink_to(link / "bin" / "python3.14")
+    (venv / "bin" / "duckduckgo-mcp-server").touch()
+    sandbox = Sandbox("/usr/bin/bwrap", home)
+    for program in ("duckduckgo-mcp-server", "python"):
+        assert binds(sandbox.wrap([str(venv / "bin" / program)], network=True)) == [str(pythons), str(venv)]
 
 
 async def test_without_bubblewrap_a_server_isnt_started(monkeypatch):
@@ -155,6 +177,37 @@ async def test_a_sandboxed_process_cant_see_your_files_or_the_network():
     assert REAL is not None
     results = await REAL.self_test()
     assert results and all(ok for ok, _ in results), results
+    assert "Python servers can start in it" in [what for _, what in results]
+
+
+@needs_bwrap
+async def test_a_python_uv_links_to_starts_in_the_sandbox(tmp_path):
+    """The Pi's layout, for real: an environment that finds its Python through the link uv makes, in its
+    folder of Pythons in your home folder, to the newest version. Here that's Athena's own Python."""
+    assert REAL is not None
+    home = tmp_path / "home" / "pi"
+    pythons = home / ".local" / "share" / "uv" / "python"
+    pythons.mkdir(parents=True)
+    minor = f"{sys.version_info.major}.{sys.version_info.minor}"
+    newest = pythons / f"cpython-{minor}.{sys.version_info.micro}-linux"
+    newest.symlink_to(Path(sys.base_prefix).resolve())
+    link = pythons / f"cpython-{minor}-linux"
+    link.symlink_to(newest)
+    assert (link / "bin" / f"python{minor}").exists()
+    venv = home / "athena" / "data" / "mcp" / "demo" / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {link / 'bin'}\ninclude-system-site-packages = false\n")
+    (venv / "bin" / "python").symlink_to(link / "bin" / f"python{minor}")
+
+    command = [str(venv / "bin" / "python"), "-c", "import sys; print(sys.prefix)"]
+    proc = await asyncio.create_subprocess_exec(
+        *Sandbox(REAL.bwrap, home).wrap(command, network=False),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    assert proc.returncode == 0, out
+    assert out.decode().strip() == str(venv)
 
 
 @needs_bwrap

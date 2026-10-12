@@ -24,7 +24,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-HIDDEN = ("/home", "/root", "/run/user", "/var/tmp")  # emptied in the sandbox, along with your home folder
+HIDDEN = ("/tmp", "/home", "/root", "/run/user", "/var/tmp")  # emptied in the sandbox, along with your home folder
 INSTALL_HINT = "Install bubblewrap (sudo apt install bubblewrap), or set sandbox = false for the server."
 
 
@@ -71,20 +71,20 @@ class Sandbox:
     ) -> list[str]:
         """The command line that runs ``command`` in a sandbox."""
         assert self.bwrap
-        args = [self.bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+        args = [self.bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
         for hidden in self._hidden():
             if hidden.is_dir():
-                # Nothing in anyone's home, nor their session sockets. Its own home is empty and
-                # writable, and gone when it stops.
+                # Nothing in anyone's home, nor their session sockets. Its own home and /tmp are
+                # empty and writable, and gone when it stops.
                 args += ["--tmpfs", str(hidden)]
-        for path in _unique([*self.needed(command), *read_only, *([cwd] if cwd else [])]):
+        for path in self._shown([*self.needed(command), *read_only, *([cwd] if cwd else [])]):
             args += ["--ro-bind-try", str(path), str(path)]
         args += ["--unshare-all", *(["--share-net"] if network else [])]
         args += ["--die-with-parent", "--new-session", "--chdir", str(cwd or self.home), "--", *command]
         return args
 
     def needed(self, command: list[str]) -> list[Path]:
-        """What a command needs from the home folder to run at all."""
+        """What a command needs to run at all."""
         paths = [self.home / ".local" / "share" / "uv" / "python"]  # where uv puts the Pythons it installs
         program = Path(command[0]) if "/" in command[0] else Path(shutil.which(command[0]) or command[0])
         if program.is_absolute():
@@ -98,14 +98,22 @@ class Sandbox:
                 paths.append(program.resolve().parent)  # where a link to it leads
         if program.name == "ssh":
             paths.append(self.home / ".ssh")  # ssh itself is trusted: it's for the Mac's servers
-        # Only what's in a hidden folder needs showing: the rest is visible anyway.
-        return [p for p in _unique(paths) if any(_within(p, hidden) for hidden in self._hidden())]
+        return _unique(paths)
 
     def _hidden(self) -> list[Path]:
         return _unique([*map(Path, HIDDEN), self.home])
 
+    def _shown(self, paths: list[Path]) -> list[Path]:
+        """Which of these to show in the sandbox. Only what's in a hidden folder, as the rest is visible
+        anyway, and of that only the outermost, as showing a folder shows everything in it. So nothing is
+        mounted on top of a link that's already showing, which bubblewrap refuses to do from 0.12. uv's
+        folder of Pythons has one: cpython-3.14-…, to the newest 3.14, which environments find theirs through."""
+        hidden = [p for p in _unique(paths) if any(_within(p, folder) for folder in self._hidden())]
+        return [p for p in hidden if not any(folder in p.parents for folder in hidden)]
+
     async def self_test(self) -> list[tuple[bool, str]]:
-        """Checks, for doctor, that a sandboxed process can't see a file in your home folder, or reach the network."""
+        """Checks, for doctor, that a sandboxed process can't see a file in your home folder, or reach the network,
+        and that a Python server can start in one."""
         await self.check()
         results = []
         canary = self.home / f".athena-sandbox-check-{os.getpid()}"
@@ -122,6 +130,11 @@ class Sandbox:
             probe = "import socket; socket.create_connection(('1.1.1.1', 53), 3)"
             code, _ = await _run(self.wrap([python, "-c", probe], network=False))
             results.append((code != 0, f"one without network access {'can' if code == 0 else 'can’t'} connect out"))
+        if sys.executable:
+            # Athena's own Python, whose environment uv made the same way as servers' environments.
+            code, output = await _run(self.wrap([sys.executable, "-c", "pass"], network=False))
+            why = f": {output.strip().splitlines()[-1]}" if code and output.strip() else ""
+            results.append((code == 0, f"Python servers {'can' if code == 0 else 'can’t'} start in it{why}"))
         return results
 
 
