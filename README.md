@@ -234,7 +234,7 @@ Local servers run in a sandbox made with [bubblewrap](https://github.com/contain
 - the system, read-only
 - an empty home folder of its own, wiped when it stops, so your `.env`, memories (`data/`), Athena's code and `~/.ssh` aren't there
 - its own `/tmp`
-- read-only, only what it needs to run: its locked environment, uv's Pythons, the folder its command is in, and `~/.ssh` if the command is `ssh` (for the Mac's servers, where the program is OpenSSH itself)
+- read-only, only what it needs to run: its locked environment, uv's Pythons, the folder its command is in, and `~/.ssh` if the command is `ssh` (for the Mac's servers, where the program is OpenSSH itself). ssh there doesn't see `/etc/ssh/ssh_config.d`, as it would refuse the files in it: in the sandbox, root's files belong to nobody.
 
 Nothing it starts outlives it.
 
@@ -243,7 +243,7 @@ Nothing it starts outlives it.
 - **`read_only_paths = ["/home/pi/notes"]`** lets a server read files or folders it needs.
 - **`sandbox = false`** runs a server without one. It can then read everything you can, so `doctor` warns about it.
 
-`doctor` checks the sandbox for real. It writes a file in your home folder and checks that a sandboxed process can't see it, nor connect out without network access, and that Athena's own Python, set up by uv like a server's, starts in one. If bubblewrap is missing, or can't make a sandbox, local servers aren't started, and the dashboard says why. On a Mac, which bubblewrap doesn't support, servers run without one.
+`doctor` checks the sandbox for real. It writes a file in your home folder and checks that a sandboxed process can't see it, nor connect out without network access, and that Athena's own Python, set up by uv like a server's, starts in one, as does ssh. If bubblewrap is missing, or can't make a sandbox, local servers aren't started, and the dashboard says why. On a Mac, which bubblewrap doesn't support, servers run without one.
 
 ### Recommended servers
 
