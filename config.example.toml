@@ -14,9 +14,13 @@ api_key = "${LLM_API_KEY}"
 temperature = 0.7
 max_tokens = 2048
 timeout_seconds = 300
-# Server-specific request options, passed through as-is. For example, to turn off
-# "thinking" on models that support it:
-# extra_body = { chat_template_kwargs = { enable_thinking = false } }
+# Whether a model that can think does so before answering: "on", "off", or "short", which
+# stops it after short_thinking_tokens (with oMLX). /think in Telegram and the dashboard change
+# it. Left out, it's as the model server has it.
+# thinking = "short"
+# short_thinking_tokens = 1000
+# Server-specific request options, passed through as-is.
+# extra_body = { top_k = 20 }
 # At startup, after /reload and every this many minutes, have the model server read the
 # prompt, tools and your chat so far, so your next message doesn't wait while it does.
 # It only takes a moment when they're already cached. 0 turns it off.

@@ -412,3 +412,27 @@ async def test_pausing_waits_for_answers_and_holds_new_ones(config, memory):
     await pausing
     assert (await second).text == "Second."
     assert order == ["paused", "resumed"] and not agent.busy
+
+
+async def test_a_stopped_answer_isnt_saved_and_the_board_moves_on(config, memory):
+    started = asyncio.Event()
+
+    async def slow(args):
+        started.set()
+        await asyncio.Event().wait()  # until it's stopped
+
+    tool = Tool("slow", "takes a while", {"type": "object", "properties": {}}, slow)
+    server = FakeLLMServer([completion(None, [("slow", {})]), completion("Done this time.")])
+    status, seen = recording_tracker()
+    agent = make_agent(config, memory, server, [tool], status=status)
+
+    answering = asyncio.create_task(agent.respond("chat1", "do the slow thing"))
+    await asyncio.wait_for(started.wait(), 2)
+    answering.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await answering
+
+    assert agent.history.load("chat1") == [] and not agent.busy
+    assert seen[-1].state is State.IDLE
+    # The chat isn't left locked: the next message is answered.
+    assert (await agent.respond("chat1", "hello")).text == "Done this time."

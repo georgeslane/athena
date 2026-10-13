@@ -8,6 +8,7 @@ import html
 import json
 import logging
 import secrets
+from dataclasses import dataclass
 from typing import Any
 
 import openai
@@ -33,7 +34,7 @@ from telegram.ext import (
 )
 
 from pi_assistant.app import Services
-from pi_assistant.config import ConfigError
+from pi_assistant.config import THINKING, ConfigError
 from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
 from pi_assistant.memory import Found
 from pi_assistant.siri import VOICE_NOTE, SiriServer
@@ -42,9 +43,26 @@ from pi_assistant.tool_approvals import ToolChange
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+THINKING_SAYS = {
+    "on": "I think things through before answering, for as long as it takes.",
+    "short": "I think briefly before answering, for up to {tokens} tokens.",
+    "off": "I answer straight away, without thinking first.",
+}
+
+
+@dataclass
+class _Asked:
+    """The last message in a chat, for /retry."""
+
+    text: str
+    answered: bool = False
+
 
 COMMANDS = [
     ("session", "Start a new session: clears our conversation (memories are kept)"),
+    ("stop", "Stop the answer I'm working on"),
+    ("retry", "Answer your last message again"),
+    ("think", "Think before answering: /think on, short or off"),
     ("remember", "Save a fact: /remember <text>"),
     ("recall", "Search memory: /recall <query>"),
     ("forget", "Delete a memory: /forget <id>"),
@@ -63,6 +81,8 @@ class TelegramBot:
         self._siri: SiriServer | None = None
         self._warming: asyncio.Task[None] | None = None
         self._telling: set[asyncio.Task[None]] = set()
+        self._answering: dict[int, set[asyncio.Task[Any]]] = {}  # for each chat, replies /stop can stop
+        self._last: dict[int, _Asked] = {}
 
     # -- setup ----------------------------------------------------------------------------
 
@@ -83,6 +103,9 @@ class TelegramBot:
             app.add_handler(CommandHandler("start", self.cmd_start, filters=me))
             app.add_handler(CommandHandler("help", self.cmd_start, filters=me))
             app.add_handler(CommandHandler(["session", "reset"], self.cmd_session, filters=me))
+            app.add_handler(CommandHandler("stop", self.cmd_stop, filters=me))
+            app.add_handler(CommandHandler("retry", self.cmd_retry, filters=me))
+            app.add_handler(CommandHandler("think", self.cmd_think, filters=me))
             app.add_handler(CommandHandler("remember", self.cmd_remember, filters=me))
             app.add_handler(CommandHandler("recall", self.cmd_recall, filters=me))
             app.add_handler(CommandHandler("forget", self.cmd_forget, filters=me))
@@ -91,6 +114,7 @@ class TelegramBot:
             app.add_handler(CommandHandler("status", self.cmd_status, filters=me))
             app.add_handler(MessageHandler(me & filters.TEXT & ~filters.COMMAND, self.on_text))
             app.add_handler(CallbackQueryHandler(self.on_button, pattern=r"^confirm:"))
+            app.add_handler(CallbackQueryHandler(self.on_think_button, pattern=r"^think:"))
         app.add_handler(MessageHandler(filters.ALL, self.on_stranger))
         app.add_error_handler(self.on_error)
         return app
@@ -237,13 +261,20 @@ class TelegramBot:
             verdict = "Allowed" if approved else "Denied"
         except TimeoutError:
             approved, verdict = False, "No answer, so denied"
+        except asyncio.CancelledError:  # /stop
+            await self._settle(msg, f"Stopped: <b>{html.escape(tool)}</b>")
+            raise
         finally:
             self._pending.pop(key, None)
+        await self._settle(msg, f"{verdict}: <b>{html.escape(tool)}</b>")
+        return approved
+
+    async def _settle(self, msg: Any, text: str) -> None:
+        """Replace an approval's buttons with what became of it."""
         try:
-            await msg.edit_text(f"{verdict}: <b>{html.escape(tool)}</b>", parse_mode=ParseMode.HTML)
+            await msg.edit_text(text, parse_mode=ParseMode.HTML)
         except TelegramError:
             pass
-        return approved
 
     # -- handlers -----------------------------------------------------------------------------
 
@@ -251,7 +282,8 @@ class TelegramBot:
         assert update.effective_chat and update.message and update.message.text
         chat_id = update.effective_chat.id
         reply = await self._reply(ctx.bot, chat_id, update.message.text)
-        await self._send(ctx.bot, chat_id, reply)
+        if reply is not None:
+            await self._send(ctx.bot, chat_id, reply)
 
     async def ask_from_siri(self, bot: Bot, prompt: str) -> str:
         """Answer a question asked through Siri. Both are posted to the chat; the answer is returned as speech."""
@@ -265,6 +297,8 @@ class TelegramBot:
         except TelegramError as exc:
             log.warning("Couldn't post the question from Siri to Telegram: %s", exc)
         reply = await self._reply(bot, chat_id, prompt, note=VOICE_NOTE, channel="Siri")
+        if reply is None:
+            return "You stopped that in Telegram."
         try:
             await self._send(bot, chat_id, reply, reply_to=question)
         except TelegramError as exc:  # Siri still gets the answer
@@ -279,15 +313,28 @@ class TelegramBot:
 
     async def _reply(
         self, bot: Bot, chat_id: int, text: str, note: str | None = None, channel: str = "Telegram"
-    ) -> str:
-        """The agent's reply to ``text``, showing "typing..." and asking for approvals in the chat meanwhile."""
+    ) -> str | None:
+        """The agent's reply to ``text``, showing "typing..." and asking for approvals in the chat meanwhile.
+
+        None if /stop stopped it.
+        """
         typing = asyncio.create_task(self._keep_typing(bot, chat_id))
+        asked = self._last[chat_id] = _Asked(text)
 
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
             return await self._confirm(bot, chat_id, tool, args, summary)
 
+        answering = asyncio.create_task(
+            self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note, channel=channel)
+        )
+        self._answering.setdefault(chat_id, set()).add(answering)
         try:
-            result = await self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note, channel=channel)
+            await asyncio.wait({answering})
+            if answering.cancelled():
+                log.info("Stopped answering, as asked")
+                return None
+            result = answering.result()
+            asked.answered = result.saved
             reply = result.text
             log.info(
                 "Replied in %.1fs (%d model calls, tools: %s)",
@@ -308,6 +355,8 @@ class TelegramBot:
             reply = f"Something went wrong: {type(exc).__name__}: {exc}"
         finally:
             typing.cancel()
+            self._answering[chat_id].discard(answering)
+            answering.cancel()  # if this was cancelled itself, say as Athena shuts down
         return reply
 
     async def on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -351,6 +400,90 @@ class TelegramBot:
         await update.effective_message.reply_text(  # type: ignore[union-attr]
             f"Started session {session.id}. I've cleared our conversation from my context. "
             "Memories are kept, and I can still search what we said before."
+        )
+
+    async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        stopped = await self._stop(update.effective_chat.id)  # type: ignore[union-attr]
+        await update.effective_message.reply_text(  # type: ignore[union-attr]
+            "Stopped. Send /retry to have me try again." if stopped else "I'm not working on anything."
+        )
+
+    async def _stop(self, chat_id: int) -> bool:
+        """Stop answering in this chat, including messages waiting their turn. False if there weren't any."""
+        answering = set(self._answering.get(chat_id, ()))  # a copy, as each one leaves the set as it stops
+        for task in answering:
+            task.cancel()
+        if answering:
+            await asyncio.wait(answering)
+        return bool(answering)
+
+    async def cmd_retry(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id  # type: ignore[union-attr]
+        await self._stop(chat_id)
+        last = self._last.get(chat_id)
+        if last and not last.answered:  # stopped, or it went wrong
+            text = last.text
+        elif exchange := await self.s.take_back_last_exchange(str(chat_id)):
+            text = exchange.question
+        else:
+            await update.effective_message.reply_text("There's nothing to try again in this session.")  # type: ignore[union-attr]
+            return
+        shown = text if len(text) <= 200 else text[:199].rstrip() + "…"
+        await ctx.bot.send_message(chat_id, f"🔁 Trying again: {shown}", link_preview_options=NO_PREVIEW)
+        reply = await self._reply(ctx.bot, chat_id, text)
+        if reply is not None:
+            await self._send(ctx.bot, chat_id, reply)
+
+    async def cmd_think(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        choice = " ".join(ctx.args or []).strip().lower()
+        if choice:
+            if choice not in THINKING:
+                await update.effective_message.reply_text("Usage: /think on, /think short or /think off")  # type: ignore[union-attr]
+                return
+            await update.effective_message.reply_text(self._set_thinking(choice))  # type: ignore[union-attr]
+            return
+        await update.effective_message.reply_text(  # type: ignore[union-attr]
+            self._thinking_says(), reply_markup=self._thinking_buttons()
+        )
+
+    async def on_think_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        assert query is not None
+        if not update.effective_user or update.effective_user.id not in self.allowed:
+            await query.answer("Not allowed.")
+            return
+        choice = (query.data or "").partition(":")[2]
+        if choice not in THINKING:
+            await query.answer()
+            return
+        said = self._set_thinking(choice)
+        await query.answer()
+        with contextlib.suppress(TelegramError):  # say, pressing the one that's already chosen
+            await query.edit_message_text(said, reply_markup=self._thinking_buttons())
+
+    def _set_thinking(self, mode: str) -> str:
+        try:
+            saved = self.s.set_thinking(mode)
+        except Exception as exc:  # such as config.toml being invalid
+            log.warning("Couldn't change thinking: %s", exc)
+            return f"I couldn't change that: {exc}"
+        return self._thinking_says() + ("" if saved else " Only until I restart: there's no config.toml to save it in.")
+
+    def _thinking_says(self) -> str:
+        llm = self.s.config.llm
+        return f"Thinking is {llm.thinking_now}: " + THINKING_SAYS[llm.thinking_now].format(
+            tokens=f"{llm.short_thinking_tokens:,}"
+        )
+
+    def _thinking_buttons(self) -> InlineKeyboardMarkup:
+        now = self.s.config.llm.thinking_now
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(("✓ " if mode == now else "") + mode.title(), callback_data=f"think:{mode}")
+                    for mode in THINKING
+                ]
+            ]
         )
 
     async def cmd_remember(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -418,7 +551,7 @@ class TelegramBot:
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         cfg = self.s.config
-        lines = [f"Model: {cfg.llm.model}", f"Endpoint: {cfg.llm.base_url}"]
+        lines = [f"Model: {cfg.llm.model} (thinking {cfg.llm.thinking_now})", f"Endpoint: {cfg.llm.base_url}"]
         try:
             models = await asyncio.wait_for(self.s.llm.list_models(), 10)
             ok = cfg.llm.model in models

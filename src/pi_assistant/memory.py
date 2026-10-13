@@ -300,6 +300,14 @@ class MemoryStore:
             ).fetchone()
         return MemoryHit(*row) if row else None
 
+    def find_text(self, kind: Kind, text: str) -> int | None:
+        """The newest memory of this kind with exactly this text."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM memories WHERE kind = ? AND text = ? ORDER BY id DESC LIMIT 1", (kind, text)
+            ).fetchone()
+        return row[0] if row else None
+
     def delete(self, memory_id: int) -> bool:
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
@@ -598,6 +606,11 @@ class MemoryService:
 
     def forget(self, memory_id: int) -> bool:
         return self.store.delete(memory_id)
+
+    def forget_conversation(self, exchange: Exchange) -> bool:
+        """Take an exchange out of memory, if it's been added, as when /retry answers it again."""
+        found = self.store.find_text("conversation", conversation_text(exchange, self.cfg.chunk_chars))
+        return found is not None and self.store.delete(found)
 
     async def index_conversations(self, history: ConversationStore, batch: int = 16) -> int:
         """Add exchanges that aren't in memory yet, so they can be searched later. Returns how many were added.

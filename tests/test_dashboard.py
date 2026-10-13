@@ -212,6 +212,8 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
     assert overview["total"]["queries"] == 2 and overview["total"]["sessions"] == 1
     assert overview["model"] | {"checked": 0} == {
         "name": "test-model",
+        "thinking": "on",
+        "short_thinking_tokens": 1000,
         "reachable": True,
         "context_window": 131072,  # what oMLX is set to, below what the model can do
         "error": None,
@@ -235,6 +237,31 @@ async def test_a_new_session_and_forgetting_everything(athena):
         after = (await http.post("/api/forget", json={"confirm": "forget"})).json()
     assert after["memory"] == {"facts": 0, "documents": 0, "conversations": 0}
     assert after["session"]["id"] == 3 and after["total"]["queries"] == 1  # the statistics stay
+
+
+async def test_switching_thinking_on_short_or_off(athena):
+    model = FakeLLMServer(lambda body: completion("Hi."))
+    athena.llm = athena.agent.llm = model.client(athena.config.llm)
+    async with client(athena) as http:
+        overview = (await http.get("/api/overview")).json()
+        assert (overview["model"]["thinking"], overview["model"]["short_thinking_tokens"]) == ("on", 1000)
+
+        overview = (await http.post("/api/thinking", json={"mode": "off"})).json()
+        assert overview["model"]["thinking"] == "off"
+        await athena.agent.respond("1", "hi")
+        assert model.requests[-1]["chat_template_kwargs"] == {"enable_thinking": False}
+
+        await http.post("/api/thinking", json={"mode": "short"})
+        await athena.agent.respond("1", "hi again")
+        assert model.requests[-1]["chat_template_kwargs"] == {"enable_thinking": True}
+        assert model.requests[-1]["thinking_budget"] == 1000
+        assert load_config(athena.config.path).llm.thinking == "short"  # kept for after a restart
+
+        response = await http.post("/api/thinking", json={"mode": "lots"})
+        assert response.status_code == 400 and response.json() == {
+            "error": "Thinking can be on, short, off, not 'lots'."
+        }
+        assert athena.config.llm.thinking == "short"
 
 
 async def test_the_status_waits_for_a_change(athena):

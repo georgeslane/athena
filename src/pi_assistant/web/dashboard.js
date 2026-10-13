@@ -548,6 +548,7 @@ function connectionsCard(o) {
       "ul.facts",
       {},
       h("li", {}, h("span.what", { text: "Model" }), h("span.is", { text: model.name })),
+      h("li", {}, h("span.what", { text: "Thinking" }), thinkingSwitch(model)),
       h("li", {}, h("span.what", { text: "Model server" }), server),
       h("li", {}, h("span.what", { text: "Context limit" }), h("span.is", { text: model.context_window ? `${number(model.context_window)} tokens` : "Unknown" })),
       h(
@@ -559,6 +560,42 @@ function connectionsCard(o) {
       )
     )
   );
+}
+
+const THINKING = {
+  on: ["On", "Thinks things through before answering, for as long as it takes."],
+  short: ["Short", "Thinks briefly before answering, for up to {tokens} tokens."],
+  off: ["Off", "Answers straight away, without thinking first."],
+};
+
+function thinkingSwitch(model) {
+  return h(
+    "div.switcher.end",
+    { role: "group", "aria-label": "Thinking before answering" },
+    Object.entries(THINKING).map(([mode, [label, says]]) =>
+      h("button", {
+        type: "button",
+        text: label,
+        title: says.replace("{tokens}", number(model.short_thinking_tokens)),
+        "aria-pressed": String(model.thinking === mode),
+        onclick: (event) => setThinking(event, mode),
+      })
+    )
+  );
+}
+
+async function setThinking(event, mode) {
+  if (state.overview.model.thinking === mode) return;
+  for (const button of event.target.parentElement.children) button.disabled = true;
+  try {
+    state.overview = await call("POST", "/api/thinking", { mode });
+    renderOverview();
+    const [label, says] = THINKING[mode];
+    toast(`Thinking ${label.toLowerCase()}. ${state.overview.assistant.name} ${says.replace("{tokens}", number(state.overview.model.short_thinking_tokens)).replace(/^./, (c) => c.toLowerCase())}`);
+  } catch (e) {
+    toast(e.message, true);
+    for (const button of event.target.parentElement.children) button.disabled = false;
+  }
 }
 
 async function newSession(event) {

@@ -71,6 +71,9 @@ Then:
 | Command | What it does |
 |---|---|
 | `/session` | Start a new session: the conversation so far is cleared from the model's context, in every chat. Memories are kept, and earlier conversations can still be searched. `/reset` does the same. |
+| `/stop` | Stop the answer Athena is working on, and any messages waiting their turn. |
+| `/retry` | Answer your last message again, say after changing how much Athena thinks. If it's already been answered, that answer is taken out of the conversation and memory first. While Athena's still answering, it stops first. |
+| `/think [on\|short\|off]` | How much the model thinks before answering: on, briefly (`short`), or not at all. With no choice, it says which it is, with buttons to change it. It's saved in `config.toml`. |
 | `/remember <fact>` | Save a fact directly. |
 | `/recall [query]` | Search memories, with similarity scores. With no query it shows the most recent. |
 | `/forget <id>` | Delete a memory. |
@@ -95,7 +98,7 @@ Then:
 
 A web page for Athena, on your iPhone or Mac. It has three tabs:
 
-- **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory.
+- **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory. Under Connections, **Thinking** switches the model's thinking on, short or off, as `/think` does.
 - **Memory:** search what Athena remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents).
 - **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
 
