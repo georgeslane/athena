@@ -2,8 +2,8 @@
 
 Only the user's text and the assistant's final reply are kept (not intermediate
 tool calls), which keeps prompts short. Messages are only deleted when you tell
-Athena to forget everything: /session, /reset and trimming just move the start of
-the window the model sees.
+Athena to forget everything, or when /retry answers the last one again: /session,
+/reset and trimming just move the start of the window the model sees.
 
 A session is everything since you last started one with /session (or from the
 dashboard). It applies to every chat, and usage statistics are counted per session.
@@ -125,6 +125,22 @@ class ConversationStore:
                 "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
                 [(chat_id, "user", user_text, now), (chat_id, "assistant", assistant_text, now)],
             )
+
+    def take_last(self, chat_id: str) -> Exchange | None:
+        """Delete the last message in a chat and the reply to it, if the model sees them, and return them:
+        for /retry, which answers it again."""
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT id, role, content, created_at FROM messages WHERE chat_id = ? AND id > ? "
+                "ORDER BY id DESC LIMIT 2",
+                (chat_id, self._window_start(chat_id)),
+            ).fetchall()
+            if len(rows) < 2 or rows[0][1] != "assistant" or rows[1][1] != "user":
+                return None
+            (answer_id, _, answer, created_at), (question_id, _, question, _) = rows
+            self._conn.execute("PRAGMA secure_delete = ON")  # overwrite what's deleted, rather than just unlink it
+            self._conn.execute("DELETE FROM messages WHERE id IN (?, ?)", (question_id, answer_id))
+        return Exchange(answer_id, chat_id, question, answer, created_at)
 
     def exchanges_after(self, message_id: int, limit: int = 32) -> list[Exchange]:
         """Up to ``limit`` exchanges whose reply came after ``message_id``, oldest first."""

@@ -11,18 +11,18 @@ from dataclasses import dataclass, field
 from dotenv import dotenv_values
 
 from pi_assistant.agent import Agent
-from pi_assistant.config import Config, parse_config
+from pi_assistant.config import THINKING, Config, parse_config
 from pi_assistant.dashboard import DashboardServer
 from pi_assistant.databases import Databases
 from pi_assistant.documents import DocumentIndex
-from pi_assistant.history import ConversationStore, Session
+from pi_assistant.history import ConversationStore, Exchange, Session
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.news import NewsReader
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
-from pi_assistant.settings import PROTECTED_SECRETS
+from pi_assistant.settings import PROTECTED_SECRETS, Settings
 from pi_assistant.stats import UsageStats
 from pi_assistant.status import StatusTracker
 from pi_assistant.status_api import StatusServer
@@ -175,6 +175,30 @@ class Services:
             finally:
                 self.applying = False
         self.rewarm.set()
+
+    def set_thinking(self, mode: str) -> bool:
+        """Have the model think before answering ("on"), not ("off"), or only briefly ("short"), from now on.
+
+        It's saved in config.toml, so it stays after a restart. False if there's no config.toml to save it in.
+        """
+        if mode not in THINKING:
+            raise ValueError(f"Thinking can be {', '.join(THINKING)}, not {mode!r}.")
+        settings = Settings(self.config.path, self.config.env_path)
+        if settings.editable:
+            settings.set_values({"llm.thinking": mode})
+        self.config.llm.thinking = mode  # type: ignore[assignment]
+        log.info("Thinking is now %s", mode)
+        return settings.editable
+
+    async def take_back_last_exchange(self, chat_id: str) -> Exchange | None:
+        """Take your last message in a chat and the reply to it out of the conversation, and out of memory,
+        to answer it again. None if the model doesn't see one, say because a new session has started."""
+        if self._indexer and not self._indexer.done():
+            await asyncio.wait({self._indexer})  # so the reply isn't added to memory just after it's taken out
+        exchange = self.history.take_last(chat_id)
+        if exchange:
+            self.memory.forget_conversation(exchange)
+        return exchange
 
     def new_session(self) -> Session:
         """Clear the conversation from the model's context, in every chat. Memories are kept."""

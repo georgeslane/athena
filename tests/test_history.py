@@ -70,3 +70,21 @@ def test_clearing_deletes_every_message_and_starts_a_session(tmp_path):
     assert store.exchanges_after(0)[0].id > last  # ids aren't reused, so nothing old can come back
     assert [m["content"] for m in store.load("a")] == ["new", "start"]
     store.close()
+
+
+def test_taking_back_the_last_exchange_to_answer_it_again(tmp_path):
+    store = ConversationStore(tmp_path / "h.db")
+    store.append_exchange("chat", "first", "one")
+    store.append_exchange("chat", "second", "two")
+    store.append_exchange("other", "elsewhere", "there")
+
+    taken = store.take_last("chat")
+    assert (taken.chat_id, taken.question, taken.answer) == ("chat", "second", "two")
+    assert [m["content"] for m in store.load("chat")] == ["first", "one"]
+    assert [e.question for e in store.exchanges_after(0)] == ["first", "elsewhere"]  # gone, not just hidden
+    assert len(store.load("other")) == 2
+
+    # Only what the model still sees: not from before a new session.
+    store.new_session()
+    assert store.take_last("chat") is None
+    assert [e.question for e in store.exchanges_after(0)] == ["first", "elsewhere"]

@@ -11,6 +11,7 @@ The page talks to Athena with JSON:
   GET    /api/overview          status, usage statistics, memory and connections
   GET    /api/status            what Athena is doing; ?wait=25&after=<version> waits for a change
   POST   /api/session           start a new session
+  POST   /api/thinking          {"mode": "on" | "short" | "off"}: how much the model thinks before answering
   POST   /api/forget            {"confirm": "forget"}: delete every memory
   GET    /api/tools             every tool, with its settings
   POST   /api/tools/<id>        change one: {"enabled", "fields", "secrets", "tools"}
@@ -202,6 +203,13 @@ class DashboardServer(Server):
             session = self.s.new_session()
             log.info("Dashboard: started session %d", session.id)
             return _json(self.overview())
+        if path == "/api/thinking" and method == "POST":
+            mode = _body(request).get("mode")
+            try:
+                self.s.set_thinking(mode)
+            except (ValueError, SettingsError) as exc:
+                raise HTTPError(400, str(exc)) from exc
+            return _json(self.overview())
         if path == "/api/forget" and method == "POST":
             if _body(request).get("confirm") != "forget":
                 raise HTTPError(400, 'To delete every memory, send {"confirm": "forget"}.')
@@ -358,7 +366,12 @@ class DashboardServer(Server):
             **self.status(),
             "session": {"id": session.id, "started": session.started, **(stats.summary(session.id) if stats else {})},
             "total": {"sessions": history.sessions_started(), **(stats.summary() if stats else {})},
-            "model": {"name": cfg.llm.model, **self._model},
+            "model": {
+                "name": cfg.llm.model,
+                "thinking": cfg.llm.thinking_now,
+                "short_thinking_tokens": cfg.llm.short_thinking_tokens,
+                **self._model,
+            },
             "memory": {
                 "facts": counts.get("fact", 0),
                 "documents": len(self.s.memory.store.document_sources()),

@@ -286,3 +286,170 @@ async def test_recall_shows_documents_by_path(config, memory, tmp_path):
     assert lines[0] == "Memories matching 'boiler service':"
     assert any(line.startswith("📄 ~/Documents/Boiler quote.md (") for line in lines)
     assert any(line.startswith("#1 (") and "serviced every March" in line for line in lines)
+
+
+def command_update(chat_id=1):
+    replies = []
+
+    async def reply_text(text, **kwargs):
+        replies.append(SimpleNamespace(text=text, kwargs=kwargs))
+
+    update = SimpleNamespace(
+        effective_message=SimpleNamespace(reply_text=reply_text),
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_user=SimpleNamespace(id=ME),
+    )
+    return update, replies
+
+
+def test_the_new_commands_are_in_the_menu(config):
+    names = {name for h in make_bot(config, None).build().handlers[0] if hasattr(h, "commands") for name in h.commands}
+    assert {"stop", "retry", "think"} <= names
+
+
+async def test_think_shows_and_changes_how_much_the_model_thinks(config):
+    bot = make_bot(config, None)
+    saved = []
+
+    def set_thinking(mode):
+        saved.append(mode)
+        config.llm.thinking = mode
+        return True
+
+    bot.s.set_thinking = set_thinking
+    ctx = SimpleNamespace(bot=FakeBot(), args=[])
+    update, replies = command_update()
+    await bot.cmd_think(update, ctx)
+    assert replies[-1].text == "Thinking is on: I think things through before answering, for as long as it takes."
+    buttons = replies[-1].kwargs["reply_markup"].inline_keyboard[0]
+    assert [b.text for b in buttons] == ["✓ On", "Short", "Off"]
+
+    edits, answers = [], []
+
+    async def answer(text=None):
+        answers.append(text)
+
+    async def edit_message_text(text, **kwargs):
+        edits.append((text, kwargs))
+
+    press = SimpleNamespace(callback_query=SimpleNamespace(data=buttons[1].callback_data, answer=answer))
+    press.callback_query.edit_message_text = edit_message_text
+    press.effective_user = SimpleNamespace(id=STRANGER)
+    await bot.on_think_button(press, ctx)
+    assert answers == ["Not allowed."] and saved == []
+
+    press.effective_user = SimpleNamespace(id=ME)
+    await bot.on_think_button(press, ctx)
+    text, kwargs = edits[-1]
+    assert saved == ["short"]
+    assert text == "Thinking is short: I think briefly before answering, for up to 1,000 tokens."
+    assert [b.text for b in kwargs["reply_markup"].inline_keyboard[0]] == ["On", "✓ Short", "Off"]
+
+    ctx.args = ["OFF"]
+    await bot.cmd_think(update, ctx)
+    assert saved[-1] == "off" and replies[-1].text.startswith("Thinking is off: I answer straight away")
+    ctx.args = ["lots"]
+    await bot.cmd_think(update, ctx)
+    assert replies[-1].text == "Usage: /think on, /think short or /think off" and saved[-1] == "off"
+
+    bot.s.set_thinking = lambda mode: setattr(config.llm, "thinking", mode)  # returns None: not saved
+    ctx.args = ["on"]
+    await bot.cmd_think(update, ctx)
+    assert replies[-1].text.endswith("Only until I restart: there's no config.toml to save it in.")
+
+
+async def test_stop_stops_the_answer_in_progress(config):
+    started = asyncio.Event()
+
+    async def respond(chat_id, text, confirm, note=None, channel=None):
+        started.set()
+        await asyncio.Event().wait()  # thinking for ever
+
+    bot = make_bot(config, respond)
+    ctx = SimpleNamespace(bot=FakeBot(), args=[])
+    answering = asyncio.create_task(bot.on_text(text_update(ME, "think hard"), ctx))
+    await asyncio.wait_for(started.wait(), 2)
+
+    update, replies = command_update()
+    await bot.cmd_stop(update, ctx)
+    await asyncio.wait_for(answering, 2)
+    assert replies[-1].text == "Stopped. Send /retry to have me try again."
+    assert ctx.bot.sent == []  # no answer, and no error either
+
+    await bot.cmd_stop(update, ctx)
+    assert replies[-1].text == "I'm not working on anything."
+
+
+async def test_stop_while_waiting_for_your_approval(config):
+    async def respond(chat_id, text, confirm, note=None, channel=None):
+        await confirm("delete_note", {"name": "shopping"})
+        return AgentResult(text="Never sent")
+
+    bot = make_bot(config, respond)
+    ctx = SimpleNamespace(bot=FakeBot(), args=[])
+    answering = asyncio.create_task(bot.on_text(text_update(ME, "delete my shopping note"), ctx))
+    while not ctx.bot.sent:
+        await asyncio.sleep(0.01)
+    prompt = ctx.bot.sent[0]
+
+    await bot.cmd_stop(command_update()[0], ctx)
+    await asyncio.wait_for(answering, 2)
+    assert prompt.edits == ["Stopped: <b>delete_note</b>"] and len(ctx.bot.sent) == 1
+    upd, answers = button_update(ME, prompt.kwargs["reply_markup"].inline_keyboard[0][0].callback_data)
+    await bot.on_button(upd, ctx)
+    assert answers == ["This request has expired."]
+
+
+async def test_retry_stops_and_asks_again(config):
+    asked = []
+
+    async def respond(chat_id, text, confirm, note=None, channel=None):
+        asked.append(text)
+        if len(asked) == 1:
+            await asyncio.Event().wait()  # the first time it never finishes
+        return AgentResult(text=f"Answer {len(asked)}", saved=True)
+
+    async def take_back(chat_id):
+        raise AssertionError("an answer that wasn't given isn't taken back")
+
+    bot = make_bot(config, respond)
+    bot.s.take_back_last_exchange = take_back
+    ctx = SimpleNamespace(bot=FakeBot(), args=[])
+    answering = asyncio.create_task(bot.on_text(text_update(ME, "what's 2 + 2?"), ctx))
+    while not asked:
+        await asyncio.sleep(0.01)
+
+    await bot.cmd_retry(command_update()[0], ctx)  # while it's still working on it
+    await asyncio.wait_for(answering, 2)
+    assert asked == ["what's 2 + 2?", "what's 2 + 2?"]
+    assert [m.text for m in ctx.bot.sent] == ["🔁 Trying again: what's 2 + 2?", "Answer 2"]
+
+
+async def test_retry_takes_back_the_last_answer_and_asks_again(config):
+    asked, taken = [], []
+
+    async def respond(chat_id, text, confirm, note=None, channel=None):
+        asked.append(text)
+        return AgentResult(text=f"Answer {len(asked)}", saved=True)
+
+    async def take_back(chat_id):
+        taken.append(chat_id)
+        return SimpleNamespace(question="What's the weather tomorrow?")
+
+    bot = make_bot(config, respond)
+    bot.s.take_back_last_exchange = take_back
+    ctx = SimpleNamespace(bot=FakeBot(), args=[])
+    await bot.on_text(text_update(ME, "What's the weather tomorrow?"), ctx)
+    await bot.cmd_retry(command_update()[0], ctx)
+    assert taken == ["1"] and asked == ["What's the weather tomorrow?"] * 2
+    assert ctx.bot.sent[-1].text == "Answer 2"
+
+    # After a restart, it's the last answer the model sees; in a new session, there isn't one.
+    async def nothing(chat_id):
+        return None
+
+    fresh = make_bot(config, respond)
+    fresh.s.take_back_last_exchange = nothing
+    update, replies = command_update()
+    await fresh.cmd_retry(update, ctx)
+    assert replies[-1].text == "There's nothing to try again in this session."

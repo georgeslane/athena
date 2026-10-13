@@ -372,6 +372,12 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tool-bar .track span { display: block; height: 100%; border-radius: 3px; background: color-mix(in srgb, var(--accent) 80%, var(--surface)); }
 .empty { color: var(--muted); font-size: 14px; padding: 6px 0; }
 
+/* A choice of a few, inline, such as thinking on, short or off. */
+.switcher { display: inline-flex; flex: none; gap: 2px; padding: 2px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); }
+.switcher button { border: 0; background: none; min-height: 26px; padding: 2px 10px; border-radius: 7px; font: inherit; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.switcher button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.switcher button:disabled { cursor: default; }
+
 .segmented { display: none; }
 @media (max-width: 719px) {
   /* On a phone, one of "This session" and "All time" at a time. */

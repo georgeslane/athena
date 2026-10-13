@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import re
 import time
@@ -57,6 +58,25 @@ def strip_reasoning(text: str) -> str:
     return text.strip()
 
 
+def request_options(cfg: LLMConfig) -> dict[str, Any]:
+    """What goes in each request besides the standard fields: extra_body, with the thinking setting.
+
+    Thinking is switched with the chat template's enable_thinking, which oMLX, vLLM and SGLang
+    pass on, and "short" also sets oMLX's thinking_budget.
+    """
+    body = copy.deepcopy(cfg.extra_body)
+    if cfg.thinking is None:
+        return body
+    on = cfg.thinking != "off"
+    body["chat_template_kwargs"] = {**(body.get("chat_template_kwargs") or {}), "enable_thinking": on}
+    if "enable_thinking" in body:  # oMLX's shorthand for the same, which mustn't disagree with it
+        body["enable_thinking"] = on
+    body.pop("thinking_budget", None)
+    if cfg.thinking == "short":
+        body["thinking_budget"] = cfg.short_thinking_tokens
+    return body
+
+
 def parse_tool_calls(raw_calls: list[Any] | None) -> list[ToolCall]:
     calls: list[ToolCall] = []
     for i, tc in enumerate(raw_calls or []):
@@ -103,8 +123,8 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        if self.cfg.extra_body:
-            kwargs["extra_body"] = self.cfg.extra_body
+        if body := request_options(self.cfg):
+            kwargs["extra_body"] = body
 
         started = time.monotonic()
         resp = await self._client.chat.completions.create(**kwargs)

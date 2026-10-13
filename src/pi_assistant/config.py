@@ -29,6 +29,9 @@ class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+THINKING = ("on", "short", "off")  # how much a model that can think does, before answering
+
+
 class LLMConfig(_Section):
     base_url: str = "http://localhost:8000/v1"
     model: str
@@ -39,12 +42,27 @@ class LLMConfig(_Section):
     # Passed through untouched in the request body, for server-specific options
     # such as {"chat_template_kwargs": {"enable_thinking": false}}.
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    # Whether a model that can think does so before answering: "on", "off", or "short", which
+    # stops it after short_thinking_tokens (oMLX's thinking_budget). /think in Telegram and the
+    # dashboard change it. Unset, it's as the model server, or extra_body, has it.
+    thinking: Literal["on", "short", "off"] | None = None
+    short_thinking_tokens: int = Field(default=1000, ge=1)
     # At startup, after each reply, after /reload and then every this many minutes, have
     # the model server read the system prompt, tools and your chat, so its cache is ready
     # before your next message. When it's already cached this takes a moment. 0 turns it off.
     warm_up_minutes: float = 10.0
     # The most the model can read at once, in tokens, for the dashboard. 0: ask the model server.
     context_window: int = 0
+
+    @property
+    def thinking_now(self) -> Literal["on", "short", "off"]:
+        """Thinking as requests have it: as set, else as extra_body has it, else on (models think if they can)."""
+        if self.thinking:
+            return self.thinking
+        kwargs = self.extra_body.get("chat_template_kwargs") or {}
+        if False in (kwargs.get("enable_thinking"), self.extra_body.get("enable_thinking")):
+            return "off"
+        return "short" if self.extra_body.get("thinking_budget") else "on"
 
 
 class TelegramConfig(_Section):

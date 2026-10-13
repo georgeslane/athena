@@ -105,6 +105,54 @@ async def test_a_new_session_and_forgetting_everything(services):
     assert services.history.load("chat")[-1]["content"] == "OK."
 
 
+async def test_thinking_is_changed_and_kept_in_config_toml(services):
+    assert services.config.llm.thinking_now == "on"
+    assert services.set_thinking("off") is True
+    assert services.config.llm.thinking == "off"
+    # Added to [llm], with the rest as it was.
+    added = 'model = "test-model"\nthinking = "off"\n'
+    assert services.config.path.read_text() == CONFIG.replace('model = "test-model"\n', added)
+    assert load_config(services.config.path).llm.thinking == "off"  # after a restart too
+    services.set_thinking("short")
+    assert load_config(services.config.path).llm.thinking == "short"
+    with pytest.raises(ValueError, match="on, short, off"):
+        services.set_thinking("lots")
+    assert services.config.llm.thinking == "short"
+
+
+async def test_thinking_without_a_config_toml_lasts_until_a_restart(config):
+    services = build_services(config)
+    try:
+        assert services.set_thinking("off") is False and config.llm.thinking == "off"
+    finally:
+        await services.close()
+
+
+async def test_taking_back_the_last_reply_takes_it_out_of_memory_too(services):
+    await services.agent.respond("chat", "My locker number is 42")
+    await services.agent.respond("chat", "And my bike lock code is 1234")
+    for _ in range(100):
+        if services.memory.store.count().get("conversation") == 2:
+            break
+        await asyncio.sleep(0.02)
+
+    taken = await services.take_back_last_exchange("chat")
+    assert taken.question == "And my bike lock code is 1234"
+    assert [e.text for e in services.memory.store.recent(kind="conversation")] == [
+        "User: My locker number is 42\nAssistant: OK."
+    ]
+    assert services.history.load("chat")[-1]["content"] == "OK." and len(services.history.load("chat")) == 2
+
+    # Straight after a reply, before it's been added to memory: it isn't added afterwards.
+    await services.agent.respond("chat", "My bike is blue")
+    await services.take_back_last_exchange("chat")
+    await asyncio.sleep(0.2)
+    assert services.memory.store.count().get("conversation") == 1
+
+    services.new_session()
+    assert await services.take_back_last_exchange("chat") is None
+
+
 # -- the model's context window ------------------------------------------------------------------------
 
 
