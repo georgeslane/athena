@@ -25,7 +25,8 @@ STUBS = {
     + 'if [ "$1" = pull ] && [ -e "$STUB_FILES/ollama-too-old" ]; then\n'
     + '  echo "Error: pull model manifest: 412: this model requires a newer version of Ollama"; exit 1\nfi\n'
     + 'if [ "$1" = pull ] && [ "$2" = missing ]; then echo "Error: file does not exist"; exit 1; fi\n',
-    "uv": RECORD + 'exit "${UV_EXIT:-0}"\n',
+    # `uv run pi-assistant embeddings where` says EMBEDDINGS_FROM, Ollama on the Pi unless it's set.
+    "uv": RECORD + 'if [ "$4" = where ]; then echo "${EMBEDDINGS_FROM:-ollama}"; exit 0; fi\nexit "${UV_EXIT:-0}"\n',
     # `dpkg -s bubblewrap` says it's installed only if BWRAP_INSTALLED is set.
     "dpkg": RECORD + '[ -n "$BWRAP_INSTALLED" ]\n',
     "uvx": RECORD,
@@ -149,6 +150,7 @@ def test_switching_the_embeddings_model(sandbox):
     result, calls = run("switch-embeddings.sh", "new-model")
     assert result.returncode == 0, result.stderr
     assert calls == [
+        "uv run pi-assistant embeddings where",
         "ollama pull new-model",
         "sudo systemctl stop pi-assistant",
         "uv run pi-assistant embeddings use new-model",
@@ -169,7 +171,7 @@ def test_a_model_that_wont_download_changes_nothing(sandbox):
     _, _, run = sandbox
     result, calls = run("switch-embeddings.sh", "missing")
     assert result.returncode == 1 and "nothing was changed" in result.stderr
-    assert calls == ["ollama pull missing"]  # Athena wasn't stopped
+    assert calls == ["uv run pi-assistant embeddings where", "ollama pull missing"]  # Athena wasn't stopped
 
 
 @pytest.mark.parametrize("answer", ["y\n", "n\n", ""])
@@ -179,15 +181,15 @@ def test_an_ollama_too_old_for_the_model_is_updated_if_you_say_so(sandbox, answe
     result, calls = run("switch-embeddings.sh", "new-model", answer=answer)
     if answer == "y\n":
         assert result.returncode == 0, result.stderr
-        assert calls[:3] == [
+        assert calls[1:4] == [
             "ollama pull new-model",
             "curl -fsSL https://ollama.com/install.sh",
             "curl -sf http://127.0.0.1:11434/api/version",
         ]
-        assert calls[3:5] == ["ollama pull new-model", "sudo systemctl stop pi-assistant"]
+        assert calls[4:6] == ["ollama pull new-model", "sudo systemctl stop pi-assistant"]
     else:
         assert result.returncode == 1 and "Nothing was changed" in result.stderr
-        assert calls == ["ollama pull new-model"]
+        assert calls == ["uv run pi-assistant embeddings where", "ollama pull new-model"]
 
 
 def test_switching_to_a_model_on_the_mac(sandbox):
@@ -197,6 +199,19 @@ def test_switching_to_a_model_on_the_mac(sandbox):
     assert calls == [  # nothing to download on the Pi, and Ollama there is left as it is
         "sudo systemctl stop pi-assistant",
         "uv run pi-assistant embeddings use embeddinggemma-2-bf16 --on-mac",
+        "sudo systemctl start pi-assistant",
+    ]
+
+
+def test_switching_models_on_the_mac(sandbox):
+    """Embeddings already from the Mac, such as bf16 to 8-bit there: nothing for Ollama to download."""
+    _, _, run = sandbox
+    result, calls = run("switch-embeddings.sh", "embeddinggemma-2-8bit", EMBEDDINGS_FROM="server")
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        "uv run pi-assistant embeddings where",
+        "sudo systemctl stop pi-assistant",
+        "uv run pi-assistant embeddings use embeddinggemma-2-8bit",
         "sudo systemctl start pi-assistant",
     ]
 

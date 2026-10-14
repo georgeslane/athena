@@ -250,6 +250,14 @@ async def _embeddings_use(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _embeddings_where(args: argparse.Namespace) -> int:
+    """Print "ollama" if Ollama on the Pi serves the embeddings, so a new model is downloaded into it
+    first, or "server" if another server does, such as oMLX on the Mac, which has its own models."""
+    cfg = load_config(args.config)
+    print("ollama" if _is_local_ollama(cfg.embeddings.base_url) else "server")
+    return 0
+
+
 def _embeddings_server(cfg: Config, on_mac: bool) -> EmbeddingsConfig:
     """The embeddings settings to test or switch to: as configured, or with the model's server (oMLX on the Mac)."""
     if not on_mac:
@@ -331,6 +339,7 @@ def main(argv: list[str] | None = None) -> None:
     p_use.add_argument("model")
     p_use.add_argument("--on-mac", action="store_true", help=f"a model {on_mac}")
     p_use.add_argument("--yes", "-y", action="store_true", help="don't ask first")
+    emb.add_parser("where", help="where embeddings come from: ollama (on the Pi) or server, for switch-embeddings.sh")
     p_eval = sub.add_parser("eval", help="compare models on tool calling")
     p_eval.add_argument("--model", "-m", action="append", help="model id (repeatable; default: the configured model)")
     p_eval.add_argument("--repeat", type=int, default=1, help="run each case N times")
@@ -352,7 +361,7 @@ def main(argv: list[str] | None = None) -> None:
         "eval": _eval,
     }
     if command == "embeddings":
-        handlers["embeddings"] = _embeddings_use if args.action == "use" else _embeddings_test
+        handlers["embeddings"] = {"use": _embeddings_use, "where": _embeddings_where}.get(args.action, _embeddings_test)
     try:
         if command == "run":
             code = cmd_run(args)

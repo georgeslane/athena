@@ -246,6 +246,14 @@ def test_switching_after_changing_config_toml_by_hand(athena, embeddings_server,
     conn.close()
 
 
+def test_saying_where_embeddings_come_from(athena, capsys):
+    assert _run(athena, "where") == 0
+    assert capsys.readouterr().out == "server\n"  # the test's embeddings server, not Ollama on the Pi
+    athena.write_text(CONFIG.format(url="http://127.0.0.1:11434/v1", model="fake-a", dims=DIMS))
+    assert _run(athena, "where") == 0
+    assert capsys.readouterr().out == "ollama\n"
+
+
 def test_testing_models_from_the_command_line(athena, capsys):
     assert _run(athena, "test", "-m", "fake-a", "-m", "fake-b") == 0
     out = capsys.readouterr().out
