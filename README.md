@@ -409,14 +409,14 @@ The Mac does this much faster than the Pi could. Indexing a folder of documents 
 
 ### Changing the embeddings model
 
-Every memory is stored as a vector from the embeddings model, and vectors from different models can't be compared, so switching means re-embedding all of them. Each model also scores distances on its own scale, so `recall_max_distance` and `duplicate_distance` change with it. One script does all of this:
+Every memory is stored as a vector from the embeddings model, and vectors from different models can't be compared, so switching means re-embedding all of them. That includes another quantisation of the same model: a 4-bit build's vectors drift enough from the original's to throw off the cut-offs. Each model also scores distances on its own scale, so `recall_max_distance` and `duplicate_distance` change with it. One script does all of this:
 
 ```bash
-bash scripts/switch-embeddings.sh embeddinggemma-2-bf16 --on-mac   # a model on the model's server (oMLX)
-bash scripts/switch-embeddings.sh MODEL                            # a model in Ollama on the Pi
+bash scripts/switch-embeddings.sh embeddinggemma-2-8bit           # another model where embeddings come from now
+bash scripts/switch-embeddings.sh embeddinggemma-2-bf16 --on-mac  # moving embeddings to the model's server (oMLX)
 ```
 
-For a model in Ollama on the Pi, it downloads it first, offering to update Ollama if it's too old for it. Then it stops Athena, and tests the new model against the current one on 40 questions about made-up memories. It shows how often each finds the right memory, how fast it is and the cut-offs that suit it, then says what it will change and asks. If you agree, it sets the model and cut-offs in `config.toml` (keeping a copy in `config.toml.bak`) and re-embeds every memory. If that fails part way, nothing changes. Athena starts again either way.
+For a model on the Mac, download it in oMLX first. For a model in Ollama on the Pi, the script downloads it, offering to update Ollama if it's too old for it. Then it stops Athena, and tests the new model against the current one on 40 questions about made-up memories. It shows how often each finds the right memory, how fast it is and the cut-offs that suit it, then says what it will change and asks. If you agree, it sets the model and cut-offs in `config.toml` (keeping a copy in `config.toml.bak`) and re-embeds every memory. If that fails part way, nothing changes. Athena starts again either way.
 
 To test models without switching, run `uv run pi-assistant embeddings test -m MODEL -m ANOTHER`, with `--on-mac` for models on the model's server. Avoid `float16` builds, which can return broken vectors: Athena refuses to save those. If you change `dimensions`, start a fresh database instead.
 

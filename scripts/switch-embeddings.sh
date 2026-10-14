@@ -3,12 +3,15 @@
 # what would change. If you agree, it re-embeds every memory with it. Athena is stopped while
 # that runs and started again afterwards, whatever happens.
 #
-#   bash scripts/switch-embeddings.sh embeddinggemma-2-bf16 --on-mac   # served by oMLX on the Mac
-#   bash scripts/switch-embeddings.sh embeddinggemma                    # Ollama on the Pi, downloaded first
+#   bash scripts/switch-embeddings.sh embeddinggemma-2-8bit             # from wherever embeddings come from now
+#   bash scripts/switch-embeddings.sh embeddinggemma-2-bf16 --on-mac    # moving them to oMLX on the Mac
+#
+# With Ollama on the Pi, the model is downloaded first. A server elsewhere, such as oMLX on the
+# Mac, has its own models: download it there.
 set -euo pipefail
 
 main() {
-  local model="" on_mac=""
+  local model="" on_mac="" download=""
   for arg in "$@"; do
     case "$arg" in
       --on-mac) on_mac=1 ;;
@@ -22,8 +25,10 @@ main() {
   PULL_LOG="$(mktemp)"
   trap cleanup EXIT
 
-  # A model on the Mac is already there: oMLX downloads it. One on the Pi comes from Ollama.
-  if [ -z "$on_mac" ] && ! pull "$model"; then
+  if [ -z "$on_mac" ] && [ "$(uv run pi-assistant embeddings where)" = ollama ]; then
+    download=1
+  fi
+  if [ -n "$download" ] && ! pull "$model"; then
     if ! grep -qi "newer version" "$PULL_LOG"; then
       echo "Couldn't download $model, so nothing was changed." >&2
       exit 1
@@ -46,7 +51,7 @@ main() {
   if ! uv run pi-assistant embeddings use "$model" ${on_mac:+--on-mac}; then
     exit 1
   fi
-  if [ -z "$on_mac" ]; then
+  if [ -n "$download" ]; then
     # Ollama keeps models loaded (OLLAMA_KEEP_ALIVE=-1): restarting it lets go of the old one.
     sudo systemctl restart ollama
   fi
