@@ -2,6 +2,7 @@
 
 import asyncio
 import gzip
+import json
 import sys
 import time
 from pathlib import Path
@@ -733,3 +734,60 @@ async def test_skills_from_the_dashboard(athena):
         listing = (await http.delete(f"/api/skills/{skill['id']}")).json()
         assert listing["skills"] == [] and athena.agent.prompt() == athena.agent.system_prompt
         assert (await http.delete(f"/api/skills/{skill['id']}")).status_code == 400
+
+
+# -- the board: projects handed to Claude ------------------------------------------------------------------
+
+
+async def test_the_board_from_the_dashboard(athena, tmp_path):
+    from test_claude_projects import REPO, STORIES, Clock, FakeGitHub
+
+    from pi_assistant.claude_projects import BoardStore, ClaudeProjects, ClaudeProjectsConfig
+
+    async with client(athena) as http:
+        off = await http.get("/api/projects")
+        assert off.status_code == 409 and "switched off" in off.json()["error"]
+
+        github = FakeGitHub()
+        github.commit("main", {"CLAUDE.md": "How to work"})
+        cfg = ClaudeProjectsConfig(enabled=True, repo=REPO, token="good-token")
+        projects = ClaudeProjects(cfg, BoardStore(athena.config.db_path), http=github.client(), clock=Clock(github))
+        athena.builtins.running["claude_projects"] = projects
+        said = []
+
+        class Telegram:
+            chat_id = "111"
+
+            async def tell(self, text):
+                said.append(text)
+
+        athena.channel = Telegram()
+        project = await projects.hand_over({"title": "Bank statements", "summary": "Sum it up.", "stories": STORIES})
+        board = (await http.post("/api/projects/refresh", json={})).json()
+        assert board["repo"] == REPO and board["error"] is None and board["poll_minutes"] == 30
+        (shown,) = board["projects"]
+        assert (shown["title"], shown["status"], shown["number"], [s["id"] for s in shown["stories"]]) == (
+            "Bank statements",
+            "new",
+            1,
+            ["S1", "S2"],
+        )
+
+        # Restart, from the board.
+        board = (await http.post("/api/projects/restart", json={"folder": project.folder})).json()
+        assert github.events[-2:] == [("unlabeled", 1, "claude"), ("labeled", 1, "claude")]
+        assert (await http.post("/api/projects/restart", json={"folder": "nope"})).status_code == 400
+
+        branch = f"project/{project.folder}"
+        github.commit(branch, {f"{project.folder}/status.json": json.dumps({"status": "done", "summary": "Tested."})})
+        board = (await http.post("/api/projects/refresh", json={})).json()
+        assert board["projects"][0]["status"] == "done"
+        assert said == [f"✅ Claude has finished “Bank statements”: Tested. Merge it when you're happy.\n{project.url}"]
+        # In your chat too, so you can ask Athena about it.
+        assert athena.history.load("111")[-1] == {"role": "assistant", "content": said[0]}
+        assert (await http.get("/api/projects")).json()["projects"][0]["status"] == "done"
+
+        github.token = "revoked"
+        board = (await http.post("/api/projects/refresh", json={})).json()
+        assert board["error"].startswith("GitHub refused the token") and board["projects"]  # the last board stays
+        assert (await http.get("/api/projects/refresh")).status_code == 405

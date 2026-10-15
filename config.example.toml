@@ -121,6 +121,19 @@ environment = "live"                   # or "demo" for the practice account, whi
 # can't do yet, and suggest them (see README, "Tasks"). You add any you want on the dashboard.
 enabled = true
 
+[claude_projects]
+# Coding projects Athena hands to Claude as pull requests in a private GitHub repo, shown on the
+# dashboard's Board tab (see README, "Projects for Claude"). Handing one over always asks you first.
+enabled = false
+repo = "your-name/zeus-solutions"      # owner/name; it must be private, with CLAUDE.md on main
+branch = "main"
+label = "claude"                       # what your routine's GitHub trigger looks for
+token = "${PROJECTS_GITHUB_TOKEN}"     # for that repo only: Contents and Pull requests, read and write
+poll_minutes = 30                      # how often the board reads the repo
+start_minutes = 30                     # no status.json this long after the label: Claude didn't start
+stalled_minutes = 120                  # no push for this long: Claude stopped part way
+max_restarts = 6                       # starting it again, waiting longer each time, then telling you
+
 [tasks]
 # Things Athena does by itself, now or on a schedule, then messages you about (see README,
 # "Tasks"). They wait while you're chatting, and stop for you while they run.

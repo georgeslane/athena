@@ -140,6 +140,8 @@ class Services:
         self._apply_lock = asyncio.Lock()
         self._indexer: asyncio.Task[None] | None = None
         self._index_again = False
+        self._projects: asyncio.Task[None] | None = None  # reads Claude's projects now and then
+        self._projects_lock = asyncio.Lock()
         self.agent.on_saved = self._conversation_saved
 
     def approve_tools(self, server: str, tools: dict[str, str]) -> None:
@@ -159,6 +161,7 @@ class Services:
             self.tasks.start()
         if self.alerts:
             self.alerts.start()
+        self._projects = asyncio.create_task(self._watch_projects(), name="claude-projects")
 
     async def notify(self, text: str) -> bool:
         """Tell you something you didn't ask about, such as what a task found. Logged if there's no channel.
@@ -185,7 +188,37 @@ class Services:
         task = self.tasks.store.get(int(chat_id[5:])) if self.tasks and chat_id[5:].isdigit() else None
         return f"task “{task.title}”" if task else "a task"
 
+    # -- projects handed to Claude (claude_projects.py) ------------------------------------------
+
+    async def check_projects(self) -> dict[str, Any] | None:
+        """Read Claude's projects from GitHub now, start Claude again where it's stopped, and tell you what's
+        changed: a project done, Claude stuck, or not working. The board, or None if they're switched off."""
+        projects = self.builtins.get("claude_projects")
+        if projects is None:
+            return None
+        async with self._projects_lock:
+            try:
+                news = await projects.refresh()
+            except Exception as exc:  # the board shows the problem; try again next time
+                log.warning("Couldn't read Claude's projects: %s", exc)
+                news = []
+        for text in news:
+            if await self.notify(text) and self.channel:  # in your chat too, so you can reply to it
+                self.history.append_exchange(self.channel.chat_id, "(Claude's projects changed.)", text)
+        return projects.board()
+
+    async def _watch_projects(self) -> None:
+        await asyncio.sleep(5)  # after Telegram's started, to tell you anything
+        while True:
+            await self.check_projects()
+            projects = self.builtins.get("claude_projects")
+            await asyncio.sleep(max(1.0, projects.cfg.poll_minutes if projects else 5.0) * 60)
+
     async def close(self) -> None:
+        if self._projects:
+            self._projects.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._projects
         if self.alerts:
             await self.alerts.stop()
         if self.tasks:
