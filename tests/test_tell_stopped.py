@@ -85,6 +85,8 @@ head -n 1 "$STATES" | tr '|' '\\n'
 if [ "$(wc -l < "$STATES")" -gt 1 ]; then tail -n +2 "$STATES" > "$STATES.next" && mv "$STATES.next" "$STATES"; fi
 """
 GAVE_UP = "ActiveState=failed|SubState=failed|Result=start-limit-hit"
+FAILED = "ActiveState=failed|SubState=failed|Result=exit-code"
+STOPPED = "ActiveState=inactive|SubState=dead|Result=success"
 RESTARTING = "ActiveState=activating|SubState=auto-restart|Result=exit-code"
 RUNNING = "ActiveState=active|SubState=running|Result=success"
 
@@ -105,6 +107,7 @@ def run(repo: Path, tmp_path: Path, telegram: FakeTelegram, journal: str = JOURN
             "STATES": str(tmp_path / "states"),
             "POLL_SECONDS": "0.01",
             "STEADY_SECONDS": "0.1",
+            "HELD_SECONDS": "0.1",
             **env,
         },
         capture_output=True,
@@ -115,8 +118,9 @@ def run(repo: Path, tmp_path: Path, telegram: FakeTelegram, journal: str = JOURN
 
 def test_it_tells_you_why_with_the_end_of_the_log_and_no_secrets(tmp_path, telegram):
     repo = athena_repo(tmp_path, CONFIG)
-    # Started at the first failure, it waits while systemd restarts Athena, until systemd gives up.
-    result = run(repo, tmp_path, telegram, states=(RESTARTING, RESTARTING, GAVE_UP))
+    # Started at the first failure, it waits while systemd restarts Athena, until systemd gives up. On newer
+    # systemd, Athena shows as failed for a moment before each restart: that doesn't count.
+    result = run(repo, tmp_path, telegram, states=(FAILED, RESTARTING, FAILED, RESTARTING, GAVE_UP))
     assert result.returncode == 0, result.stderr
     ((path, body),) = telegram.sent
     assert path == f"/bot{TOKEN}/sendMessage" and body["chat_id"] == "42"
@@ -135,6 +139,19 @@ def test_a_blip_it_recovers_from_says_nothing(tmp_path, telegram):
     repo = athena_repo(tmp_path, CONFIG)
     result = run(repo, tmp_path, telegram, states=(RESTARTING, RUNNING))
     assert result.returncode == 0 and "started again by itself" in result.stdout and telegram.sent == []
+
+
+def test_stopped_without_an_error_says_nothing(tmp_path, telegram):
+    repo = athena_repo(tmp_path, CONFIG)
+    result = run(repo, tmp_path, telegram, states=(RESTARTING, STOPPED))
+    assert result.returncode == 0 and "stopped without an error" in result.stdout and telegram.sent == []
+
+
+def test_failed_for_good_without_hitting_the_limit(tmp_path, telegram):
+    repo = athena_repo(tmp_path, CONFIG)
+    result = run(repo, tmp_path, telegram, states=(FAILED,), MONITOR_SERVICE_RESULT="exit-code")
+    assert result.returncode == 0, result.stderr
+    assert telegram.sent[0][1]["text"].startswith("🛑 Athena has stopped: it stopped with an error.")
 
 
 def test_stopping_and_restarting_for_a_long_time_is_worth_saying(tmp_path, telegram):

@@ -4,7 +4,10 @@ systemd runs this (deploy/pi-assistant-stopped.service) as soon as pi-assistant.
 when it's going to restart it. So first it watches what happens next:
   - systemd gives up, after five failed starts in ten minutes: it tells you, and why.
   - Athena runs steadily again, for STEADY_SECONDS: it was a blip, so it says nothing.
+  - Athena's stopped without an error, say by you or an update: it says nothing.
   - Neither, after SETTLE_SECONDS: Athena keeps stopping and restarting, and it tells you that.
+On systemd 254 and later, a service about to be restarted shows as failed for a moment, so failed only
+counts once systemd says it's given up (start-limit-hit), or it's stayed failed for HELD_SECONDS.
 While this runs, systemd doesn't start it again for the failures that follow.
 
 It uses only Python's own library, with the system's Python, so it works even when Athena's
@@ -34,6 +37,7 @@ LOG_LINES, LINE_CHARS = 12, 300
 STEADY_SECONDS = float(os.environ.get("STEADY_SECONDS", 60))
 SETTLE_SECONDS = float(os.environ.get("SETTLE_SECONDS", 900))  # and still restarting after this long isn't.
 POLL_SECONDS = float(os.environ.get("POLL_SECONDS", 2))
+HELD_SECONDS = float(os.environ.get("HELD_SECONDS", 30))  # longer than RestartSec in pi-assistant.service
 TOKEN_LIKE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b")
 ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # systemd's own lines in the log, which say nothing the message doesn't.
@@ -113,20 +117,27 @@ def unit_state(unit: str) -> dict[str, str]:
 
 
 def settle(unit: str) -> tuple[str, str]:
-    """Wait to see what becomes of the unit: ("failed", why), ("running", ""), or ("restarting", "")."""
-    deadline, running_since = time.monotonic() + SETTLE_SECONDS, None
+    """Wait to see what becomes of the unit: ("failed", why), ("running", ""), ("stopped", "") without an
+    error, or ("restarting", "") if it's still at it."""
+    deadline = time.monotonic() + SETTLE_SECONDS
+    seen, since = "", time.monotonic()  # what it's been doing, and since when
     while time.monotonic() < deadline:
         state = unit_state(unit)
         if not state:  # systemctl can't be asked: say what systemd said when it started this
             return "failed", os.environ.get("MONITOR_SERVICE_RESULT", "")
-        if state.get("ActiveState") == "failed":
-            return "failed", state.get("Result", "")
-        if (state.get("ActiveState"), state.get("SubState")) == ("active", "running"):
-            running_since = running_since or time.monotonic()
-            if time.monotonic() - running_since >= STEADY_SECONDS:
-                return "running", ""
-        else:
-            running_since = None
+        active, result = state.get("ActiveState"), state.get("Result", "")
+        if active == "failed" and result == "start-limit-hit":
+            return "failed", result
+        now = "running" if (active, state.get("SubState")) == ("active", "running") else active or ""
+        if now != seen:
+            seen, since = now, time.monotonic()
+        held = time.monotonic() - since
+        if seen == "running" and held >= STEADY_SECONDS:
+            return "running", ""
+        if seen == "failed" and held >= HELD_SECONDS:
+            return "failed", result
+        if seen == "inactive" and held >= HELD_SECONDS:
+            return "stopped", ""
         time.sleep(POLL_SECONDS)
     return "restarting", ""
 
@@ -166,6 +177,9 @@ def main() -> int:
     became, result = settle(unit)
     if became == "running":
         print("Athena failed, then started again by itself: nothing to tell you")
+        return 0
+    if became == "stopped":
+        print("Athena was stopped without an error: nothing to tell you")
         return 0
     secrets = [v for v in read_env(REPO / ".env").values() if len(v) >= 6] + [token]
     text = hide(message(became, result, log_lines(unit)), secrets)
