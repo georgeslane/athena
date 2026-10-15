@@ -235,6 +235,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
   text-decoration: none;
 }
 .tab svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tab { position: relative; }
+/* How many of Athena's suggestions are waiting for you, on the Memory and Skills tabs. */
+.tab-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--approval); color: var(--on-accent); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
 .tab[aria-current="page"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 @media (prefers-color-scheme: dark) { .tab[aria-current="page"] { background: var(--border); } }
 
@@ -282,6 +285,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .tab { flex: 1; flex-direction: column; gap: 2px; padding: 5px 0 3px; font-size: 11px; }
   .tab svg { width: 23px; height: 23px; }
   .tab[aria-current="page"] { background: none; box-shadow: none; color: var(--accent); }
+  .tab-count { position: absolute; top: 1px; left: calc(50% + 6px); }
   .top .pill { margin-left: auto; }
 }
 
@@ -666,3 +670,29 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .task-form { display: grid; gap: 12px; min-width: 0; }
 .task-form fieldset { border: 0; padding: 0; margin: 0; }
 .task-examples { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* Suggestions from Athena, to approve, change or discard: memories and skills. */
+.card.review { border-color: color-mix(in srgb, var(--approval) 45%, var(--border)); }
+.review-list { display: grid; gap: 10px; margin-top: 12px; }
+.review-item { display: grid; gap: 8px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); min-width: 0; }
+.review-item .task-head h3 { font-size: 15.5px; margin: 0; overflow-wrap: anywhere; }
+.review-text { font: inherit; font-size: 15px; width: 100%; min-height: 44px; resize: vertical; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--text); overflow: hidden; }
+.review-text:focus { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 0; border-color: var(--accent); }
+.review-why { font-size: 14px; margin: 0; overflow-wrap: anywhere; }
+.review-change { font-size: 13.5px; margin: 0; overflow-wrap: anywhere; }
+.review-change del { color: var(--muted); }
+.review-change ins { text-decoration: none; color: var(--idle); }
+
+/* Skills: how to do things your way. */
+.skill-how summary { font-size: 13px; color: var(--muted); cursor: pointer; }
+.skill-body { margin: 6px 0 0; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); }
+.skill-editor { font-family: var(--font-mono); font-size: 13px; line-height: 1.5; min-height: 220px; }
+.diff { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); overflow: auto; max-height: 360px; }
+.diff-line { padding: 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-line.added { background: color-mix(in srgb, var(--idle) 16%, var(--surface)); }
+.diff-line.removed { background: color-mix(in srgb, var(--failed) 14%, var(--surface)); color: var(--muted); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--failed) 50%, transparent); }
+.diff-line.folded { color: var(--faint); font-style: italic; }
+.versions { display: grid; gap: 10px; margin: 8px 0 14px; max-height: min(60vh, 520px); overflow: auto; }
+.version { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); }
+.version h3 { font-size: 14.5px; margin: 0; }
+.version summary { font-size: 13px; color: var(--muted); cursor: pointer; }

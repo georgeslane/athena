@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from dotenv import dotenv_values
 
 from pi_assistant.agent import Agent
+from pi_assistant.alerts import HealthMonitor, check_health
 from pi_assistant.builtin import Builtin, Unavailable
 from pi_assistant.config import THINKING, Config, parse_config
 from pi_assistant.dashboard import DashboardServer
@@ -24,6 +25,7 @@ from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.settings import PROTECTED_SECRETS, Settings
+from pi_assistant.skills import Skills, SkillStore
 from pi_assistant.stats import UsageStats
 from pi_assistant.status import StatusTracker
 from pi_assistant.status_api import StatusServer
@@ -112,6 +114,22 @@ class Services:
             )
             for tool in self.tasks.tools():
                 self.tools.add(tool)
+            self.agent.on_answered = self.tasks.after_answer  # it looks back at how skills went
+        # How to do things your way, which Athena reads before doing them (skills.py).
+        self.skills = Skills(
+            SkillStore(self.config.db_path),
+            self.history,
+            timezone=self.config.agent.timezone,
+            chat_name=self._chat_name,
+            on_change=self.rewarm.set,  # the list of them is in the prompt
+        )
+        self.agent.prompt_extra = self.skills.index
+        for tool in self.skills.tools():
+            self.tools.add(tool)
+        # Messages you when something Athena needs stops working (alerts.py).
+        self.alerts = None
+        if self.config.alerts.enabled:
+            self.alerts = HealthMonitor(self.config.alerts, lambda: check_health(self), self._alert)
         # After the memory and task tools, in this order, so the tools' order (and the prompt) stays the same.
         self.tools.add_provider(lambda: self.builtins.tools)
         self.tools.add_provider(self.mcp.tools)
@@ -139,21 +157,41 @@ class Services:
         self.index_conversations()  # anything said while the embeddings server was down
         if self.tasks:
             self.tasks.start()
+        if self.alerts:
+            self.alerts.start()
 
-    async def notify(self, text: str) -> None:
-        """Tell you something you didn't ask about, such as what a task found. Logged if there's no channel."""
+    async def notify(self, text: str) -> bool:
+        """Tell you something you didn't ask about, such as what a task found. Logged if there's no channel.
+        False if it couldn't be sent."""
         if self.channel is None:
             log.warning("Nowhere to send a message: %s", text[:200])
-            return
+            return False
         try:
             await self.channel.tell(text)
         except Exception as exc:
             log.warning("Couldn't send a message: %s", exc)
+            return False
+        return True
+
+    async def _alert(self, text: str) -> bool:
+        if self.channel is None:  # Telegram hasn't started: try again next time
+            return False
+        return await self.notify(text)
+
+    def _chat_name(self, chat_id: str) -> str:
+        """Who a chat is with, for recent_work: you, or a task by its title."""
+        if not chat_id.startswith("task:"):
+            return "you"
+        task = self.tasks.store.get(int(chat_id[5:])) if self.tasks and chat_id[5:].isdigit() else None
+        return f"task “{task.title}”" if task else "a task"
 
     async def close(self) -> None:
+        if self.alerts:
+            await self.alerts.stop()
         if self.tasks:
             await self.tasks.stop()
             self.tasks.store.close()
+        self.skills.store.close()
         if self.dashboard:
             await self.dashboard.stop()
         if self.status_api:
@@ -232,6 +270,7 @@ class Services:
         """Delete every memory and the conversation history, and start a new session. Usage statistics stay."""
         if self.tasks:
             self.tasks.stop_running()  # it would save what it's doing after everything's deleted
+            self.tasks.reviews.clear()  # they hold what was said
         async with self.agent.paused():
             if self._indexer:
                 self._indexer.cancel()

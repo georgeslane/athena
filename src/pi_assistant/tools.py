@@ -5,7 +5,8 @@ from __future__ import annotations
 import fnmatch
 import re
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
@@ -16,6 +17,36 @@ _INVALID_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 
 class ToolError(Exception):
     """A problem the model can fix, such as a bad argument. Its message is shown to the model as-is."""
+
+
+@dataclass
+class Turn:
+    """What Athena is doing while a tool runs: answering you, or working by itself.
+
+    Tools that save things keep what Athena saves by itself for you to approve, since you aren't
+    there to see it, and what it reads from the web could have put the idea there.
+    """
+
+    alone: str | None = None  # None: answering you. Else what it's doing, such as "your task “Briefing”"
+    # What tools noted, such as {"skills": ["Trip plans"], "suggested": ["memory", "memory"]}.
+    notes: dict[str, list[str]] = field(default_factory=dict)
+
+    def note(self, key: str, value: str) -> None:
+        self.notes.setdefault(key, []).append(value)
+
+
+_turn: ContextVar[Turn | None] = ContextVar("turn", default=None)
+
+
+def current_turn() -> Turn:
+    """The turn a tool is running in: one answering you, if it's run outside the agent."""
+    return _turn.get() or Turn()
+
+
+def begin_turn(turn: Turn) -> Callable[[], None]:
+    """Make ``turn`` the current one, in this task and those it starts. Returns what ends it."""
+    token = _turn.set(turn)
+    return lambda: _turn.reset(token)
 
 
 @dataclass

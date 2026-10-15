@@ -20,7 +20,7 @@ from pi_assistant.llm import LLMClient, LLMReply, ToolCall
 from pi_assistant.memory import MemoryHit, MemoryService
 from pi_assistant.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 from pi_assistant.status import StatusTracker, Task, describe_error
-from pi_assistant.tools import ToolError, ToolRegistry
+from pi_assistant.tools import ToolError, ToolRegistry, Turn, begin_turn
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,10 @@ class Background:
     step: Callable[[Task, Callable[[], Awaitable[LLMReply]]], Awaitable[LLMReply]]
     thinking: str | None = None  # instead of [llm] thinking
     max_rounds: int | None = None  # instead of [agent] max_tool_rounds
+    # What it's doing, as what it saves by itself says it came from, such as "your task “Briefing”".
+    source: str = ""
+    only_tools: frozenset[str] | None = None  # only these tools may run (they're all offered, for the cache)
+    review: bool = False  # looking back at how a skill went (tasks.py), rather than doing something
 
 
 @dataclass
@@ -67,6 +71,9 @@ class AgentResult:
     model_calls: int = 0
     elapsed: float = 0.0
     saved: bool = False  # the exchange went into the history
+    notes: dict[str, list[str]] = field(default_factory=dict)  # what tools noted (tools.Turn)
+    # Everything the model saw and said, kept when it read a skill, to look back at how that went.
+    transcript: list[dict[str, Any]] | None = None
 
 
 class Agent:
@@ -92,8 +99,12 @@ class Agent:
         self.auto_recall = auto_recall and memory is not None
         # Rendered once and never changed, so the model server can cache it.
         self.system_prompt = render_system_prompt(system_prompt_template, cfg)
+        # Added to the end of it, such as the list of skills: it changes rarely, so the cache mostly holds.
+        self.prompt_extra: Callable[[], str] | None = None
         # Called after each exchange is saved to the history, once the chat is free again.
         self.on_saved: Callable[[], None] | None = None
+        # Called with each answer, and the background work it was for (None: you), once it's finished.
+        self.on_answered: Callable[[AgentResult, Background | None], None] | None = None
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # While paused, new messages wait; `busy` counts the ones being answered.
         self._open = asyncio.Event()
@@ -142,6 +153,11 @@ class Agent:
 
     # -- prompt construction ----------------------------------------------------------
 
+    def prompt(self) -> str:
+        """The system prompt, with what's added to it now."""
+        extra = self.prompt_extra() if self.prompt_extra else ""
+        return f"{self.system_prompt}\n\n{extra}" if extra else self.system_prompt
+
     def _now(self) -> datetime:
         try:
             return datetime.now(ZoneInfo(self.cfg.timezone))
@@ -172,11 +188,15 @@ class Agent:
 
     # -- tools --------------------------------------------------------------------------
 
-    async def _run_tool(self, call: ToolCall, confirm: ConfirmFn | None, task: Task) -> tuple[str, str]:
+    async def _run_tool(
+        self, call: ToolCall, confirm: ConfirmFn | None, task: Task, only: frozenset[str] | None = None
+    ) -> tuple[str, str]:
         """Run a tool call. Returns what the model is told, and what happened: RAN, FAILED or DECLINED."""
         tool = self.tools.get(call.name)
         if tool is None:
             return f"Error: there is no tool called '{call.name}'.", FAILED
+        if only is not None and call.name not in only:
+            return f"Error: only {', '.join(sorted(only))} can be used now.", FAILED
         if call.arguments is None:
             return f"Error: the arguments were not valid JSON: {call.raw_arguments[:200]}", FAILED
         if tool.needs_confirmation:
@@ -229,7 +249,7 @@ class Agent:
             return None
         async with self._working(), lock:
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": self.prompt()},
                 *self.history.load(chat_id),
                 {"role": "user", "content": "Hi"},  # the next message goes here; only what's before it is reused
             ]
@@ -276,6 +296,25 @@ class Agent:
             task.finish()
         if result.saved and self.on_saved:
             self.on_saved()
+        if self.on_answered:
+            self.on_answered(result, background)
+        return result
+
+    async def follow_up(self, transcript: list[dict[str, Any]], text: str, background: Background) -> AgentResult:
+        """Ask the model ``text`` after what it did in ``transcript`` (from AgentResult.transcript), working by
+        itself: to look back at how a skill went. Nothing's kept in the history."""
+        task = self.status.begin(background.label)
+        record = QueryRecord(session=self.history.session.id, channel="Skills")
+        messages = [*transcript, {"role": "user", "content": text}]
+        try:
+            result = await self._work(messages, task, None, None, record, background)
+        except BaseException as exc:
+            task.finish(exc)
+            record.error = describe_error(exc)
+            raise
+        finally:
+            self._record(record)
+        task.finish()
         return result
 
     def _answered_you(self) -> None:
@@ -315,58 +354,78 @@ class Agent:
         record: QueryRecord,
         background: Background | None = None,
     ) -> AgentResult:
-        started = time.monotonic()
         memories = await self._recall(text)
         # Dynamic context goes in the newest user message, not the system prompt, so
         # everything before it is byte-identical to the previous request (prompt cache hit).
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self.prompt()},
             *self.history.load(chat_id),
             {"role": "user", "content": f"{self.build_context(memories, note)}\n\n{text}"},
         ]
+        result = await self._work(messages, task, confirm, on_tool, record, background)
+        if not result.text.strip():
+            result.text = "Sorry, I didn't manage to produce an answer. Could you rephrase that?"
+            record.error = "No answer"
+        else:
+            self.history.append_exchange(chat_id, text, result.text, tools=result.tools_used)
+            result.saved = True
+        return result
+
+    async def _work(
+        self,
+        messages: list[dict[str, Any]],
+        task: Task,
+        confirm: ConfirmFn | None,
+        on_tool: ToolEventFn | None,
+        record: QueryRecord,
+        background: Background | None,
+    ) -> AgentResult:
+        """Call the model, and the tools it asks for, until it answers. Adds to ``messages`` as it goes."""
+        started = time.monotonic()
         schemas = self.tools.schemas() or None
         result = AgentResult(text="")
-
         thinking = background.thinking if background else None
+        only = background.only_tools if background else None
+        turn = Turn(alone=(background.source or background.label) if background else None)
+        end_turn = begin_turn(turn)
 
         def step(tools: Any) -> Awaitable[LLMReply]:
             call = lambda: self._chat(record, messages, tools, thinking)  # noqa: E731
             return background.step(task, call) if background else call()
 
-        for _ in range((background and background.max_rounds) or self.cfg.max_tool_rounds):
-            task.thinking()
-            reply = await step(schemas)
-            result.model_calls += 1
-            if not reply.tool_calls:
+        try:
+            for _ in range((background and background.max_rounds) or self.cfg.max_tool_rounds):
+                task.thinking()
+                reply = await step(schemas)
+                result.model_calls += 1
+                if not reply.tool_calls:
+                    result.text = reply.content
+                    break
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": reply.content or "",
+                        "tool_calls": [c.as_message_part() for c in reply.tool_calls],
+                    }
+                )
+                for call in reply.tool_calls:
+                    output, outcome = await self._run_tool(call, confirm, task, only)
+                    result.tools_used.append(call.name)
+                    record.tools.append((call.name, outcome))
+                    log.info("tool %s(%s) -> %s", call.name, call.raw_arguments[:200], output[:200].replace("\n", " "))
+                    if on_tool:
+                        await on_tool(call.name, call.arguments or {}, output)
+                    messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
+            else:
+                # Out of tool rounds: ask for a final answer with tools switched off.
+                task.thinking()
+                reply = await step(None)
+                result.model_calls += 1
                 result.text = reply.content
-                break
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": reply.content or "",
-                    "tool_calls": [c.as_message_part() for c in reply.tool_calls],
-                }
-            )
-            for call in reply.tool_calls:
-                output, outcome = await self._run_tool(call, confirm, task)
-                result.tools_used.append(call.name)
-                record.tools.append((call.name, outcome))
-                log.info("tool %s(%s) -> %s", call.name, call.raw_arguments[:200], output[:200].replace("\n", " "))
-                if on_tool:
-                    await on_tool(call.name, call.arguments or {}, output)
-                messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
-        else:
-            # Out of tool rounds: ask for a final answer with tools switched off.
-            task.thinking()
-            reply = await step(None)
-            result.model_calls += 1
-            result.text = reply.content
-
-        if not result.text.strip():
-            result.text = "Sorry, I didn't manage to produce an answer. Could you rephrase that?"
-            record.error = "No answer"
-        else:
-            self.history.append_exchange(chat_id, text, result.text)
-            result.saved = True
+        finally:
+            end_turn()
+        result.notes = turn.notes
+        if turn.notes.get("skills") and result.text.strip():
+            result.transcript = [*messages, {"role": "assistant", "content": result.text}]
         result.elapsed = time.monotonic() - started
         return result

@@ -34,7 +34,16 @@ from pi_assistant.tools import Tool, matches_any, safe_tool_name
 
 log = logging.getLogger(__name__)
 
-RESERVED_NAMES = {"remember", "search_memory", "read_document", "forget_memory"}  # the memory tools'
+# Built-in tools' names, which a server's tools can't take: the memory tools' and the skills'.
+RESERVED_NAMES = {
+    "remember",
+    "search_memory",
+    "read_document",
+    "forget_memory",
+    "read_skill",
+    "save_skill",
+    "recent_work",
+}
 
 
 @dataclass

@@ -30,6 +30,8 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions, and your documents. Related facts are added to each message automatically. Embeddings come from [EmbeddingGemma 2](#embeddings), served by oMLX on the Mac with the model, and are stored in SQLite on the Pi with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Sessions**: `/session` clears the conversation from the model's context, so replies stay quick, while the memory keeps everything you've talked about.
 - **Tasks it does by itself**: a briefing every weekday morning, research while you're busy, or a weekly look for MCP servers that would help. Athena never starts one while you're chatting, and stops for you if you start. It messages you what it found. See [Tasks](#tasks).
+- **Skills**: notes on how to do things your way, which Athena reads before doing them. You write and edit them on the dashboard, Athena writes them when you ask, and after using one it suggests improvements for you to approve. See [Skills](#skills).
+- **Alerts**: a message in Telegram when the Mac's model server, an MCP server or anything else Athena needs stops working, and when it's back, and when Athena itself has stopped. See [Alerts](#alerts).
 - **Your documents, searched by meaning**: choose folders on your Mac in the dashboard, and Athena indexes them when you ask. Ask it in Telegram about something in them, and it says which file and can summarise it. The dashboard's search finds them too. See [Documents](#documents).
 - **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
 - **A dashboard**: a web page for your iPhone or Mac, over Tailscale. It shows what Athena is doing, how much it's used and how full the model's context is, for the session and in total. From it you can switch tools and MCP servers on and off, set them up and give them keys, without editing `config.toml`. See [Dashboard](#dashboard).
@@ -98,14 +100,15 @@ Then:
 
 ## Dashboard
 
-A web page for Athena, on your iPhone or Mac. It has four tabs:
+A web page for Athena, on your iPhone or Mac. It has five tabs:
 
 - **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory. Under Connections, **Thinking** switches the model's thinking on, short or off, as `/think` does.
 - **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, run them now, pause, resume or delete them, and read what each said last time. See [Tasks](#tasks).
-- **Memory:** search what Athena remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents).
+- **Memory:** what Athena wanted to remember while it worked by itself, to save, change or discard. Search what it remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents).
+- **Skills:** read, write, change and delete skills, see each one's history and go back to an earlier version, and approve, change or discard the skills and changes Athena suggests, shown line by line. See [Skills](#skills).
 - **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
 
-It follows your device's light or dark mode. In Safari on an iPhone, Share > Add to Home Screen makes it an app.
+A number on the Memory and Skills tabs says how many of Athena's suggestions are waiting for you. It follows your device's light or dark mode. In Safari on an iPhone, Share > Add to Home Screen makes it an app.
 
 ### Set it up
 
@@ -393,6 +396,7 @@ To update a server later, read what changed, change its pinned version and resta
 
 - **Auto-recall:** before each message, the closest facts (up to `recall_top_k`, within `recall_max_distance`) go into a `<context>` block together with the current time. Use `/recall something` to see similarity scores. If unrelated memories keep appearing, lower `recall_max_distance`. If relevant ones are missed, raise it.
 - **Saving:** the model saves durable facts on its own, guided by `prompts/system.md`. `/remember` lets you add them yourself.
+- **From tasks:** what Athena wants to remember while it works by itself, on a task, is a suggestion until you save it on the dashboard's **Memory** tab, where you can change it first, or discard it. What it read on the web could have put the idea there, and a saved fact is shown to it in later conversations. What you tell it in chat, and your documents, are saved straight away.
 - **Past conversations:** after each reply, your message and the reply are added to memory, in an index of their own. `search_memory` finds them, so Athena can look up what you talked about in an earlier session, but they aren't added to messages automatically, so an old answer can't be mistaken for a current one. Anything said while the embeddings server was down is added when it's back.
 - **Forgetting:** `/forget <id>` deletes one memory. **Forget everything** on the dashboard deletes them all, with the conversation history.
 - **Duplicates:** a fact closer than `duplicate_distance` to one already saved isn't saved again.
@@ -443,6 +447,8 @@ Athena can work on things by itself, then message you what it found: a briefing 
 - **If it fails**, say because the Mac's asleep, it tries again after 10 minutes, then 30, then tells you and waits for its next run.
 - **In Telegram**, `/tasks` lists them, with buttons to run, pause, resume, stop or delete each. On the dashboard, the **Tasks** tab does the same.
 
+**Skills from habits:** one of the examples on the Tasks tab looks back over the week with `recent_work`, which lists what Athena did and the tools it used for each, in order. Where it did the same kind of thing the same way three or more times, it suggests a skill for it. See [Skills](#skills).
+
 **Suggesting MCP servers:** the built-in `find_mcp_servers` searches the official MCP Registry, and only suggests: you add a server yourself, on the dashboard, after reading about it. Anyone can list a server there, so being listed isn't an endorsement. Searches send only the words searched for, and only to the registry, so they don't ask first. `[mcp_registry] enabled = false` turns it off.
 
 ## Documents
@@ -481,13 +487,29 @@ It covers picking the right tool, filling in arguments, answering without tools 
 
 On an M1 Pro with 32 GB, mixture-of-experts models with about 3–4B active parameters are the right size: dense 27B+ models generate too slowly for multi-step tool use. Larger models may need a higher GPU memory limit, for example `sudo sysctl iogpu.wired_limit_mb=26624`.
 
+## Skills
+
+A skill is how to do something your way: how you like trip plans laid out, what goes in your morning briefing, how to compare quotes. Each has a name, when to use it, and how. Athena sees every skill's name and when to use it in each conversation, and reads the rest with `read_skill` when it needs it, so a skill costs a line of the prompt until it's used.
+
+- **You** write, change and delete them on the dashboard's **Skills** tab. Every version is kept, so you can see what changed and go back to an earlier one.
+- **Athena** writes one when you ask, such as "that's how I like trip plans: make it a skill", or changes one when you want it done differently. Those are saved straight away, since you're there.
+- **Working by itself**, on a task or looking back at a skill, what it writes is a suggestion: the Skills tab shows the change line by line, with why, to approve, change or discard. A skill is instructions Athena follows, so something it read on the web mustn't be able to rewrite one.
+- **After using a skill**, answering you or on a task, Athena looks back at how that went once you've finished chatting: a step that was missing, or something you corrected. If a change would help next time, it suggests one and tells you in Telegram. These reviews run like tasks, waiting while you chat and taking one step at a time, so `[tasks] enabled = false` turns them off too.
+- **Spotting habits:** `recent_work` lists what Athena did over the last days and the tools it used for each, which the "Skills from habits" example task uses to suggest new skills each week.
+
+## Alerts
+
+Every `every_minutes` (5), Athena checks that the model server and embeddings server answer, that each MCP server that's switched on is connected, that each built-in integration started, and that there's more than `min_free_gb` (1 GB) free where its data is. Once something has failed `after_failures` (2) checks in a row, you get a message in Telegram saying what and why, and another when it works again. Set these under `[alerts]`, or `enabled = false` to stop them.
+
+When Athena itself stops, it can't tell you, so systemd does. When Athena fails, systemd restarts it, and starts `pi-assistant-stopped`, which runs `scripts/tell-stopped.py` and watches what happens next. If Athena runs steadily again within a minute, it was a blip, and you hear nothing, as you don't if you or an update stopped it. If it fails to start five times in ten minutes, systemd stops trying, and you get a message saying why, with the end of its log. If it's still stopping and restarting after 15 minutes, you're told that. The script uses only Python's own library, so it works even if Athena's environment is what's broken, and it takes everything in `.env`, and anything like a token, out of what it sends. Once you've fixed it, `sudo systemctl restart pi-assistant` starts it again.
+
 ## Updating
 
 ```bash
 cd ~/pi-assistant && bash scripts/update.sh
 ```
 
-It pulls the latest code, updates the dependencies and restarts the service.
+It pulls the latest code, updates the dependencies, installs any new or changed systemd units and restarts the service.
 
 ## Development
 
@@ -538,6 +560,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, and the page itself (plain HTML, CSS and JavaScript) |
 | `src/pi_assistant/tasks.py`, `channel.py` | Tasks Athena does by itself, and how it reaches you about them |
+| `src/pi_assistant/skills.py` | Skills: kept with every version, Athena's suggestions, and the tools to read and write them |
+| `src/pi_assistant/alerts.py`, `scripts/tell-stopped.py` | Telling you when something Athena needs stops working, and when Athena itself has stopped |
 | `src/pi_assistant/mcp_registry.py` | The built-in search of the official MCP Registry, for suggesting servers |
 | `src/pi_assistant/settings.py`, `catalog.py` | What the dashboard's Tools tab can change, and how it edits `config.toml` and `.env` |
 | `src/pi_assistant/stats.py` | Usage statistics, per session and in total |
@@ -545,7 +569,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/assets/` | The Athena icon, used by the dashboard and this README |
 | `src/pi_assistant/doctor.py`, `evals.py`, `search_eval.py`, `cli.py` | Command-line tools |
 | `prompts/system.md` | System prompt. Point `agent.system_prompt_file` at a `*.local.md` copy to customise it privately. |
-| `scripts/install.sh`, `scripts/update.sh`, `deploy/` | Pi setup and updates |
+| `scripts/install.sh`, `scripts/update.sh`, `scripts/install-units.sh`, `deploy/` | Pi setup and updates, and the systemd units |
 | `scripts/connect-mac.sh`, `scripts/mac/install.sh` | Linking the Pi to your Mac's files, Calendar and Reminders |
 
 ## Troubleshooting
@@ -560,6 +584,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - **Telegram "Conflict: terminated by other getUpdates request":** two copies of the bot are running with the same token.
 - **The dashboard doesn't load:** run `doctor` and see what it says under "Dashboard". If it's answering there, check `sudo tailscale serve status` shows `localhost:8092`, and that Tailscale is connected on your phone or Mac.
 - **The dashboard says "Can't reach Athena":** the service has stopped or is restarting. `journalctl -u pi-assistant -f` says why.
+- **No message when Athena stopped:** check `systemctl status pi-assistant-stopped` and `journalctl -u pi-assistant-stopped`. It needs the bot token in `.env` and your ID in `telegram.allowed_user_ids`. For the end of the log to be included, your user must be able to read the journal (it's in the `adm` group on Raspberry Pi OS).
 - **"Couldn't start it in a sandbox":** install bubblewrap (`sudo apt install bubblewrap`), then run `doctor`, which says whether it can make a sandbox. A server that needs something from your home folder can be given it with `read_only_paths`.
 - **A server says "waiting for you":** some of its tools are new or have changed since you approved them. Open its card on the dashboard to see what changed and approve them.
 - **A server's switch won't stay on:** the dashboard says what it needs first, such as a key. If it's on but shows an error, open it: the error and the server's log (`data/logs/mcp-<name>.log`) usually say why.
@@ -580,6 +605,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)).
 - Local servers run in a [sandbox](#sandbox) without your home folder, so they can't read `.env`, your memories or your SSH keys, and without the network if they don't need it. A server with network access can reach anything the Pi can, though, so the approval before a tool runs is still what stops your data being sent somewhere.
 - A server's tools that are new or have changed since you approved them are held back from the model until you approve them on the dashboard ([When a server's tools change](#when-a-servers-tools-change)).
+- What Athena remembers, and skills it writes or changes, while working by itself are suggestions until you approve them on the dashboard, so a web page it reads can't plant a memory or rewrite a skill unseen.
 - Tasks run without you watching, so they can't do more than you could approve: one Athena suggests needs your OK, any tool that asks first still asks you in Telegram unless you've allowed that task to use it, and a task can't schedule others without asking. Allowing a task to fetch or search without asking lets it send what's in its instructions and what it's read to those sites unseen, so allow only what it needs.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
 - The Pi reaches your Macs over SSH with a key of its own, which `~/.ssh/authorized_keys` on each Mac restricts to starting Athena's servers there: no shell, no port forwarding. The documents server is read-only, only sees what's in your home folder (or the scope you gave), never hidden files or `~/Library` apart from iCloud Drive, and is only started when you index or choose folders.

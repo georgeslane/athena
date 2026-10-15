@@ -21,6 +21,12 @@ What it may do:
   - A tool that asks first, and that the task may not use without asking, still asks you, in
     Telegram, saying which task wants it. Unanswered after [tasks] confirm_minutes, it's denied.
   - schedule_task always asks, even in a task, so a task can't start others by itself.
+  - What it remembers, and skills it writes or changes, are suggestions for you to approve on
+    the dashboard (memory.py, skills.py).
+
+After Athena uses a skill, answering you or on a task, it looks back at how that went once
+you've finished chatting, and suggests a change to the skill if one would help next time.
+The scheduler runs these reviews too, one thing at a time, so they never compete for the Mac.
 """
 
 from __future__ import annotations
@@ -33,15 +39,16 @@ import re
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from datetime import time as clock
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from pi_assistant.agent import Background
+from pi_assistant.agent import AgentResult, Background
 from pi_assistant.memory import connect_db
+from pi_assistant.skills import READ_SKILL, REVIEW, SAVE_SKILL
 from pi_assistant.status import Task as StatusTask
 from pi_assistant.status import describe_error
 from pi_assistant.tools import Tool, ToolError
@@ -60,6 +67,8 @@ MIN_EVERY = timedelta(minutes=15)
 MISSED_GRACE = timedelta(hours=6)  # a regular run missed by more than this (Athena was off) is skipped
 RETRIES = (600, 1800)  # after a run fails: try again in 10 minutes, then 30, then give up on that run
 FIRST_WAIT, LONGEST_WAIT = 60.0, 900.0  # waiting for you to finish chatting: 1 minute, doubling to 15
+REVIEW_MINUTES, REVIEW_ROUNDS = 10, 4  # looking back at how a skill went: the most time and steps it takes
+MAX_REVIEWS = 5  # waiting to be done; the oldest is dropped for a new one past this
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 SCHEDULES = (
@@ -86,6 +95,17 @@ EXAMPLES = (
             "Suggest at most three you haven't suggested before: what each would let you do for me, who publishes "
             "it, how it runs and whether it needs a key. Prefer known publishers and PyPI packages. If none are "
             f"worth it, say {NOTHING}."
+        ),
+    },
+    {
+        "title": "Skills from habits",
+        "schedule": "weekly fri 18:00",
+        "instructions": (
+            "Look at what you've done this week with recent_work. Find things you did the same way three or more "
+            "times: the same kind of request, handled with the same steps. For each, if none of your skills covers "
+            "it, write one with save_skill: when to use it, and the steps that worked, short. If one covers it but "
+            "you did it differently or better, improve it. Tell me what you suggested and why. If nothing's worth "
+            f"a skill, say {NOTHING}."
         ),
     },
     {
@@ -361,6 +381,26 @@ class _OutOfTime(Exception):
     pass
 
 
+@dataclass
+class Review:
+    """Looking back at how skills went, after Athena used them."""
+
+    skills: list[str]
+    transcript: list[dict[str, Any]] = field(repr=False)  # what it did, from AgentResult.transcript
+    what: str  # what it used them for: "our chat", or "your task “Briefing”"
+
+
+def suggested(notes: dict[str, list[str]]) -> str:
+    """What a run suggested for you to approve, such as "2 memories and a skill". Empty if nothing."""
+    said = notes.get("suggested", [])
+    parts = []
+    for kind, plural in (("memory", "memories"), ("skill", "skills")):
+        n = said.count(kind)
+        if n:
+            parts.append(f"a {kind}" if n == 1 else f"{n} {plural}")
+    return " and ".join(parts)
+
+
 class Scheduler:
     """Runs tasks when they're due, one at a time, never while you're chatting (see the top of this file)."""
 
@@ -389,6 +429,7 @@ class Scheduler:
         self.poll = poll_seconds
         self.running: Task | None = None
         self.waiting: tuple[int, float] | None = None  # a due task waiting for you: (its id, when it looks again)
+        self.reviews: list[Review] = []  # skills to look back on, once you've finished chatting
         self._now_please: set[int] = set()  # run these as soon as Athena isn't answering you
         self._wake = asyncio.Event()
         self._loop: asyncio.Task[None] | None = None
@@ -438,6 +479,9 @@ class Scheduler:
             try:
                 task = self.store.due(time.time())
                 if task is None:
+                    if self.reviews and self.quiet():
+                        await self.review(self.reviews.pop(0))
+                        continue
                     next_due = self.store.next_due()
                     await self._sleep(60 if next_due is None else min(60, max(1, next_due - time.time())))
                     continue
@@ -472,21 +516,22 @@ class Scheduler:
 
     # -- running one --
 
-    async def run(self, task: Task) -> None:
-        """Run ``task`` now, tell you what it found, and work out when it's next due."""
-        schedule = Schedule.parse(task.schedule, self.tz)
-        self.running = task
+    def _stepper(
+        self, free: Callable[[], bool], minutes: float, what: str
+    ) -> Callable[[StatusTask, Callable[[], Awaitable[LLMReply]]], Awaitable[LLMReply]]:
+        """How background work takes each step: waiting while you chat, stopping the step if you start
+        (to take it again after), and raising _OutOfTime after ``minutes`` of work."""
         started, paused = time.monotonic(), 0.0
 
         async def step(status: StatusTask, call: Callable[[], Awaitable[LLMReply]]) -> LLMReply:
             nonlocal paused
             while True:
-                if time.monotonic() - started - paused > self.cfg.max_minutes * 60:
+                if time.monotonic() - started - paused > minutes * 60:
                     raise _OutOfTime
-                if not self._free(task):
+                if not free():
                     status.waiting_for_you()
                     since = time.monotonic()
-                    while not self._free(task):
+                    while not free():
                         await asyncio.sleep(self.poll)
                     paused += time.monotonic() - since
                     status.thinking()
@@ -501,7 +546,15 @@ class Scheduler:
                 thinking.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await thinking
-                log.info("Task %d stopped a step for you, to take again once you've finished", task.id)
+                log.info("%s stopped a step for you, to take again once you've finished", what)
+
+        return step
+
+    async def run(self, task: Task) -> None:
+        """Run ``task`` now, tell you what it found, and work out when it's next due."""
+        schedule = Schedule.parse(task.schedule, self.tz)
+        self.running = task
+        step = self._stepper(lambda: self._free(task), self.cfg.max_minutes, f"Task {task.id}")
 
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
             if tool in task.allowed_tools and tool not in NEVER_UNASKED:
@@ -519,6 +572,7 @@ class Scheduler:
             step=step,
             thinking=self.cfg.thinking,
             max_rounds=self.cfg.max_tool_rounds,
+            source=f"your task “{task.title}”",
         )
         log.info("Running task %d (%s)", task.id, task.title)
         self._run = asyncio.create_task(
@@ -559,10 +613,14 @@ class Scheduler:
             await self._failed(task, schedule, now, exc)
             return
         text = result.text.strip()
+        to_review = suggested(result.notes)
+        review = f"\n\n🧠 I've suggested {to_review} for you to review on the dashboard." if to_review else ""
         if not result.saved or NOTHING in text.upper():
+            if "skill" in result.notes.get("suggested", []):  # worth a word: you'd not know otherwise
+                await self._tell(f"📋 **{task.title}**: nothing new to tell you.{review}")
             await self._finished(task, schedule, now, "nothing new", text if result.saved else "")
             return
-        await self._tell(f"📋 **{task.title}**\n\n{text}", keep=(task.title, text))
+        await self._tell(f"📋 **{task.title}**\n\n{text}{review}", keep=(task.title, text))
         await self._finished(task, schedule, now, "told you", text)
 
     def _note(self, task: Task, schedule: Schedule) -> str:
@@ -626,6 +684,46 @@ class Scheduler:
         if keep:  # in your chat too, so you can ask about it
             title, said = keep
             self.agent.history.append_exchange(channel.chat_id, f"(Your task “{title}” ran.)", said)
+
+    # -- looking back at how skills went --
+
+    def after_answer(self, result: AgentResult, background: Background | None) -> None:
+        """Agent.on_answered: if a skill was used, look back at how it went once you've finished chatting."""
+        skills = list(dict.fromkeys(result.notes.get("skills", [])))
+        if not skills or not result.transcript or (background and background.review):
+            return
+        what = background.source if background and background.source else "our chat"
+        self.reviews.append(Review(skills, result.transcript, what))
+        del self.reviews[:-MAX_REVIEWS]
+        self.wake()
+
+    async def review(self, review: Review) -> None:
+        """Ask the model, with what it did in front of it, whether a change to the skills would help."""
+        names = " and ".join(f"“{name}”" for name in review.skills)
+        used = f"your skill{'s' if len(review.skills) > 1 else ''} {names}"
+        background = Background(
+            label=f"Looking back at {used}",
+            step=self._stepper(self.quiet, REVIEW_MINUTES, "A skill review"),
+            thinking=self.cfg.thinking,
+            max_rounds=REVIEW_ROUNDS,
+            source=f"looking back at {used}, after {review.what}",
+            only_tools=frozenset({READ_SKILL, SAVE_SKILL}),
+            review=True,
+        )
+        text = REVIEW.format(user=self.agent.cfg.user_name, skills=used)
+        log.info("Looking back at %s", used)
+        try:
+            result = await self.agent.follow_up(review.transcript, text, background)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # it's only a suggestion: not worth trying again
+            log.warning("Couldn't look back at %s: %s", used, describe_error(exc))
+            return
+        if "skill" in result.notes.get("suggested", []):
+            await self._tell(
+                f"✏️ After {review.what}, I've suggested a change to {used}. "
+                "Approve it, or not, on the dashboard's Skills tab."
+            )
 
     # -- what you, and Athena, can do to them --
 

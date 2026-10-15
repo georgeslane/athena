@@ -206,11 +206,12 @@ function refresh() {
   if (location.hash === "#tools") loadTools().catch(() => {});
   if (location.hash === "#memory") loadMemory().catch(() => {});
   if (location.hash === "#tasks") loadTasks().catch(() => {});
+  if (location.hash === "#skills") loadSkills().catch(() => {});
   if (!state.watching) watchStatus();
 }
 
 function showTab() {
-  const tab = { "#tools": "tools", "#memory": "memory", "#tasks": "tasks" }[location.hash] || "status";
+  const tab = { "#tools": "tools", "#memory": "memory", "#tasks": "tasks", "#skills": "skills" }[location.hash] || "status";
   for (const link of document.querySelectorAll(".tab")) {
     if (link.dataset.tab === tab) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -219,6 +220,7 @@ function showTab() {
   if (tab === "tools") loadTools().catch((e) => toast(e.message, true));
   if (tab === "memory") loadMemory().catch((e) => toast(e.message, true));
   if (tab === "tasks") loadTasks().catch((e) => toast(e.message, true));
+  if (tab === "skills") loadSkills().catch((e) => toast(e.message, true));
   window.scrollTo(0, 0);
 }
 
@@ -268,8 +270,31 @@ async function loadOverview() {
   setStatus({ version: overview.version, now: overview.now, status: overview.status });
   setOffline(false);
   renderOverview();
+  showReviewCounts();
   // Athena asks the model server how it is in the background: ask again for its answer.
   if (overview.model.reachable === null) setTimeout(() => loadOverview().catch(() => {}), 2500);
+}
+
+// On the Memory and Skills tabs, how many of Athena's suggestions are waiting for you.
+function showReviewCounts() {
+  const review = state.overview.review;
+  for (const [tab, n] of [["memory", review.memories], ["skills", review.skills]]) {
+    const link = document.querySelector(`.tab[data-tab="${tab}"]`);
+    let count = link.querySelector(".tab-count");
+    if (!n) {
+      if (count) count.remove();
+      continue;
+    }
+    if (!count) link.append((count = h("span.tab-count")));
+    count.textContent = n > 9 ? "9+" : String(n);
+    count.title = `${plural(n, "suggestion")} to review`;
+  }
+}
+
+function setReviewCount(kind, n) {
+  if (!state.overview) return;
+  state.overview.review[kind] = n;
+  showReviewCounts();
 }
 
 function tick() {
@@ -1214,6 +1239,7 @@ const memory_ = {
   search: null, // built once, so what you've typed survives the rest changing
   results: null,
   timer: null,
+  suggested: new Map(), // each suggested memory, by id, built once so your edits survive the rest changing
 };
 
 async function loadMemory() {
@@ -1224,10 +1250,64 @@ async function loadMemory() {
 function renderMemory() {
   const m = state.memory;
   if (!memory_.search) memory_.search = searchCard();
-  document.getElementById("tab-memory").replaceChildren(h("div.stack", {}, memory_.search, documentsCard(m)));
+  setReviewCount("memories", m.suggestions.length);
+  const suggested = m.suggestions.length ? suggestedMemories(m) : null;
+  document.getElementById("tab-memory").replaceChildren(h("div.stack", {}, suggested, memory_.search, documentsCard(m)));
   clearTimeout(memory_.timer);
   // While Athena indexes, follow how it's going.
   if (m.documents.running) memory_.timer = setTimeout(() => location.hash === "#memory" && loadMemory().catch(() => {}), 1000);
+}
+
+// Facts Athena wanted to remember while it worked by itself, which it keeps only if you say so.
+function suggestedMemories(m) {
+  const ids = new Set(m.suggestions.map((s) => s.id));
+  for (const id of memory_.suggested.keys()) if (!ids.has(id)) memory_.suggested.delete(id);
+  const items = m.suggestions.map((s) => {
+    if (!memory_.suggested.has(s.id)) memory_.suggested.set(s.id, suggestedMemory(s));
+    return memory_.suggested.get(s.id);
+  });
+  return h(
+    "section.card.review",
+    {},
+    h("div.card-head", {}, h("h2", { text: "Suggested memories" }), h("span.aside", { text: plural(items.length, "to review", "to review") })),
+    h("p.note", {}, icon("info"), h("span", { text: "Athena wanted to remember these while it worked by itself. It keeps them only if you save them. Change one first if it isn't quite right." })),
+    h("div.review-list", {}, items)
+  );
+}
+
+function suggestedMemory(s) {
+  const text = h("textarea.review-text", { rows: 2, maxLength: 2000, "aria-label": "What to remember" });
+  text.value = s.text;
+  const fit = () => {
+    text.style.height = "auto";
+    text.style.height = `${text.scrollHeight + 2}px`;
+  };
+  text.addEventListener("input", fit);
+  requestAnimationFrame(fit);
+  const decide = async (event, action) => {
+    event.target.disabled = true;
+    try {
+      state.memory = await call("POST", `/api/memory/suggestions/${s.id}`, action === "approve" ? { action, text: text.value } : { action });
+      renderMemory();
+      toast(action === "approve" ? "Saved to memory." : "Discarded.");
+    } catch (e) {
+      toast(e.message, true);
+      event.target.disabled = false;
+    }
+  };
+  return h(
+    "article.review-item",
+    {},
+    text,
+    h("p.hint", { text: `From ${s.source}, ${day(s.created_at)}` }),
+    h(
+      "div.tool-actions",
+      {},
+      h("span.grow"),
+      h("button.button.small", { type: "button", text: "Discard", onclick: (e) => decide(e, "discard") }),
+      h("button.button.small.primary", { type: "button", text: "Save", onclick: (e) => decide(e, "approve") })
+    )
+  );
 }
 
 function searchCard() {
@@ -1455,6 +1535,231 @@ function crumbs(path, go) {
       return [h("span.sep", { text: "›" }), last ? h("span", { text: name }) : h("button.crumb", { type: "button", text: name, onclick: () => go(target) })];
     }),
   ];
+}
+
+// -- skills: how to do things your way ---------------------------------------------------------------
+
+const by = (who) => (who === "you" ? "you" : state.overview ? state.overview.assistant.name : "Athena");
+const dateTime = (t) => clock(t, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+async function loadSkills() {
+  state.skills = await call("GET", "/api/skills");
+  renderSkills();
+}
+
+function renderSkills() {
+  const k = state.skills;
+  setReviewCount("skills", k.suggestions.length);
+  const parts = [];
+  if (k.suggestions.length) {
+    parts.push(
+      h(
+        "section.card.review",
+        {},
+        h("div.card-head", {}, h("h2", { text: "Suggested by Athena" }), h("span.aside", { text: plural(k.suggestions.length, "to review", "to review") })),
+        h("p.note", {}, icon("info"), h("span", { text: "Skills, and changes to them, that Athena made while it worked by itself. Nothing changes until you approve one." })),
+        h("div.review-list", {}, k.suggestions.map(skillSuggestion))
+      )
+    );
+  }
+  const after = k.reviews ? " After using one, it looks back at how that went, and suggests a change if one would help next time." : "";
+  parts.push(
+    h(
+      "section.card",
+      {},
+      h("div.card-head", {}, h("h2", { text: "Skills" }), h("span.aside", { text: "How to do things your way" }), h("div.actions", {}, h("button.button.small.primary", { type: "button", text: "New skill", onclick: () => editSkill() }))),
+      h(
+        "p.note",
+        {},
+        icon("info"),
+        h("span", {
+          text:
+            "Athena sees each skill's name and when to use it in every conversation, and reads the rest when it needs it. " +
+            "It writes skills too: straight away when you ask it to, and as suggestions for you to approve when it's working by itself." +
+            after,
+        })
+      ),
+      k.skills.length
+        ? h("div.task-list", {}, k.skills.map(skillCard))
+        : h("p.empty", { text: "No skills yet. Write one here, or tell Athena in Telegram, such as “that's how I like trip plans: make it a skill”." })
+    )
+  );
+  document.getElementById("tab-skills").replaceChildren(h("div.stack", {}, parts));
+}
+
+function skillCard(skill) {
+  const used = skill.uses ? `Used ${plural(skill.uses, "time")}, last ${when(skill.last_used)}` : "Not used yet";
+  const changed = `${skill.versions > 1 ? "Changed" : "Written"} ${dateTime(skill.updated_at)} by ${by(skill.updated_by)}`;
+  const actions = [h("button.button.small", { type: "button", text: "Edit", onclick: () => editSkill(skill) })];
+  if (skill.versions > 1) actions.push(h("button.button.small", { type: "button", text: "History", onclick: () => skillHistory(skill) }));
+  actions.push(h("button.button.small.danger", { type: "button", text: "Delete", onclick: () => deleteSkill(skill) }));
+  return h(
+    "article.task.skill",
+    {},
+    h("div.task-head", {}, h("h3", { text: skill.name }), h("span.task-state", { text: used })),
+    h("p.task-when", { text: skill.description }),
+    h("details.skill-how", {}, h("summary", { text: "How" }), h("pre.skill-body", { text: skill.body })),
+    h("p.hint", { text: changed }),
+    h("div.tool-actions", {}, actions)
+  );
+}
+
+function skillSuggestion(sg) {
+  const decide = async (event, action) => {
+    event.target.disabled = true;
+    try {
+      state.skills = await call("POST", `/api/skills/suggestions/${sg.id}`, { action });
+      renderSkills();
+      toast(action === "approve" ? `Saved “${sg.name}”.` : "Discarded.");
+    } catch (e) {
+      toast(e.message, true);
+      event.target.disabled = false;
+    }
+  };
+  const changes = [];
+  if (sg.was && sg.was.name !== sg.name) changes.push(h("p.review-change", {}, h("span.hint", { text: "Name: " }), h("del", { text: sg.was.name }), " → ", h("ins", { text: sg.name })));
+  if (!sg.was || sg.was.description !== sg.description) {
+    changes.push(h("p.review-change", {}, h("span.hint", { text: "When to use it: " }), sg.was ? [h("del", { text: sg.was.description }), " → "] : null, h("ins", { text: sg.description })));
+  }
+  return h(
+    "article.review-item",
+    {},
+    h("div.task-head", {}, h("h3", { text: sg.was ? `Change to “${sg.was.name}”` : `New skill: “${sg.name}”` })),
+    h("p.hint", { text: `From ${sg.source}, ${dateTime(sg.created_at)}` }),
+    sg.why ? h("p.review-why", { text: sg.why }) : null,
+    changes,
+    sg.diff ? diffView(sg.diff) : h("pre.skill-body", { text: sg.body }),
+    h(
+      "div.tool-actions",
+      {},
+      h("span.grow"),
+      h("button.button.small", { type: "button", text: "Discard", onclick: (e) => decide(e, "discard") }),
+      h("button.button.small", { type: "button", text: "Edit…", onclick: () => editSkill(null, sg) }),
+      h("button.button.small.primary", { type: "button", text: "Approve", onclick: (e) => decide(e, "approve") })
+    )
+  );
+}
+
+// What a change does to a skill, line by line: unchanged stretches are folded, to show what's new.
+function diffView(lines) {
+  const CONTEXT = 2;
+  const near = lines.map((line, i) => line.op !== " " || lines.slice(Math.max(0, i - CONTEXT), i + CONTEXT + 1).some((l) => l.op !== " "));
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (near[i]) {
+      const line = lines[i];
+      const cls = line.op === "+" ? ".added" : line.op === "-" ? ".removed" : "";
+      out.push(h(`div.diff-line${cls}`, { text: `${line.op} ${line.text}` }));
+      continue;
+    }
+    let j = i;
+    while (j < lines.length && !near[j]) j++;
+    out.push(h("div.diff-line.folded", { text: `… ${plural(j - i, "line")} the same` }));
+    i = j - 1;
+  }
+  return h("div.diff", { role: "group", "aria-label": "What changes" }, out.length ? out : h("div.diff-line.folded", { text: "The instructions are the same." }));
+}
+
+// A form for a skill: a new one, one to change, or Athena's suggestion as you'd change it before saving.
+function editSkill(skill, suggestion) {
+  const from = suggestion || skill || {};
+  const name = h("input", { type: "text", maxLength: 60, required: true, value: from.name || "" });
+  const description = h("input", { type: "text", maxLength: 200, required: true, value: from.description || "", placeholder: "When you plan a trip for me" });
+  const body = h("textarea.skill-editor", { required: true, rows: 12, maxLength: 5000, spellcheck: true });
+  body.value = from.body || "";
+  const count = h("span.field-help");
+  const counted = () => (count.textContent = `${number(body.value.length)} of 5,000 characters. Markdown is fine: short steps work best.`);
+  body.addEventListener("input", counted);
+  counted();
+  const error = h("p.form-error", { role: "alert" });
+  const dialog = document.getElementById("dialog");
+  const save = h("button.button.primary", { type: "submit", text: suggestion ? "Approve" : "Save" });
+  const form = h(
+    "form.task-form",
+    {
+      onsubmit: async (event) => {
+        event.preventDefault();
+        save.disabled = true;
+        error.textContent = "";
+        const fields = { name: name.value, description: description.value, body: body.value };
+        try {
+          if (suggestion) state.skills = await call("POST", `/api/skills/suggestions/${suggestion.id}`, { action: "approve", ...fields });
+          else if (skill) state.skills = await call("POST", `/api/skills/${skill.id}`, fields);
+          else state.skills = await call("POST", "/api/skills", fields);
+          dialog.close();
+          renderSkills();
+          toast(`Saved “${name.value.trim()}”.`);
+        } catch (e) {
+          error.textContent = e.message;
+          save.disabled = false;
+        }
+      },
+    },
+    h("h2", { text: suggestion ? "Change, then approve" : skill ? "Edit skill" : "New skill" }),
+    h("label.field", {}, h("span.field-label", { text: "Name" }), name),
+    h("label.field", {}, h("span.field-label", { text: "When to use it" }), h("span.field-help", { text: "One line. Athena sees this in every conversation, to know when to read the rest." }), description),
+    h("label.field", {}, h("span.field-label", { text: "How" }), count, body),
+    error,
+    h("div.tool-actions", {}, h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }), save)
+  );
+  dialog.onclose = null;
+  dialog.replaceChildren(form);
+  if (!dialog.open) dialog.showModal();
+  name.focus();
+}
+
+async function skillHistory(skill) {
+  let data;
+  try {
+    data = await call("GET", `/api/skills/${skill.id}/versions`);
+  } catch (e) {
+    return toast(e.message, true);
+  }
+  const dialog = document.getElementById("dialog");
+  const items = data.versions.map((v, i) =>
+    h(
+      "article.version",
+      {},
+      h("div.task-head", {}, h("h3", { text: i === 0 ? "Now" : dateTime(v.changed_at) }), h("span.hint", { text: `${i === 0 ? dateTime(v.changed_at) + ", " : ""}by ${by(v.changed_by)}` })),
+      h("details", {}, h("summary", { text: v.name === skill.name ? "What it said" : `What it said, as “${v.name}”` }), h("p.task-when", { text: v.description }), h("pre.skill-body", { text: v.body })),
+      i === 0
+        ? null
+        : h("div.tool-actions", {}, h("button.button.small", {
+            type: "button",
+            text: "Go back to this",
+            onclick: async (event) => {
+              event.target.disabled = true;
+              try {
+                state.skills = await call("POST", `/api/skills/${skill.id}`, { restore: v.id });
+                dialog.close();
+                renderSkills();
+                toast(`“${skill.name}” is as it was on ${dateTime(v.changed_at)}.`);
+              } catch (e) {
+                toast(e.message, true);
+                event.target.disabled = false;
+              }
+            },
+          }))
+    )
+  );
+  dialog.onclose = null;
+  dialog.replaceChildren(
+    h("h2", { text: `History of “${skill.name}”` }),
+    h("div.versions", {}, items),
+    h("div.tool-actions", {}, h("span.grow"), h("button.button", { type: "button", text: "Close", onclick: () => dialog.close() }))
+  );
+  dialog.showModal();
+}
+
+async function deleteSkill(skill) {
+  const ok = await ask({ title: `Delete “${skill.name}”?`, body: [h("p", { text: "Athena won't know it any more, and its history goes too." })], confirm: "Delete", danger: true });
+  if (!ok) return;
+  try {
+    state.skills = await call("DELETE", `/api/skills/${skill.id}`);
+    renderSkills();
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 // -- dialogs and toasts ---------------------------------------------------------------------------------

@@ -58,6 +58,7 @@ def sandbox(tmp_path):
         "USER": "pi",
         "STUB_LOG": str(log),
         "STUB_FILES": str(files),
+        "UNIT_DIR": str(files),  # where install-units.sh looks for the units, which `sudo tee` writes here
         "GIT_CEILING_DIRECTORIES": str(tmp_path),
     }
 
@@ -89,7 +90,12 @@ def test_install(sandbox):
     unit = (files / "pi-assistant.service").read_text()
     assert f"ExecStart={repo}/.venv/bin/pi-assistant run" in unit
     assert "User=pi" in unit
-    assert not re.search(r"^[^#].*@[A-Z_]+@", unit, re.MULTILINE)  # every placeholder filled in
+    assert "OnFailure=pi-assistant-stopped.service" in unit
+    stopped = (files / "pi-assistant-stopped.service").read_text()
+    assert f"ExecStart=/usr/bin/python3 -I {repo}/scripts/tell-stopped.py" in stopped and "User=pi" in stopped
+    for text in (unit, stopped):
+        assert not re.search(r"^[^#].*@[A-Z_]+@", text, re.MULTILINE)  # every placeholder filled in
+    assert "sudo systemctl enable pi-assistant" in calls
     assert (repo / "config.toml").read_text() == (repo / "config.example.toml").read_text()
     assert (repo / ".env").stat().st_mode & 0o777 == 0o600
 
@@ -111,16 +117,23 @@ def test_install_rejects_unknown_options(sandbox):
 
 
 def test_update(sandbox):
-    _, _, run = sandbox
+    _, files, run = sandbox
     result, calls = run("update.sh", fake_git=True, BWRAP_INSTALLED="1")
     assert result.returncode == 0, result.stderr
     assert calls == [
         "git pull --ff-only",
         "uv sync --no-dev",
         "dpkg -s bubblewrap",
+        f"sudo tee {files}/pi-assistant.service",  # units that are new or changed are installed
+        f"sudo tee {files}/pi-assistant-stopped.service",
+        "sudo systemctl daemon-reload",
         "sudo systemctl restart pi-assistant",
         "systemctl cat pi-assistant-display.service",
     ]
+    assert "Installed pi-assistant.service pi-assistant-stopped.service" in result.stdout
+    (files.parent / "log").write_text("")
+    result, calls = run("update.sh", fake_git=True, BWRAP_INSTALLED="1")
+    assert not [c for c in calls if "tee" in c or "daemon-reload" in c]  # the same: nothing to do
 
 
 def test_update_installs_the_mcp_servers_sandbox(sandbox):

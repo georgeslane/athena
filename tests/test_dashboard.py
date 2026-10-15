@@ -220,7 +220,7 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
         "checked": 0,
     }
     # With the tools for tasks, and the MCP Registry's.
-    assert overview["tools"] == {"count": 11, "servers": 1, "connected": 1, "applying": False}
+    assert overview["tools"] == {"count": 14, "servers": 1, "connected": 1, "applying": False}
     assert overview["status"]["state"] == "idle" and overview["status"]["last_task"] == "Thanks"
 
 
@@ -281,7 +281,8 @@ async def test_tasks_from_the_dashboard(athena):
     async with client(athena) as http:
         listing = (await http.get("/api/tasks")).json()
         assert listing["tasks"] == [] and listing["tools"] == ["forget_memory"]  # the tools that ask first
-        assert [e["title"] for e in listing["examples"]] == ["Morning briefing", "MCP servers worth adding", "Research"]
+        examples = [e["title"] for e in listing["examples"]]
+        assert examples == ["Morning briefing", "MCP servers worth adding", "Skills from habits", "Research"]
         assert listing["quiet_minutes"] == 5 and "weekdays 07:30" in listing["schedules"]
 
         bad = await http.post("/api/tasks", json={"title": "X", "instructions": "Y", "schedule": "sometime"})
@@ -638,3 +639,97 @@ async def test_a_mac_that_cant_be_reached(athena):
         "Couldn't reach your Mac" in response.json()["error"]
         and "Could not resolve hostname" in response.json()["error"]
     )
+
+
+# -- reviewing what Athena suggested, and skills ------------------------------------------------------
+
+
+async def test_suggested_memories_are_saved_changed_or_discarded(athena):
+    store = athena.memory.store
+    first = store.suggest("George's dentist is on Elm Street.", "your task “Errands”")
+    second = store.suggest("George dislikes olives.", "your task “Recipes”")
+    async with client(athena) as http:
+        overview = (await http.get("/api/overview")).json()
+        assert overview["review"] == {"memories": 2, "skills": 0}
+        memory = (await http.get("/api/memory")).json()
+        assert [(s["id"], s["source"]) for s in memory["suggestions"]] == [
+            (first, "your task “Errands”"),
+            (second, "your task “Recipes”"),
+        ]
+
+        changed = {"action": "approve", "text": "George's dentist is on Elm Street, Bath."}
+        memory = (await http.post(f"/api/memory/suggestions/{first}", json=changed)).json()
+        assert [s["id"] for s in memory["suggestions"]] == [second] and memory["facts"] == 1
+        memory = (await http.post(f"/api/memory/suggestions/{second}", json={"action": "discard"})).json()
+        assert memory["suggestions"] == [] and memory["facts"] == 1
+        assert [h.text for h in store.recent()] == ["George's dentist is on Elm Street, Bath."]
+
+        for path, body, status in [
+            (f"/api/memory/suggestions/{first}", {"action": "approve"}, 404),  # saved already
+            (f"/api/memory/suggestions/{second}", {"action": "discard"}, 404),
+            ("/api/memory/suggestions/x", {"action": "discard"}, 404),
+            (f"/api/memory/suggestions/{first}", {"action": "keep"}, 400),
+            (f"/api/memory/suggestions/{first}", {"action": "approve", "text": " "}, 400),
+        ]:
+            assert (await http.post(path, json=body)).status_code == status, (path, body)
+
+
+async def test_skills_from_the_dashboard(athena):
+    trip = {"name": "Trip plans", "description": "When I ask for a trip", "body": "Trains first."}
+    async with client(athena) as http:
+        listing = (await http.get("/api/skills")).json()
+        assert listing == {"skills": [], "suggestions": [], "reviews": True}
+
+        listing = (await http.post("/api/skills", json=trip)).json()
+        (skill,) = listing["skills"]
+        assert (skill["name"], skill["created_by"], skill["versions"]) == ("Trip plans", "you", 1)
+        assert athena.agent.prompt().endswith("## Your skills\n- Trip plans: When I ask for a trip")
+        assert athena.rewarm.is_set()  # the prompt changed, so the model server reads it again
+
+        edited = (await http.post(f"/api/skills/{skill['id']}", json={**trip, "body": "Trains, then hotels."})).json()
+        assert edited["skills"][0]["body"] == "Trains, then hotels." and edited["skills"][0]["versions"] == 2
+        versions = (await http.get(f"/api/skills/{skill['id']}/versions")).json()["versions"]
+        assert [v["body"] for v in versions] == ["Trains, then hotels.", "Trains first."]
+        restored = (await http.post(f"/api/skills/{skill['id']}", json={"restore": versions[1]["id"]})).json()
+        assert restored["skills"][0]["body"] == "Trains first."
+
+        # Athena's suggestion, working by itself: you change it, then approve it.
+        athena.skills.store.suggest(
+            skill["id"],
+            "Trip plans",
+            trip["description"],
+            "Trains first.\nNo flights.",
+            "You said so",
+            "your task “Weekly”",
+        )
+        listing = (await http.get("/api/skills")).json()
+        (suggestion,) = listing["suggestions"]
+        assert suggestion["was"] == {"name": "Trip plans", "description": "When I ask for a trip"}
+        assert suggestion["diff"] == [{"op": " ", "text": "Trains first."}, {"op": "+", "text": "No flights."}]
+        assert (await http.get("/api/overview")).json()["review"] == {"memories": 0, "skills": 1}
+        approve = {"action": "approve", "body": "Trains first.\nNo flights, ever."}
+        listing = (await http.post(f"/api/skills/suggestions/{suggestion['id']}", json=approve)).json()
+        assert listing["suggestions"] == [] and listing["skills"][0]["body"] == "Trains first.\nNo flights, ever."
+
+        new = athena.skills.store.suggest(None, "Recipes", "When I cook", "Metric.", "", "your task “Weekly”")
+        listing = (await http.post(f"/api/skills/suggestions/{new}", json={"action": "discard"})).json()
+        assert listing["suggestions"] == [] and [s["name"] for s in listing["skills"]] == ["Trip plans"]
+
+        for method, path, body, status in [
+            ("POST", "/api/skills", {**trip}, 400),  # one has that name
+            ("POST", "/api/skills", {"name": "x", "description": "y"}, 400),
+            ("POST", "/api/skills", {**trip, "name": "Long", "body": "x" * 5001}, 400),
+            ("POST", f"/api/skills/{skill['id']}", {"restore": "1"}, 400),
+            ("POST", f"/api/skills/{skill['id']}", {"restore": 99999}, 400),
+            ("POST", "/api/skills/999", {**trip, "name": "Other"}, 400),
+            ("GET", "/api/skills/999/versions", None, 404),
+            ("GET", "/api/skills/abc", None, 404),
+            ("POST", f"/api/skills/suggestions/{new}", {"action": "approve"}, 400),  # gone
+            ("POST", "/api/skills/suggestions/1", {"action": "maybe"}, 400),
+        ]:
+            response = await http.request(method, path, json=body)
+            assert response.status_code == status, (method, path, body, response.text)
+
+        listing = (await http.delete(f"/api/skills/{skill['id']}")).json()
+        assert listing["skills"] == [] and athena.agent.prompt() == athena.agent.system_prompt
+        assert (await http.delete(f"/api/skills/{skill['id']}")).status_code == 400

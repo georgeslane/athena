@@ -10,6 +10,10 @@ Each kind has an index of its own. Facts are searched automatically for every me
 Documents and conversations are searched only when the model asks (``search_memory``):
 a document is too long to add to every message, and an old answer could be mistaken for a
 current one.
+
+Facts Athena wants to remember while it works by itself, on a task, are suggestions until you
+approve them on the dashboard: what it read could have put them there, and they'd be shown to
+it in every conversation after.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ import sqlite_vec
 from openai import AsyncOpenAI
 
 from pi_assistant.config import EmbeddingsConfig, MemoryConfig
-from pi_assistant.tools import Tool
+from pi_assistant.tools import Tool, current_turn
 
 if TYPE_CHECKING:
     from pi_assistant.history import ConversationStore, Exchange
@@ -137,6 +141,16 @@ class MemoryHit:
     distance: float
 
 
+@dataclass
+class Suggestion:
+    """A fact Athena wanted to remember while working by itself, waiting for you to approve it."""
+
+    id: int
+    text: str
+    source: str  # what it was doing, such as "your task “Morning briefing”"
+    created_at: str
+
+
 def connect_db(path: Path, *, vectors: bool = False) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
@@ -187,6 +201,13 @@ class MemoryStore:
                     chunks INTEGER NOT NULL,
                     indexed_at TEXT NOT NULL,
                     note TEXT
+                );
+                -- Facts Athena wanted to remember while working by itself, until you approve them.
+                CREATE TABLE IF NOT EXISTS memory_suggestions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 """
             )
@@ -339,6 +360,7 @@ class MemoryStore:
                     DELETE FROM memories;
                     DELETE FROM documents;
                     DELETE FROM memory_meta;
+                    DELETE FROM memory_suggestions;
                     COMMIT;
                     """
                 )
@@ -429,6 +451,34 @@ class MemoryStore:
         for table in set(VECTOR_TABLES.values()):
             self._conn.executemany(f"DELETE FROM {table} WHERE rowid = ?", [(i,) for i in ids])
         self._conn.execute("DELETE FROM memories WHERE source = ?", (source,))
+
+    # -- suggestions, waiting for you to approve them ------------------------------------------
+
+    def suggest(self, text: str, source: str) -> int:
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO memory_suggestions (text, source, created_at) VALUES (?, ?, ?)", (text, source, now)
+            )
+        return int(cur.lastrowid)  # type: ignore[arg-type]
+
+    def suggestions(self) -> list[Suggestion]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, text, source, created_at FROM memory_suggestions ORDER BY id"
+            ).fetchall()
+        return [Suggestion(*row) for row in rows]
+
+    def suggestion(self, suggestion_id: int) -> Suggestion | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, text, source, created_at FROM memory_suggestions WHERE id = ?", (suggestion_id,)
+            ).fetchone()
+        return Suggestion(*row) if row else None
+
+    def drop_suggestion(self, suggestion_id: int) -> bool:
+        with self._lock, self._conn:
+            return self._conn.execute("DELETE FROM memory_suggestions WHERE id = ?", (suggestion_id,)).rowcount > 0
 
     def count(self) -> dict[str, int]:
         with self._lock:
@@ -537,6 +587,31 @@ class MemoryService:
             if hit.distance < self.cfg.duplicate_distance:
                 return hit.id, False
         return self.store.add(text, vector, "fact", source), True
+
+    async def suggest(self, text: str, source: str) -> tuple[str, int]:
+        """Keep a fact for you to approve. Returns what became of it, and its id: ("suggested", the
+        suggestion's), ("known", the memory's) if it's remembered already, or ("pending", the
+        suggestion's) if it's waiting for you already."""
+        text = text.strip()
+        if not text:
+            raise ValueError("nothing to remember")
+        vector = await self.embedder.embed_one(text, "document")
+        for hit in self.store.search(vector, 1, ("fact",)):
+            if hit.distance < self.cfg.duplicate_distance:
+                return "known", hit.id
+        for waiting in self.store.suggestions():
+            if waiting.text.casefold() == text.casefold():
+                return "pending", waiting.id
+        return "suggested", self.store.suggest(text, source)
+
+    async def approve(self, suggestion_id: int, text: str | None = None) -> tuple[int, bool]:
+        """Remember a suggested fact, as it is or as you've changed it. Returns what remember() does."""
+        suggestion = self.store.suggestion(suggestion_id)
+        if suggestion is None:
+            raise KeyError(suggestion_id)
+        result = await self.remember(text if text and text.strip() else suggestion.text)
+        self.store.drop_suggestion(suggestion_id)
+        return result
 
     async def search(self, query: str, k: int | None = None, kind: Kind | None = None) -> list[MemoryHit]:
         """The entries nearest the query: of one kind, or of every kind."""
@@ -687,6 +762,17 @@ class MemoryService:
             return f"[{self.show_path(path)}{changed}: characters {start}-{end} of {len(text)}{more}]\n{part}"
 
         async def remember(args: dict[str, Any]) -> str:
+            turn = current_turn()
+            if turn.alone:  # working by itself: you approve it first
+                became, ident = await self.suggest(str(args.get("fact", "")), turn.alone)
+                if became == "known":
+                    return f"Already known (memory #{ident})."
+                if became == "suggested":
+                    turn.note("suggested", "memory")
+                return (
+                    "Kept for the user to approve: what you remember while working by yourself is saved "
+                    "once they've approved it on the dashboard."
+                )
             memory_id, created = await self.remember(str(args.get("fact", "")))
             return f"Saved as memory #{memory_id}." if created else f"Already known (memory #{memory_id})."
 
