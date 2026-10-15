@@ -155,6 +155,14 @@ class TasksConfig(_Section):
     confirm_minutes: float = 60.0  # how long a task waits for you to allow a tool that asks first
 
 
+class AlertsConfig(_Section):
+    # Athena messages you when something it needs stops working, and when it's back (see README, "Alerts").
+    enabled: bool = True
+    every_minutes: float = Field(default=5.0, gt=0)  # how often it checks
+    after_failures: int = Field(default=2, ge=1)  # checks in a row something must fail before you're told
+    min_free_gb: float = 1.0  # less free space than this on the drive Athena's data is on is a problem
+
+
 class SiriConfig(_Section):
     # Lets an Apple Shortcut ask the assistant, so you can ask by voice (see README, "Siri").
     enabled: bool = False
@@ -215,6 +223,7 @@ class _Config(_Section):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     siri: SiriConfig = Field(default_factory=SiriConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.

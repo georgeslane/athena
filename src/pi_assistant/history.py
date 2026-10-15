@@ -7,10 +7,14 @@ Athena to forget everything, or when /retry answers the last one again: /session
 
 A session is everything since you last started one with /session (or from the
 dashboard). It applies to every chat, and usage statistics are counted per session.
+
+Each reply also notes the tools Athena used for it, in order, so it can look back at how it
+did things and write skills for what it does the same way often (skills.py).
 """
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from dataclasses import dataclass
@@ -36,6 +40,7 @@ class Exchange:
     question: str
     answer: str
     created_at: str
+    tools: list[str] | None = None  # the tools used for the reply, in order; None if it wasn't noted
 
 
 class ConversationStore:
@@ -65,6 +70,9 @@ class ConversationStore:
                 );
                 """
             )
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(messages)")}
+            if "tools" not in columns:  # a database from before replies noted their tools
+                self._conn.execute("ALTER TABLE messages ADD COLUMN tools TEXT")
         self.session = self._current_session() or self.new_session(first_message=0)
 
     def _current_session(self) -> Session | None:
@@ -118,12 +126,16 @@ class ConversationStore:
                 rows = keep
         return [{"role": role, "content": content} for _, role, content in rows]
 
-    def append_exchange(self, chat_id: str, user_text: str, assistant_text: str) -> None:
+    def append_exchange(
+        self, chat_id: str, user_text: str, assistant_text: str, tools: list[str] | None = None
+    ) -> None:
+        """Keep a message and the reply to it, with the tools used for the reply, if they're known."""
         now = datetime.now(UTC).isoformat(timespec="seconds")
+        used = json.dumps(tools) if tools is not None else None
         with self._lock, self._conn:
             self._conn.executemany(
-                "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                [(chat_id, "user", user_text, now), (chat_id, "assistant", assistant_text, now)],
+                "INSERT INTO messages (chat_id, role, content, created_at, tools) VALUES (?, ?, ?, ?, ?)",
+                [(chat_id, "user", user_text, now, None), (chat_id, "assistant", assistant_text, now, used)],
             )
 
     def take_last(self, chat_id: str) -> Exchange | None:
@@ -153,6 +165,19 @@ class ConversationStore:
                 (message_id, limit),
             ).fetchall()
         return [Exchange(*row) for row in rows]
+
+    def exchanges_since(self, when: str, limit: int = 200) -> list[Exchange]:
+        """Exchanges since ``when`` (an ISO time in UTC) whose tools were noted, oldest first, in every chat."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT a.id, a.chat_id, q.content, a.content, a.created_at, a.tools FROM messages AS a "
+                "JOIN messages AS q ON q.id = (SELECT MAX(id) FROM messages "
+                "WHERE chat_id = a.chat_id AND id < a.id AND role = 'user') "
+                "WHERE a.role = 'assistant' AND a.created_at >= ? AND a.tools IS NOT NULL "
+                "ORDER BY a.id DESC LIMIT ?",
+                (when, limit),
+            ).fetchall()
+        return [Exchange(*row[:5], tools=json.loads(row[5])) for row in reversed(rows)]
 
     def reset(self, chat_id: str) -> None:
         with self._lock, self._conn:

@@ -1,10 +1,15 @@
-# systemd unit for pi-assistant. scripts/install.sh fills in the @PLACEHOLDERS@
+# systemd unit for pi-assistant. scripts/install-units.sh fills in the @PLACEHOLDERS@
 # and installs it to /etc/systemd/system/pi-assistant.service.
 
 [Unit]
 Description=pi-assistant (Telegram AI assistant)
 Wants=network-online.target
 After=network-online.target
+# If it fails to start five times in ten minutes, systemd stops trying, and pi-assistant-stopped
+# tells you in Telegram, with the end of its log.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+OnFailure=pi-assistant-stopped.service
 
 [Service]
 Type=simple

@@ -1,0 +1,16 @@
+# Tells you in Telegram that pi-assistant has stopped, which it can't do itself (scripts/tell-stopped.py).
+# systemd starts it when pi-assistant.service fails for good. scripts/install-units.sh fills in the
+# @PLACEHOLDERS@ and installs it to /etc/systemd/system/pi-assistant-stopped.service.
+
+[Unit]
+Description=Tell you that pi-assistant has stopped
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@REPO_DIR@/.env
+# The system's own Python, with nothing from Athena's environment: that may be what's broken.
+ExecStart=/usr/bin/python3 -I @REPO_DIR@/scripts/tell-stopped.py

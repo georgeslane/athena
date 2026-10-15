@@ -12,7 +12,6 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SERVICE=/etc/systemd/system/pi-assistant.service
 
 for arg in "$@"; do
   case "$arg" in
@@ -72,10 +71,8 @@ if [[ ! -f .env ]]; then
 fi
 chmod 600 .env
 
-step "Installing the systemd service"
-sed -e "s|@USER@|$USER|g" -e "s|@REPO_DIR@|$REPO_DIR|g" -e "s|@HOME@|$HOME|g" \
-  deploy/pi-assistant.service | sudo tee "$SERVICE" >/dev/null
-sudo systemctl daemon-reload
+step "Installing the systemd services"
+bash scripts/install-units.sh
 sudo systemctl enable pi-assistant >/dev/null 2>&1
 
 cat <<EOF

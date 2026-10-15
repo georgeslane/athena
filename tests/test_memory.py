@@ -244,3 +244,35 @@ def test_a_document_is_replaced_whole(tmp_path):
     store.clear()  # forgetting everything forgets documents too
     assert store.documents() == {} and store.document_sources() == []
     store.close()
+
+
+async def test_what_athena_remembers_by_itself_waits_for_you(memory):
+    from pi_assistant.tools import Turn, begin_turn
+
+    remember = next(t for t in memory.tools() if t.name == "remember").handler
+    known_id, _ = await memory.remember("George's sister is called Anna.")
+    turn = Turn(alone="your task “Birthdays”")
+    end = begin_turn(turn)
+    try:
+        said = await remember({"fact": "George's dentist is on Elm Street."})
+        assert said.startswith("Kept for the user to approve")
+        assert await remember({"fact": "george's dentist is on elm street."}) == said  # waiting already
+        assert await remember({"fact": "George's sister is called Anna."}) == f"Already known (memory #{known_id})."
+    finally:
+        end()
+    assert turn.notes == {"suggested": ["memory"]}  # once: the others weren't new
+    (suggestion,) = memory.store.suggestions()
+    assert (suggestion.text, suggestion.source) == ("George's dentist is on Elm Street.", "your task “Birthdays”")
+    assert [h.text for h in await memory.recall("dentist Elm Street")] == []  # not recalled until approved
+
+    memory_id, created = await memory.approve(suggestion.id, "George's dentist is on Elm Street, Bath.")
+    assert created and memory.store.get(memory_id).text == "George's dentist is on Elm Street, Bath."
+    assert memory.store.suggestions() == []
+    with pytest.raises(KeyError):
+        await memory.approve(suggestion.id)
+
+    # Answering you, it's remembered straight away.
+    assert (await remember({"fact": "George likes oat milk."})).startswith("Saved as memory #")
+    memory.store.suggest("Something to forget", "a task")
+    memory.store.clear()
+    assert memory.store.suggestions() == []

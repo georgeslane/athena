@@ -14,6 +14,7 @@ main() {
     # Local MCP servers run in a bubblewrap sandbox, and won't start without it.
     sudo apt-get install -y -qq bubblewrap >/dev/null
   fi
+  bash scripts/install-units.sh  # from the code just pulled, so new or changed units are installed
   sudo systemctl restart pi-assistant
   echo "Updated and restarted pi-assistant."
   if systemctl cat pi-assistant-display.service >/dev/null 2>&1; then

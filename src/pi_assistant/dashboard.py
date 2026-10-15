@@ -23,8 +23,15 @@ The page talks to Athena with JSON:
   POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools"}
   POST   /api/tasks/<id>        {"action": "run" | "pause" | "resume" | "stop"}
   DELETE /api/tasks/<id>        delete one
-  GET    /api/memory            what's in memory, and the documents indexed from your Mac
+  GET    /api/memory            what's in memory, the documents indexed from your Mac, and suggested memories
   POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning
+  POST   /api/memory/suggestions/<id>  {"action": "approve" | "discard", "text"}: a memory a task suggested
+  GET    /api/skills            skills, and what Athena's suggested
+  POST   /api/skills            add one: {"name", "description", "body"}
+  POST   /api/skills/<id>       change one: {"name", "description", "body"}, or {"restore": version id}
+  DELETE /api/skills/<id>       delete one
+  GET    /api/skills/<id>/versions  every version of one, newest first
+  POST   /api/skills/suggestions/<id>  {"action": "approve" | "discard", "name", "description", "body"}
   GET    /api/documents/browse  ?path=: the folders inside a folder on your Mac, to choose from
   POST   /api/documents/folders {"add": path} or {"remove": path}: the folders to index
   POST   /api/documents/index   index them now, and /api/documents/stop to stop
@@ -234,6 +241,10 @@ class DashboardServer(Server):
             return _json(self.memory())
         if path == "/api/memory/search" and method == "POST":
             return _json(await self.search(_body(request)))
+        if path.startswith("/api/memory/suggestions/") and method == "POST":
+            return _json(await self._memory_suggestion(path.removeprefix("/api/memory/suggestions/"), _body(request)))
+        if path == "/api/skills" or path.startswith("/api/skills/"):
+            return self._skills(request, path.removeprefix("/api/skills").strip("/"), method)
         if path.startswith("/api/documents/"):
             return await self._documents(request, path.removeprefix("/api/documents/"), method)
         if path == "/api/tasks" or path.startswith("/api/tasks/"):
@@ -295,6 +306,81 @@ class DashboardServer(Server):
                 else:
                     raise ValueError('Say what to do: {"action": "run" | "pause" | "resume" | "stop"}.')
                 return _json(self.tasks())
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        raise HTTPError(405, "There's nothing like that here.")
+
+    async def _memory_suggestion(self, which: str, body: dict[str, Any]) -> dict[str, Any]:
+        memory = self.s.memory
+        if not which.isdigit():
+            raise HTTPError(404, "There's no suggestion like that.")
+        action, text = body.get("action"), body.get("text")
+        if text is not None and (not isinstance(text, str) or not text.strip() or len(text) > 2000):
+            raise HTTPError(400, "Say what to remember, in up to 2,000 characters.")
+        if action == "discard":
+            if not memory.store.drop_suggestion(int(which)):
+                raise HTTPError(404, "There's no suggestion like that: it may have been saved or discarded already.")
+        elif action == "approve":
+            try:
+                await memory.approve(int(which), text)
+            except KeyError:
+                raise HTTPError(
+                    404, "There's no suggestion like that: it may have been saved or discarded already."
+                ) from None
+            except Exception as exc:
+                log.warning("Dashboard: couldn't remember a suggestion: %s", exc)
+                raise HTTPError(
+                    502, f"Couldn't save it: is the embeddings server ({memory.embedder.cfg.base_url}) up?"
+                ) from None
+        else:
+            raise HTTPError(400, 'Say what to do: {"action": "approve" | "discard"}.')
+        return self.memory()
+
+    def _skills(self, request: Request, which: str, method: str) -> Response:
+        skills = self.s.skills
+        try:
+            if not which and method == "GET":
+                return _json(self.skills())
+            if not which and method == "POST":
+                body = _skill_body(request)
+                skills.save(None, body["name"], body["description"], body["body"], by="you")
+                return _json(self.skills())
+            if which.startswith("suggestions/") and method == "POST":
+                number = which.removeprefix("suggestions/")
+                if not number.isdigit():
+                    raise HTTPError(404, "There's no suggestion like that.")
+                body = _body(request)
+                if body.get("action") == "discard":
+                    skills.reject(int(number))
+                elif body.get("action") == "approve":
+                    edited = {k: body[k] for k in ("name", "description", "body") if isinstance(body.get(k), str)}
+                    skills.approve(int(number), edited or None)
+                else:
+                    raise ValueError('Say what to do: {"action": "approve" | "discard"}.')
+                return _json(self.skills())
+            number, _, rest = which.partition("/")
+            if not number.isdigit():
+                raise HTTPError(404, "There's no skill like that.")
+            skill_id = int(number)
+            if rest == "versions" and method == "GET":
+                if skills.store.get(skill_id) is None:
+                    raise HTTPError(404, "There's no skill like that.")
+                return _json({"versions": [skills.describe_version(v) for v in skills.store.versions(skill_id)]})
+            if rest:
+                raise HTTPError(404, "There's nothing like that here.")
+            if method == "DELETE":
+                skills.delete(skill_id)
+                return _json(self.skills())
+            if method == "POST":
+                body = _body(request)
+                if "restore" in body:
+                    if not isinstance(body["restore"], int):
+                        raise ValueError("Say which version to go back to, by its id.")
+                    skills.restore(skill_id, body["restore"])
+                else:
+                    fields = _skill_body(request)
+                    skills.save(skill_id, fields["name"], fields["description"], fields["body"], by="you")
+                return _json(self.skills())
         except ValueError as exc:
             raise HTTPError(400, str(exc)) from None
         raise HTTPError(405, "There's nothing like that here.")
@@ -363,6 +449,16 @@ class DashboardServer(Server):
             "facts": counts.get("fact", 0),
             "conversations": counts.get("conversation", 0),
             "documents": self.s.documents.summary(),
+            # Facts Athena wanted to remember while working by itself, waiting for you to approve them.
+            "suggestions": [dataclasses.asdict(s) for s in self.s.memory.store.suggestions()],
+        }
+
+    def skills(self) -> dict[str, Any]:
+        skills = self.s.skills
+        return {
+            "skills": [skills.describe(s) for s in skills.store.all()],
+            "suggestions": [skills.describe_suggestion(s) for s in skills.store.suggestions()],
+            "reviews": self.s.tasks is not None,  # skills are looked back on after they're used
         }
 
     async def _change(self, change: Any) -> Response:
@@ -427,6 +523,11 @@ class DashboardServer(Server):
                 "servers": len(servers),
                 "connected": sum(1 for st in servers if st.connected),
                 "applying": self._applying,
+            },
+            # What Athena suggested while working by itself, waiting for you.
+            "review": {
+                "memories": len(self.s.memory.store.suggestions()),
+                "skills": len(self.s.skills.store.suggestions()),
             },
         }
 
@@ -552,6 +653,14 @@ def _body(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPError(400, "Send a JSON object.")
     return body
+
+
+def _skill_body(request: Request) -> dict[str, str]:
+    body = _body(request)
+    fields = {key: body.get(key) for key in ("name", "description", "body")}
+    if not all(isinstance(value, str) for value in fields.values()):
+        raise HTTPError(400, "A skill needs a name, when to use it, and how.")
+    return fields  # type: ignore[return-value]
 
 
 def _check_same_origin(request: Request) -> None:
