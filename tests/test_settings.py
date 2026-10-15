@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 
-from pi_assistant.config import NewsConfig, SQLiteConfig, Trading212Config, load_config
+from pi_assistant.config import load_config
+from pi_assistant.databases import SQLiteConfig
+from pi_assistant.news import NewsConfig
 from pi_assistant.settings import (
     BY_ID,
     CATALOG,
@@ -20,6 +22,7 @@ from pi_assistant.settings import (
     Settings,
     SettingsError,
 )
+from pi_assistant.trading212 import Trading212Config
 
 REPO = Path(__file__).resolve().parents[1]
 # The names of the keys these tests set. One a line, or gitleaks takes each name for the value of the one before.

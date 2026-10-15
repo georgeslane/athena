@@ -1,13 +1,16 @@
 """`pi-assistant doctor`'s measurement of the prompt the model reads before every reply."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from conftest import FakeLLMServer, completion
 
 from pi_assistant import doctor
+from pi_assistant.databases import Databases
 from pi_assistant.doctor import FAIL, OK, WARN, PromptCost, check_prompt, measure_prompt, report_prompt
 from pi_assistant.tools import Tool
+from pi_assistant.trading212 import Trading212
 
 SCHEMAS = [{"type": "function", "function": {"name": "x", "description": "y", "parameters": {"type": "object"}}}]
 
@@ -102,7 +105,7 @@ async def test_checks_the_trading_212_key_and_its_permissions(config):
         reported = []
         config.trading212.api_key = key
         http = httpx.AsyncClient(transport=httpx.MockTransport(t212.handler))
-        return reported, doctor.check_trading212(config, lambda mark, msg: reported.append((mark, msg)), http)
+        return reported, Trading212.check(config, lambda mark, msg: reported.append((mark, msg)), http)
 
     reported, check = run(FakeTrading212())
     await check
@@ -141,7 +144,7 @@ def test_checks_each_database_opens(config, tmp_path):
     conn.close()
     config.sqlite.databases = {"budget": "budget.db", "gone": "gone.db"}
     reported = []
-    doctor.check_databases(config, lambda mark, msg: reported.append((mark, msg)))
+    asyncio.run(Databases.check(config, lambda mark, msg: reported.append((mark, msg))))
     assert reported == [
         (OK, f"budget: 1 table, read-only ({tmp_path / 'budget.db'})"),
         (FAIL, f"gone: There's no database file at {tmp_path / 'gone.db'}."),

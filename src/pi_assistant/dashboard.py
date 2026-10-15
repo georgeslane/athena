@@ -389,7 +389,7 @@ class DashboardServer(Server):
         servers = self.s.mcp.status()
         running = Running(
             servers={st.name: (st.connected, st.error, st.offered) for st in servers},
-            builtins=self.s.builtins.running(),
+            builtins=self.s.builtins.status(),
             applying=self._applying,
             held={st.name: [_held(c) for c in st.pending] for st in servers if st.pending},
         )

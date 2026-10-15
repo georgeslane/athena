@@ -15,10 +15,16 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Self
 
-from pi_assistant.config import SQLiteConfig
+from pydantic import Field as Setting
+
+from pi_assistant.builtin import FAIL, OK, Builtin, Report, Section
+from pi_assistant.catalog import Field, Integration
 from pi_assistant.tools import Tool, ToolError
+
+if TYPE_CHECKING:
+    from pi_assistant.config import Config
 
 CELL_CHARS = 200
 _READS = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
@@ -26,7 +32,56 @@ _STATEMENTS = ("select", "with", "values")
 _WORD = re.compile(r"[A-Za-z]+")
 
 
-class Databases:
+class SQLiteConfig(Section):
+    # SQLite databases the assistant can query, by name (see README, "Databases"). Only these
+    # files are ever opened, and only for reading.
+    enabled: bool = True
+    databases: dict[str, str] = Setting(default_factory=dict)
+    max_rows: int = 100
+    timeout_seconds: float = 10.0  # a query running longer than this is stopped
+
+
+class Databases(Builtin):
+    section = "sqlite"
+    Settings = SQLiteConfig
+    entry = Integration(
+        "databases",
+        "Databases",
+        "Answers questions from SQLite databases on the Pi. It can only read them.",
+        "sqlite",
+        builtin=True,
+        fields=(
+            Field(
+                "databases",
+                "Databases",
+                "map",
+                "Files on the Pi, by any name you like. A path can be relative to the config's folder.",
+                columns=("Name", "Path"),
+                item="a database",
+            ),
+        ),
+        asks="Never asks: it can only read.",
+    )
+
+    @classmethod
+    def wanted(cls, cfg: Config) -> bool:
+        return cfg.sqlite.enabled and bool(cfg.sqlite.databases)
+
+    @classmethod
+    def start(cls, cfg: Config) -> Self:
+        return cls(cfg.sqlite, {name: cfg.resolve(path) for name, path in cfg.sqlite.databases.items()})
+
+    @classmethod
+    async def check(cls, cfg: Config, report: Report) -> None:
+        for name, path in cfg.sqlite.databases.items():
+            file = cfg.resolve(path)
+            try:
+                tables = cls(cfg.sqlite, {name: file}).count_tables(name)
+            except ToolError as exc:
+                report(FAIL, f"{name}: {exc}")
+            else:
+                report(OK, f"{name}: {tables} table{'' if tables == 1 else 's'}, read-only ({file})")
+
     def __init__(self, cfg: SQLiteConfig, paths: dict[str, Path]):
         self.cfg = cfg
         self.paths = paths  # name -> file, already resolved against the config's folder
