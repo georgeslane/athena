@@ -58,21 +58,23 @@ def strip_reasoning(text: str) -> str:
     return text.strip()
 
 
-def request_options(cfg: LLMConfig) -> dict[str, Any]:
-    """What goes in each request besides the standard fields: extra_body, with the thinking setting.
+def request_options(cfg: LLMConfig, thinking: str | None = None) -> dict[str, Any]:
+    """What goes in each request besides the standard fields: extra_body, with the thinking setting,
+    or ``thinking`` instead of it, such as a task's.
 
     Thinking is switched with the chat template's enable_thinking, which oMLX, vLLM and SGLang
     pass on, and "short" also sets oMLX's thinking_budget.
     """
     body = copy.deepcopy(cfg.extra_body)
-    if cfg.thinking is None:
+    thinking = thinking or cfg.thinking
+    if thinking is None:
         return body
-    on = cfg.thinking != "off"
+    on = thinking != "off"
     body["chat_template_kwargs"] = {**(body.get("chat_template_kwargs") or {}), "enable_thinking": on}
     if "enable_thinking" in body:  # oMLX's shorthand for the same, which mustn't disagree with it
         body["enable_thinking"] = on
     body.pop("thinking_budget", None)
-    if cfg.thinking == "short":
+    if thinking == "short":
         body["thinking_budget"] = cfg.short_thinking_tokens
     return body
 
@@ -113,6 +115,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        thinking: str | None = None,
     ) -> LLMReply:
         kwargs: dict[str, Any] = {
             "model": model or self.cfg.model,
@@ -123,7 +126,7 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        if body := request_options(self.cfg):
+        if body := request_options(self.cfg, thinking):
             kwargs["extra_body"] = body
 
         started = time.monotonic()

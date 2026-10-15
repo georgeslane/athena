@@ -219,7 +219,8 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
         "error": None,
         "checked": 0,
     }
-    assert overview["tools"] == {"count": 7, "servers": 1, "connected": 1, "applying": False}
+    # With the tools for tasks, and the MCP Registry's.
+    assert overview["tools"] == {"count": 11, "servers": 1, "connected": 1, "applying": False}
     assert overview["status"]["state"] == "idle" and overview["status"]["last_task"] == "Thanks"
 
 
@@ -262,6 +263,60 @@ async def test_switching_thinking_on_short_or_off(athena):
             "error": "Thinking can be on, short, off, not 'lots'."
         }
         assert athena.config.llm.thinking == "short"
+
+
+async def test_tasks_from_the_dashboard(athena):
+    said = []
+
+    class Telegram:
+        chat_id = "111"
+
+        async def tell(self, text):
+            said.append(text)
+
+        async def ask(self, tool, args, summary, *, why, timeout):
+            return False
+
+    athena.channel = Telegram()
+    async with client(athena) as http:
+        listing = (await http.get("/api/tasks")).json()
+        assert listing["tasks"] == [] and listing["tools"] == ["forget_memory"]  # the tools that ask first
+        assert [e["title"] for e in listing["examples"]] == ["Morning briefing", "MCP servers worth adding", "Research"]
+        assert listing["quiet_minutes"] == 5 and "weekdays 07:30" in listing["schedules"]
+
+        bad = await http.post("/api/tasks", json={"title": "X", "instructions": "Y", "schedule": "sometime"})
+        assert bad.status_code == 400 and "I don't understand the schedule" in bad.json()["error"]
+        bad = await http.post("/api/tasks", json={"title": "X", "instructions": "Y", "schedule": "now", "tools": "add"})
+        assert bad.status_code == 400
+
+        # You haven't been chatting, so it runs straight away, and tells you what it found.
+        new = {"title": "Sums", "instructions": "Work something out.", "schedule": "now", "tools": []}
+        listing = (await http.post("/api/tasks", json=new)).json()
+        [task] = listing["tasks"]
+        assert (task["title"], task["created_by"], task["when"]) == (
+            "Sums",
+            "you",
+            "once, as soon as you're not chatting",
+        )
+        await until(lambda: said)
+        assert said == ["📋 **Sums**\n\nAll done."]
+        await until(lambda: athena.tasks.store.get(task["id"]).status == "done")
+        [task] = (await http.get("/api/tasks")).json()["tasks"]
+        assert (task["status"], task["last_outcome"], task["last_result"]) == ("done", "told you", "All done.")
+
+        regular = {"title": "Daily", "instructions": "Check.", "schedule": "daily 07:30", "tools": []}
+        listing = (await http.post("/api/tasks", json=regular)).json()
+        daily = listing["tasks"][1]
+        assert daily["status"] == "active" and daily["next_run"] > time.time()
+        paused = (await http.post(f"/api/tasks/{daily['id']}", json={"action": "pause"})).json()["tasks"][1]
+        assert paused["status"] == "paused" and paused["next_run"] is None
+        resumed = (await http.post(f"/api/tasks/{daily['id']}", json={"action": "resume"})).json()["tasks"][1]
+        assert resumed["status"] == "active"
+        assert (await http.post(f"/api/tasks/{daily['id']}", json={"action": "explode"})).status_code == 400
+        assert (await http.post("/api/tasks/nope", json={"action": "run"})).status_code == 404
+        assert (await http.delete(f"/api/tasks/{daily['id']}")).status_code == 200
+        assert [t["id"] for t in (await http.get("/api/tasks")).json()["tasks"]] == [task["id"]]
+        assert (await http.delete(f"/api/tasks/{daily['id']}")).status_code == 400  # already gone
 
 
 async def test_the_status_waits_for_a_change(athena):

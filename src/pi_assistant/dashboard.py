@@ -19,6 +19,10 @@ The page talks to Athena with JSON:
   DELETE /api/tools/<id>        remove a server that isn't one of the recommended ones
   POST   /api/tools/<id>/approve  let the model use tools held back because they changed: {"tools": {name: fingerprint}}
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
+  GET    /api/tasks             what Athena does by itself, and what a new task can use
+  POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools"}
+  POST   /api/tasks/<id>        {"action": "run" | "pause" | "resume" | "stop"}
+  DELETE /api/tasks/<id>        delete one
   GET    /api/memory            what's in memory, and the documents indexed from your Mac
   POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning
   GET    /api/documents/browse  ?path=: the folders inside a folder on your Mac, to choose from
@@ -54,6 +58,7 @@ from pi_assistant.memory import KINDS
 from pi_assistant.settings import EnvFile, Running, Settings, SettingsError
 from pi_assistant.status import StatusFeed
 from pi_assistant.status_api import wait_seconds
+from pi_assistant.tasks import EXAMPLES, NEVER_UNASKED, SCHEDULES
 from pi_assistant.webserver import HTTPError, Request, Response, Server
 
 if TYPE_CHECKING:
@@ -231,6 +236,8 @@ class DashboardServer(Server):
             return _json(await self.search(_body(request)))
         if path.startswith("/api/documents/"):
             return await self._documents(request, path.removeprefix("/api/documents/"), method)
+        if path == "/api/tasks" or path.startswith("/api/tasks/"):
+            return self._tasks(request, path.removeprefix("/api/tasks").strip("/"), method)
         if path.startswith("/api/tools/") and path.endswith("/approve") and method == "POST":
             name = path.removeprefix("/api/tools/").removesuffix("/approve")
             tools = _body(request).get("tools")
@@ -253,6 +260,44 @@ class DashboardServer(Server):
                     self.s.mcp.approvals.forget(name)  # a server added later with this name starts afresh
                 return response
         raise HTTPError(404 if method == "GET" else 405, "There's nothing like that here.")
+
+    def _tasks(self, request: Request, task: str, method: str) -> Response:
+        scheduler = self.s.tasks
+        if scheduler is None:
+            raise HTTPError(409, "Tasks are switched off ([tasks] enabled = false in config.toml).")
+        try:
+            if not task and method == "GET":
+                return _json(self.tasks())
+            if not task and method == "POST":
+                body = _body(request)
+                tools = body.get("tools") or []
+                if not isinstance(tools, list):
+                    raise ValueError("Send the tools it may use without asking as a list of names.")
+                scheduler.add(
+                    str(body.get("title") or ""),
+                    str(body.get("instructions") or ""),
+                    str(body.get("schedule") or ""),
+                    tools,
+                    created_by="you",
+                )
+                return _json(self.tasks())
+            if not task.isdigit():
+                raise HTTPError(404, "There's no task like that.")
+            if method == "DELETE":
+                scheduler.delete(int(task))
+                return _json(self.tasks())
+            if method == "POST":
+                action = _body(request).get("action")
+                if action == "stop":
+                    scheduler.stop_running()
+                elif action in ("run", "pause", "resume"):
+                    getattr(scheduler, "run_now" if action == "run" else action)(int(task))
+                else:
+                    raise ValueError('Say what to do: {"action": "run" | "pause" | "resume" | "stop"}.')
+                return _json(self.tasks())
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        raise HTTPError(405, "There's nothing like that here.")
 
     async def _documents(self, request: Request, action: str, method: str) -> Response:
         documents = self.s.documents
@@ -383,6 +428,18 @@ class DashboardServer(Server):
                 "connected": sum(1 for st in servers if st.connected),
                 "applying": self._applying,
             },
+        }
+
+    def tasks(self) -> dict[str, Any]:
+        scheduler = self.s.tasks
+        assert scheduler is not None
+        asks = sorted(t.name for t in self.s.tools.all() if t.needs_confirmation and t.name not in NEVER_UNASKED)
+        return {
+            "tasks": [scheduler.describe(t) for t in scheduler.store.all()],
+            "tools": asks,  # tools that ask first, which a task may be allowed to use without asking
+            "schedules": SCHEDULES,
+            "examples": EXAMPLES,
+            "quiet_minutes": scheduler.cfg.quiet_minutes,
         }
 
     def tools(self) -> dict[str, Any]:

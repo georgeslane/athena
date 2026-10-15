@@ -145,6 +145,16 @@ class DashboardConfig(_Section):
     token: str = Field(default_factory=lambda: os.environ.get("DASHBOARD_TOKEN", ""))
 
 
+class TasksConfig(_Section):
+    # Tasks Athena does by itself, on a schedule, and tells you about (see README, "Tasks").
+    enabled: bool = True
+    quiet_minutes: float = 5.0  # a task waits until you haven't messaged Athena for this long
+    max_minutes: float = 30.0  # the most a run works for, not counting time it waits for you
+    max_tool_rounds: int = 25
+    thinking: Literal["on", "short", "off"] | None = "on"  # tasks aren't in a hurry: None follows [llm]
+    confirm_minutes: float = 60.0  # how long a task waits for you to allow a tool that asks first
+
+
 class SiriConfig(_Section):
     # Lets an Apple Shortcut ask the assistant, so you can ask by voice (see README, "Siri").
     enabled: bool = False
@@ -204,6 +214,7 @@ class _Config(_Section):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     siri: SiriConfig = Field(default_factory=SiriConfig)
+    tasks: TasksConfig = Field(default_factory=TasksConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.

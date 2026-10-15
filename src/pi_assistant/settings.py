@@ -467,10 +467,10 @@ class Settings:
             entry["state"], entry["detail"] = "error", problem
         elif tools:
             entry["state"], entry["detail"] = "on", _count(len(tools), "tool")
-        elif integ.id == "trading212" or section.get(integ.fields[0].key):
-            entry["state"], entry["detail"] = _not_started(running)  # changed in config.toml since it started
+        elif empty := next((f for f in integ.fields if f.kind == "map" and not section.get(f.key)), None):
+            entry["state"], entry["detail"] = "idle", f"No {empty.label.lower()} yet"  # such as no news feeds
         else:
-            entry["state"], entry["detail"] = "idle", _empty_detail(integ.id)
+            entry["state"], entry["detail"] = _not_started(running)  # changed in config.toml since it started
         entry["tools"] = [{"name": t, "description": "", "on": True, "asks": None} for t in tools] or None
         return entry
 
@@ -905,10 +905,6 @@ def _asks_custom(section: Mapping[str, Any]) -> str:
 def _not_started(running: Running) -> tuple[str, str]:
     """For one that's on in config.toml but isn't running: being started now, or switched on by hand since."""
     return ("starting", "Starting…") if running.applying else ("idle", "Not started yet: press Reconnect all")
-
-
-def _empty_detail(integ_id: str) -> str:
-    return {"news": "No feeds yet", "databases": "No databases yet"}.get(integ_id, "Not running")
 
 
 def _count(n: int, noun: str) -> str:

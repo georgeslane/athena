@@ -9,6 +9,7 @@ import json
 import logging
 import secrets
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import openai
@@ -63,6 +64,7 @@ COMMANDS = [
     ("stop", "Stop the answer I'm working on"),
     ("retry", "Answer your last message again"),
     ("think", "Think before answering: /think on, short or off"),
+    ("tasks", "What I do by myself: run, pause or delete it"),
     ("remember", "Save a fact: /remember <text>"),
     ("recall", "Search memory: /recall <query>"),
     ("forget", "Delete a memory: /forget <id>"),
@@ -83,6 +85,7 @@ class TelegramBot:
         self._telling: set[asyncio.Task[None]] = set()
         self._answering: dict[int, set[asyncio.Task[Any]]] = {}  # for each chat, replies /stop can stop
         self._last: dict[int, _Asked] = {}
+        self._bot: Bot | None = None
 
     # -- setup ----------------------------------------------------------------------------
 
@@ -106,6 +109,7 @@ class TelegramBot:
             app.add_handler(CommandHandler("stop", self.cmd_stop, filters=me))
             app.add_handler(CommandHandler("retry", self.cmd_retry, filters=me))
             app.add_handler(CommandHandler("think", self.cmd_think, filters=me))
+            app.add_handler(CommandHandler("tasks", self.cmd_tasks, filters=me))
             app.add_handler(CommandHandler("remember", self.cmd_remember, filters=me))
             app.add_handler(CommandHandler("recall", self.cmd_recall, filters=me))
             app.add_handler(CommandHandler("forget", self.cmd_forget, filters=me))
@@ -115,12 +119,16 @@ class TelegramBot:
             app.add_handler(MessageHandler(me & filters.TEXT & ~filters.COMMAND, self.on_text))
             app.add_handler(CallbackQueryHandler(self.on_button, pattern=r"^confirm:"))
             app.add_handler(CallbackQueryHandler(self.on_think_button, pattern=r"^think:"))
+            app.add_handler(CallbackQueryHandler(self.on_task_button, pattern=r"^task:"))
         app.add_handler(MessageHandler(filters.ALL, self.on_stranger))
         app.add_error_handler(self.on_error)
         return app
 
     async def _post_init(self, app: Application) -> None:
         self.s.mcp.listeners.append(lambda server, changes: self._tools_changed(app.bot, server, changes))
+        if self.allowed:
+            self._bot = app.bot
+            self.s.channel = self  # how tasks reach you
         await self.s.start()
         for st in self.s.mcp.status():
             log.info("MCP %s: %s", st.name, f"{st.tools} tools" if st.connected else st.error)
@@ -229,7 +237,14 @@ class TelegramBot:
             pass
 
     async def _confirm(
-        self, bot: Bot, chat_id: int, tool: str, args: dict[str, Any], summary: str | None = None
+        self,
+        bot: Bot,
+        chat_id: int,
+        tool: str,
+        args: dict[str, Any],
+        summary: str | None = None,
+        why: str = "",
+        timeout: float | None = None,
     ) -> bool:
         key = secrets.token_hex(6)
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -239,12 +254,16 @@ class TelegramBot:
         # The tool's own summary of what it will do, if it has one, goes first.
         pretty = json.dumps(args, indent=2, ensure_ascii=False)
         said = f"\n{html.escape(summary)}" if summary else ""
-        prompt = f"Allow <b>{html.escape(tool)}</b>?{said}\n<pre>{html.escape(pretty)}</pre>"
+        reason = f"🗓️ {html.escape(why)}:\n" if why else ""
+        prompt = f"{reason}Allow <b>{html.escape(tool)}</b>?{said}\n<pre>{html.escape(pretty)}</pre>"
         if len(prompt) > TELEGRAM_LIMIT:
             chunks = split_message(pretty)
             for chunk in chunks:
                 await bot.send_message(chat_id, chunk, link_preview_options=NO_PREVIEW)
-            prompt = f"Allow <b>{html.escape(tool)}</b> with the arguments in the {len(chunks)} messages above?{said}"
+            prompt = (
+                f"{reason}Allow <b>{html.escape(tool)}</b> with the arguments in the {len(chunks)} messages above?"
+                f"{said}"
+            )
         buttons = InlineKeyboardMarkup(
             [
                 [
@@ -257,7 +276,7 @@ class TelegramBot:
             chat_id, prompt, parse_mode=ParseMode.HTML, reply_markup=buttons, link_preview_options=NO_PREVIEW
         )
         try:
-            approved = await asyncio.wait_for(future, timeout=self.cfg.confirm_timeout_seconds)
+            approved = await asyncio.wait_for(future, timeout=timeout or self.cfg.confirm_timeout_seconds)
             verdict = "Allowed" if approved else "Denied"
         except TimeoutError:
             approved, verdict = False, "No answer, so denied"
@@ -275,6 +294,20 @@ class TelegramBot:
             await msg.edit_text(text, parse_mode=ParseMode.HTML)
         except TelegramError:
             pass
+
+    # -- reaching you when you haven't just asked something (channel.py) ----------------------
+
+    @property
+    def chat_id(self) -> str:
+        return str(self.cfg.allowed_user_ids[0])  # a private chat with the bot has the user's ID
+
+    async def tell(self, text: str) -> None:
+        assert self._bot is not None
+        await self._send(self._bot, self.cfg.allowed_user_ids[0], text)
+
+    async def ask(self, tool: str, args: dict[str, Any], summary: str | None, *, why: str, timeout: float) -> bool:
+        assert self._bot is not None
+        return await self._confirm(self._bot, self.cfg.allowed_user_ids[0], tool, args, summary, why, timeout)
 
     # -- handlers -----------------------------------------------------------------------------
 
@@ -485,6 +518,69 @@ class TelegramBot:
                 ]
             ]
         )
+
+    async def cmd_tasks(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text, buttons = self._tasks_message()
+        await update.effective_message.reply_text(text, reply_markup=buttons)  # type: ignore[union-attr]
+
+    def _tasks_message(self) -> tuple[str, InlineKeyboardMarkup | None]:
+        scheduler = self.s.tasks
+        if scheduler is None:
+            return "Tasks are switched off ([tasks] enabled = false in config.toml).", None
+        tasks = [scheduler.describe(t) for t in scheduler.store.all()]
+        if not tasks:
+            return (
+                "I've no tasks. Ask me to do something regularly, or in the background, such as "
+                "“every weekday at 7:30 send me a briefing”. You can also add them on the dashboard.",
+                None,
+            )
+        lines, rows = ["Tasks I do by myself:"], []
+        for t in tasks:
+            mark = {"active": "▶️", "paused": "⏸", "done": "✓", "running": "⚙️"}.get(t["status"], "")
+            nxt = ""
+            if t["status"] == "running":
+                nxt = " · working on it now"
+            elif t["waiting_for_you"]:
+                nxt = " · due, waiting until you've finished chatting"
+            elif t["next_run"]:
+                when = datetime.fromtimestamp(t["next_run"], scheduler.tz)
+                nxt = f" · next {when:%a %-d %b %H:%M}"
+            last = f" · last: {t['last_outcome']}" if t["last_outcome"] else ""
+            lines.append(f"{mark} #{t['id']} {t['title']}: {t['when']}{nxt}{last}")
+            row = [InlineKeyboardButton(f"▶ Run #{t['id']}", callback_data=f"task:run:{t['id']}")]
+            if t["status"] == "running":
+                row = [InlineKeyboardButton(f"⏹ Stop #{t['id']}", callback_data=f"task:stop:{t['id']}")]
+            elif t["status"] == "active":
+                row.append(InlineKeyboardButton("⏸ Pause", callback_data=f"task:pause:{t['id']}"))
+            else:
+                row.append(InlineKeyboardButton("⏯ Resume", callback_data=f"task:resume:{t['id']}"))
+            row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"task:delete:{t['id']}"))
+            rows.append(row)
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    async def on_task_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        assert query is not None
+        if not update.effective_user or update.effective_user.id not in self.allowed:
+            await query.answer("Not allowed.")
+            return
+        _, action, task_id = (query.data or "::").split(":", 2)
+        scheduler = self.s.tasks
+        done = {"run": "Running it now", "pause": "Paused", "resume": "Resumed", "stop": "Stopped", "delete": "Deleted"}
+        try:
+            if scheduler is None or action not in done:
+                raise ValueError("That's not something I can do.")
+            if action == "stop":
+                scheduler.stop_running()
+            else:
+                getattr(scheduler, {"run": "run_now"}.get(action, action))(int(task_id))
+        except ValueError as exc:
+            await query.answer(str(exc))
+            return
+        await query.answer(done[action])
+        text, buttons = self._tasks_message()
+        with contextlib.suppress(TelegramError):
+            await query.edit_message_text(text, reply_markup=buttons)
 
     async def cmd_remember(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = " ".join(ctx.args or []).strip()

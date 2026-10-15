@@ -453,3 +453,82 @@ async def test_retry_takes_back_the_last_answer_and_asks_again(config):
     update, replies = command_update()
     await fresh.cmd_retry(update, ctx)
     assert replies[-1].text == "There's nothing to try again in this session."
+
+
+def task_scheduler(config):
+    from pi_assistant.config import TasksConfig
+    from pi_assistant.tasks import Scheduler, TaskStore
+
+    agent = SimpleNamespace(answering_you=0, last_answered_you=float("-inf"))
+    return Scheduler(TasksConfig(), TaskStore(config.db_path), agent, timezone="Europe/London",
+                     channel=lambda: None, tools=lambda: [])  # fmt: skip
+
+
+async def test_tasks_lists_them_with_buttons_to_run_pause_and_delete(config):
+    bot = make_bot(config, None)
+    bot.s.tasks = scheduler = task_scheduler(config)
+    ctx = SimpleNamespace(bot=FakeBot(), args=[])
+    update, replies = command_update()
+    await bot.cmd_tasks(update, ctx)
+    assert replies[-1].text.startswith("I've no tasks.")
+
+    scheduler.add("Briefing", "Brief me.", "weekdays 07:30", [], created_by="you")
+    scheduler.add("Servers", "Find servers.", "weekly sun 10:00", [], created_by="athena")
+    scheduler.pause(2)
+    await bot.cmd_tasks(update, ctx)
+    lines = replies[-1].text.split("\n")
+    assert lines[0] == "Tasks I do by myself:"
+    assert lines[1].startswith("▶️ #1 Briefing: every weekday at 07:30 · next ")
+    assert lines[2] == "⏸ #2 Servers: every Sunday at 10:00"
+    rows = replies[-1].kwargs["reply_markup"].inline_keyboard
+    assert [[b.text for b in row] for row in rows] == [
+        ["▶ Run #1", "⏸ Pause", "🗑 Delete"],
+        ["▶ Run #2", "⏯ Resume", "🗑 Delete"],
+    ]
+
+    edits, answers = [], []
+
+    async def answer(text=None):
+        answers.append(text)
+
+    async def edit_message_text(text, **kwargs):
+        edits.append(text)
+
+    def press(button, user=ME):
+        query = SimpleNamespace(data=button.callback_data, answer=answer, edit_message_text=edit_message_text)
+        return SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=user))
+
+    await bot.on_task_button(press(rows[0][2], user=STRANGER), ctx)
+    assert answers == ["Not allowed."] and len(scheduler.store.all()) == 2
+    await bot.on_task_button(press(rows[0][1]), ctx)  # pause #1
+    assert answers[-1] == "Paused" and scheduler.store.get(1).status == "paused"
+    assert edits[-1].split("\n")[1] == "⏸ #1 Briefing: every weekday at 07:30"
+    await bot.on_task_button(press(rows[1][1]), ctx)  # resume #2
+    assert scheduler.store.get(2).status == "active"
+    await bot.on_task_button(press(rows[1][2]), ctx)  # delete #2
+    assert answers[-1] == "Deleted" and scheduler.store.get(2) is None
+    await bot.on_task_button(press(rows[1][0]), ctx)  # it's gone
+    assert answers[-1] == "There's no task #2."
+
+    bot.s.tasks = None
+    await bot.cmd_tasks(update, ctx)
+    assert replies[-1].text.startswith("Tasks are switched off")
+
+
+async def test_tasks_reach_you_through_telegram(config):
+    bot = make_bot(config, None)
+    bot._bot = FakeBot()
+    assert bot.chat_id == str(ME)
+    await bot.tell("📋 **Briefing**\n\nAll quiet.")
+    assert bot._bot.sent[-1].text == "📋 <b>Briefing</b>\n\nAll quiet." and bot._bot.sent[-1].chat_id == ME
+
+    asking = asyncio.create_task(
+        bot.ask("fetch", {"url": "https://x.example"}, None, why="For your task “News”", timeout=5)
+    )
+    while len(bot._bot.sent) < 2:
+        await asyncio.sleep(0.01)
+    prompt = bot._bot.sent[-1]
+    assert prompt.text.startswith("🗓️ For your task “News”:\nAllow <b>fetch</b>?")
+    upd, _ = button_update(ME, prompt.kwargs["reply_markup"].inline_keyboard[0][0].callback_data)
+    await bot.on_button(upd, SimpleNamespace(bot=bot._bot))
+    assert await asyncio.wait_for(asking, 2) is True
