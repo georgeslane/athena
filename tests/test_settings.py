@@ -100,6 +100,7 @@ def test_everything_is_listed_without_secret_values(setup, monkeypatch):
         "news",
         "trading212",
         "databases",
+        "mcp_registry",
         "time",
         "fetch",
         "search",

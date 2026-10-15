@@ -7,7 +7,7 @@ import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import dotenv_values
 
@@ -27,8 +27,12 @@ from pi_assistant.settings import PROTECTED_SECRETS, Settings
 from pi_assistant.stats import UsageStats
 from pi_assistant.status import StatusTracker
 from pi_assistant.status_api import StatusServer
+from pi_assistant.tasks import Scheduler, TaskStore
 from pi_assistant.tool_approvals import ToolApprovals
 from pi_assistant.tools import Tool, ToolRegistry
+
+if TYPE_CHECKING:
+    from pi_assistant.channel import Channel
 
 log = logging.getLogger(__name__)
 
@@ -90,14 +94,30 @@ class Services:
     stats: UsageStats | None = None
 
     def __post_init__(self) -> None:
-        # After the memory tools, in this order, so the tools' order (and the prompt) stays the same.
+        # Set to have the model server read the prompt again now, e.g. after the tools change.
+        self.rewarm = asyncio.Event()
+        # How Athena reaches you when you haven't just asked it something: Telegram sets itself here.
+        self.channel: Channel | None = None
+        # Tasks Athena does by itself, on a schedule, and tells you about (tasks.py).
+        self.tasks: Scheduler | None = None
+        if self.config.tasks.enabled:
+            self.tasks = Scheduler(
+                self.config.tasks,
+                TaskStore(self.config.db_path),
+                self.agent,
+                timezone=self.config.agent.timezone,
+                channel=lambda: self.channel,
+                tools=self.tools.all,
+                on_ran=self.rewarm.set,  # your chat has the report in it now
+            )
+            for tool in self.tasks.tools():
+                self.tools.add(tool)
+        # After the memory and task tools, in this order, so the tools' order (and the prompt) stays the same.
         self.tools.add_provider(lambda: self.builtins.tools)
         self.tools.add_provider(self.mcp.tools)
         # Your documents, indexed from your Mac when you ask on the dashboard.
         self.documents = DocumentIndex(self.config.documents, self.memory, self.config.log_dir)
         self.dashboard = DashboardServer(self) if self.config.dashboard.enabled else None
-        # Set to have the model server read the prompt again now, e.g. after the tools change.
-        self.rewarm = asyncio.Event()
         self.applying = False  # changes to the tools are being applied
         self._apply_lock = asyncio.Lock()
         self._indexer: asyncio.Task[None] | None = None
@@ -117,8 +137,23 @@ class Services:
         if self.dashboard:
             await self.dashboard.start()
         self.index_conversations()  # anything said while the embeddings server was down
+        if self.tasks:
+            self.tasks.start()
+
+    async def notify(self, text: str) -> None:
+        """Tell you something you didn't ask about, such as what a task found. Logged if there's no channel."""
+        if self.channel is None:
+            log.warning("Nowhere to send a message: %s", text[:200])
+            return
+        try:
+            await self.channel.tell(text)
+        except Exception as exc:
+            log.warning("Couldn't send a message: %s", exc)
 
     async def close(self) -> None:
+        if self.tasks:
+            await self.tasks.stop()
+            self.tasks.store.close()
         if self.dashboard:
             await self.dashboard.stop()
         if self.status_api:
@@ -195,6 +230,8 @@ class Services:
 
     async def forget_everything(self) -> Session:
         """Delete every memory and the conversation history, and start a new session. Usage statistics stay."""
+        if self.tasks:
+            self.tasks.stop_running()  # it would save what it's doing after everything's deleted
         async with self.agent.paused():
             if self._indexer:
                 self._indexer.cancel()

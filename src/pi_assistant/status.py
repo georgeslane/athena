@@ -30,6 +30,7 @@ _ERRORS = {  # matched against the exception's class and its base classes
     "APIConnectionError": "Couldn't reach the model server",
     "APIStatusError": "The model server returned an error",
     "CancelledError": "Stopped",
+    "_OutOfTime": "Ran out of time",  # a task (tasks.py)
     "KeyboardInterrupt": "Stopped",
 }
 
@@ -87,6 +88,11 @@ class Task:
 
     def thinking(self) -> None:
         self.step = "Thinking"
+        self._tracker._changed()
+
+    def waiting_for_you(self) -> None:
+        """A task Athena works on by itself, waiting while you chat."""
+        self.step = "Waiting until you've finished chatting"
         self._tracker._changed()
 
     def using(self, tool: str) -> None:
