@@ -6,7 +6,7 @@ Description=pi-assistant (Telegram AI assistant)
 Wants=network-online.target
 After=network-online.target
 # If it fails to start five times in ten minutes, systemd stops trying, and pi-assistant-stopped
-# tells you in Telegram, with the end of its log.
+# tells you in Telegram, with the end of its log. (It's started at the first failure, and waits.)
 StartLimitIntervalSec=600
 StartLimitBurst=5
 OnFailure=pi-assistant-stopped.service
