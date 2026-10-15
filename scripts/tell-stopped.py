@@ -7,7 +7,8 @@ when it's going to restart it. So first it watches what happens next:
   - Athena's stopped without an error, say by you or an update: it says nothing.
   - Neither, after SETTLE_SECONDS: Athena keeps stopping and restarting, and it tells you that.
 On systemd 254 and later, a service about to be restarted shows as failed for a moment, so failed only
-counts once systemd says it's given up (start-limit-hit), or it's stayed failed for HELD_SECONDS.
+counts once systemd says it's given up (start-limit-hit), or it's stayed failed for HELD_SECONDS, which
+means systemd isn't restarting it.
 While this runs, systemd doesn't start it again for the failures that follow.
 
 It uses only Python's own library, with the system's Python, so it works even when Athena's
@@ -42,8 +43,9 @@ TOKEN_LIKE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b")
 ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # systemd's own lines in the log, which say nothing the message doesn't.
 SYSTEMD_SAYS = re.compile(r"^(\S+\.service: |(Started|Stopped|Starting|Stopping|Failed to start) )")
+# How it stopped the last time, by systemd's Result. After it gives up restarting, systemd may say the
+# last failure's ("exit-code") rather than "start-limit-hit", so the message doesn't depend on it.
 WHY = {
-    "start-limit-hit": "it kept failing to start, so systemd stopped trying",
     "exit-code": "it stopped with an error",
     "signal": "it was killed",
     "core-dump": "it crashed",
@@ -152,7 +154,9 @@ def message(became: str, result: str, lines: list[str]) -> str:
     if became == "restarting":
         text = "⚠️ Athena keeps stopping and restarting."
     else:
-        text = f"🛑 Athena has stopped: {WHY.get(result, 'it stopped')}."
+        text = "🛑 Athena has stopped, and systemd has stopped restarting it."
+        if result in WHY:
+            text += f" The last time, {WHY[result]}."
     if lines:
         text += "\n\nThe end of its log:\n" + "\n".join(lines)
     if became == "restarting":

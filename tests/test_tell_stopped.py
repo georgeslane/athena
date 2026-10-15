@@ -125,7 +125,7 @@ def test_it_tells_you_why_with_the_end_of_the_log_and_no_secrets(tmp_path, teleg
     ((path, body),) = telegram.sent
     assert path == f"/bot{TOKEN}/sendMessage" and body["chat_id"] == "42"
     assert body["text"] == (
-        "🛑 Athena has stopped: it kept failing to start, so systemd stopped trying.\n\n"
+        "🛑 Athena has stopped, and systemd has stopped restarting it.\n\n"
         "The end of its log:\n"
         "Traceback (most recent call last):\n"
         '  File "app.py", line 1, in <module>\n'
@@ -151,7 +151,8 @@ def test_failed_for_good_without_hitting_the_limit(tmp_path, telegram):
     repo = athena_repo(tmp_path, CONFIG)
     result = run(repo, tmp_path, telegram, states=(FAILED,), MONITOR_SERVICE_RESULT="exit-code")
     assert result.returncode == 0, result.stderr
-    assert telegram.sent[0][1]["text"].startswith("🛑 Athena has stopped: it stopped with an error.")
+    expected = "🛑 Athena has stopped, and systemd has stopped restarting it. The last time, it stopped with an error."
+    assert telegram.sent[0][1]["text"].startswith(expected)
 
 
 def test_stopping_and_restarting_for_a_long_time_is_worth_saying(tmp_path, telegram):
@@ -172,7 +173,7 @@ def test_a_broken_config_still_says_where_to(tmp_path, telegram):
     assert result.returncode == 0, result.stderr
     ((_, body),) = telegram.sent
     assert body["chat_id"] == "42"
-    assert body["text"].startswith("🛑 Athena has stopped: it stopped with an error.\n\nOnce it's fixed")
+    assert body["text"].startswith("🛑 Athena has stopped, and systemd has stopped restarting it. The last time, it")
 
 
 def test_without_a_chat_it_says_so(tmp_path, telegram):
@@ -254,9 +255,9 @@ def test_systemd_tells_you_when_athena_stops_for_good(systemd_athena, telegram):
     assert telegram.sent, f"nothing sent; pi-assistant: {state}\npi-assistant-stopped's log:\n{log}"
     ((path, body),) = telegram.sent
     assert path == f"/bot{TOKEN}/sendMessage" and body["chat_id"] == "42"
-    assert body["text"].startswith("🛑 Athena has stopped: it kept failing to start, so systemd stopped trying.")
+    assert body["text"].startswith("🛑 Athena has stopped, and systemd has stopped restarting it.")
     assert "ConfigError: something is wrong (token [hidden])" in body["text"]
-    assert "ActiveState=failed" in state and "Result=start-limit-hit" in state
+    assert "ActiveState=failed" in state  # given up: it's not restarting
 
 
 @pytest.mark.skipif(not _can_use_systemd(), reason="needs systemd and sudo: runs in CI")
