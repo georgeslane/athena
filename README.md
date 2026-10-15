@@ -29,6 +29,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions, and your documents. Related facts are added to each message automatically. Embeddings come from [EmbeddingGemma 2](#embeddings), served by oMLX on the Mac with the model, and are stored in SQLite on the Pi with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Sessions**: `/session` clears the conversation from the model's context, so replies stay quick, while the memory keeps everything you've talked about.
+- **Tasks it does by itself**: a briefing every weekday morning, research while you're busy, or a weekly look for MCP servers that would help. Athena never starts one while you're chatting, and stops for you if you start. It messages you what it found. See [Tasks](#tasks).
 - **Your documents, searched by meaning**: choose folders on your Mac in the dashboard, and Athena indexes them when you ask. Ask it in Telegram about something in them, and it says which file and can summarise it. The dashboard's search finds them too. See [Documents](#documents).
 - **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
 - **A dashboard**: a web page for your iPhone or Mac, over Tailscale. It shows what Athena is doing, how much it's used and how full the model's context is, for the session and in total. From it you can switch tools and MCP servers on and off, set them up and give them keys, without editing `config.toml`. See [Dashboard](#dashboard).
@@ -73,6 +74,7 @@ Then:
 | `/session` | Start a new session: the conversation so far is cleared from the model's context, in every chat. Memories are kept, and earlier conversations can still be searched. `/reset` does the same. |
 | `/stop` | Stop the answer Athena is working on, and any messages waiting their turn. |
 | `/retry` | Answer your last message again, say after changing how much Athena thinks. If it's already been answered, that answer is taken out of the conversation and memory first. While Athena's still answering, it stops first. |
+| `/tasks` | What Athena does by itself, with buttons to run, pause, resume, stop or delete each. See [Tasks](#tasks). |
 | `/think [on\|short\|off]` | How much the model thinks before answering: on, briefly (`short`), or not at all. With no choice, it says which it is, with buttons to change it. It's saved in `config.toml`. |
 | `/remember <fact>` | Save a fact directly. |
 | `/recall [query]` | Search memories, with similarity scores. With no query it shows the most recent. |
@@ -96,9 +98,10 @@ Then:
 
 ## Dashboard
 
-A web page for Athena, on your iPhone or Mac. It has three tabs:
+A web page for Athena, on your iPhone or Mac. It has four tabs:
 
 - **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory. Under Connections, **Thinking** switches the model's thinking on, short or off, as `/think` does.
+- **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, run them now, pause, resume or delete them, and read what each said last time. See [Tasks](#tasks).
 - **Memory:** search what Athena remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents).
 - **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
 
@@ -424,6 +427,24 @@ To test models without switching, run `uv run pi-assistant embeddings test -m MO
 
 EmbeddingGemma 2 can't run on the Pi itself yet: Ollama's builds of it need its MLX engine, which doesn't run on Linux ([ollama#18825](https://github.com/ollama/ollama/issues/18825)). On text, it finds the same memories as `embeddinggemma` in the test above, and its distances are about half as large, so its cut-offs are lower: about 0.31 for recall and 0.03 for duplicates.
 
+## Tasks
+
+Athena can work on things by itself, then message you what it found: a briefing every weekday at 7:30, research into something while you get on with your day, or a weekly look through the [MCP Registry](https://registry.modelcontextprotocol.io) for servers that would help with what you've been asking about. Ask it in Telegram, such as "every Sunday, look for MCP servers I'd find useful", or add one on the dashboard's **Tasks** tab, which has examples to start from.
+
+- **You come first.** A task doesn't start while you're chatting with Athena, or within `quiet_minutes` (5) of your last message. If you are, it looks again after a minute, then two, four and so on, up to 15. Once it's running, a message from you stops what it's doing at once, so the Mac is yours, and it takes that step again once you've finished. Your replies aren't slowed down by it.
+- **What it tells you.** When a task is done, you get its findings as a message in Telegram, which also goes into your chat, so you can reply "tell me more about the second one". If there's nothing new, it stays quiet. The dashboard shows what each task said last time.
+- **Longer work.** A task gets more steps than a reply (`max_tool_rounds`, 25), up to `max_minutes` (30) of work, not counting time it waits for you, and thinks before answering whatever `/think` is set to (`thinking`).
+- **When.** `now`, `in 2h`, `once 2026-10-16 09:00`, `daily 07:30`, `weekdays 07:30`, `weekly mon,thu 18:00`, or `every 6h`, in your time zone (`[agent] timezone`). A regular run that was missed by more than six hours, say while the Pi was off, is skipped to the next one.
+- **What it may do.**
+  - A task Athena suggests needs your OK: scheduling one asks first, and the message shows what it'll do, when, and the tools it may use without asking.
+  - Tasks you add on the dashboard are yours already.
+  - A tool that asks first still asks for a task, in Telegram, saying which task wants it, unless you've allowed that task to use it without asking. Unanswered after `confirm_minutes` (60), it's denied.
+  - Scheduling another task always asks, so a task can't start others by itself.
+- **If it fails**, say because the Mac's asleep, it tries again after 10 minutes, then 30, then tells you and waits for its next run.
+- **In Telegram**, `/tasks` lists them, with buttons to run, pause, resume, stop or delete each. On the dashboard, the **Tasks** tab does the same.
+
+**Suggesting MCP servers:** the built-in `find_mcp_servers` searches the official MCP Registry, and only suggests: you add a server yourself, on the dashboard, after reading about it. Anyone can list a server there, so being listed isn't an endorsement. Searches send only the words searched for, and only to the registry, so they don't ask first. `[mcp_registry] enabled = false` turns it off.
+
 ## Documents
 
 Athena can search the documents on your Mac by meaning, and tell you which file has what you're after. You choose folders on the dashboard, under **Memory**, and press **Index now**: Athena reads them then, and never on its own.
@@ -516,6 +537,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/news.py`, `trading212.py`, `databases.py` | The built-in integrations: news feeds, Trading 212, and SQLite databases |
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, and the page itself (plain HTML, CSS and JavaScript) |
+| `src/pi_assistant/tasks.py`, `channel.py` | Tasks Athena does by itself, and how it reaches you about them |
+| `src/pi_assistant/mcp_registry.py` | The built-in search of the official MCP Registry, for suggesting servers |
 | `src/pi_assistant/settings.py`, `catalog.py` | What the dashboard's Tools tab can change, and how it edits `config.toml` and `.env` |
 | `src/pi_assistant/stats.py` | Usage statistics, per session and in total |
 | `src/pi_assistant/webserver.py` | The small HTTP server behind Siri's endpoint, the status API and the dashboard |
@@ -557,6 +580,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)).
 - Local servers run in a [sandbox](#sandbox) without your home folder, so they can't read `.env`, your memories or your SSH keys, and without the network if they don't need it. A server with network access can reach anything the Pi can, though, so the approval before a tool runs is still what stops your data being sent somewhere.
 - A server's tools that are new or have changed since you approved them are held back from the model until you approve them on the dashboard ([When a server's tools change](#when-a-servers-tools-change)).
+- Tasks run without you watching, so they can't do more than you could approve: one Athena suggests needs your OK, any tool that asks first still asks you in Telegram unless you've allowed that task to use it, and a task can't schedule others without asking. Allowing a task to fetch or search without asking lets it send what's in its instructions and what it's read to those sites unseen, so allow only what it needs.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
 - The Pi reaches your Macs over SSH with a key of its own, which `~/.ssh/authorized_keys` on each Mac restricts to starting Athena's servers there: no shell, no port forwarding. The documents server is read-only, only sees what's in your home folder (or the scope you gave), never hidden files or `~/Library` apart from iCloud Drive, and is only started when you index or choose folders.
 - The email server only sends to addresses in `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`, and can't delete or move mail, even if you approve. The GitHub token can only read public repositories.

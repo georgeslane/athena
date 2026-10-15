@@ -49,6 +49,18 @@ def render_system_prompt(template: str | None, cfg: AgentConfig) -> str:
 
 
 @dataclass
+class Background:
+    """How Athena works on a task by itself (tasks.py), rather than answering you."""
+
+    label: str  # what the status board shows, such as "Task: Morning briefing"
+    # Takes each step, a call to the model: it waits while you're chatting, and stops the call if you
+    # start, to take it again after. It raises to stop the task.
+    step: Callable[[Task, Callable[[], Awaitable[LLMReply]]], Awaitable[LLMReply]]
+    thinking: str | None = None  # instead of [llm] thinking
+    max_rounds: int | None = None  # instead of [agent] max_tool_rounds
+
+
+@dataclass
 class AgentResult:
     text: str
     tools_used: list[str] = field(default_factory=list)
@@ -90,6 +102,10 @@ class Agent:
         self._idle.set()
         self._busy = 0
         self._pausing = asyncio.Lock()
+        # You, rather than a task: how many of your messages are being answered, and when one last was.
+        self.answering_you = 0
+        self.last_answered_you = float("-inf")  # time.monotonic()
+        self.chatting = asyncio.Event()  # set while one of your messages is being answered
 
     # -- pausing --------------------------------------------------------------------------
 
@@ -232,16 +248,25 @@ class Agent:
         on_tool: ToolEventFn | None = None,
         note: str | None = None,
         channel: str = "",
+        background: Background | None = None,
     ) -> AgentResult:
         """Answer ``text``. ``note`` goes in the context block for this message only, e.g. how it was sent.
 
-        ``channel`` says where it came from, such as "Siri", for the usage statistics.
+        ``channel`` says where it came from, such as "Siri", for the usage statistics. ``background``
+        is for a task Athena works on by itself: it doesn't hold up changes to the tools, which it
+        could for many minutes, and doesn't count as you chatting.
         """
-        async with self._working(), self._locks[chat_id]:
-            task = self.status.begin(text)
+        async with contextlib.AsyncExitStack() as stack:
+            if background is None:
+                await stack.enter_async_context(self._working())
+                self.answering_you += 1
+                self.chatting.set()
+                stack.callback(self._answered_you)
+            await stack.enter_async_context(self._locks[chat_id])
+            task = self.status.begin(background.label if background else text)
             record = QueryRecord(session=self.history.session.id, channel=channel or self.status.channel)
             try:
-                result = await self._respond(chat_id, text, task, confirm, on_tool, note, record)
+                result = await self._respond(chat_id, text, task, confirm, on_tool, note, record, background)
             except BaseException as exc:  # including cancellation, so the board never sticks on "working"
                 task.finish(exc)
                 record.error = describe_error(exc)
@@ -253,6 +278,12 @@ class Agent:
             self.on_saved()
         return result
 
+    def _answered_you(self) -> None:
+        self.answering_you -= 1
+        self.last_answered_you = time.monotonic()
+        if not self.answering_you:
+            self.chatting.clear()
+
     def _record(self, record: QueryRecord) -> None:
         if not self.stats:
             return
@@ -262,8 +293,10 @@ class Agent:
         except Exception:  # statistics mustn't get in the way of an answer
             log.exception("Couldn't record usage statistics")
 
-    async def _chat(self, record: QueryRecord, messages: list[dict[str, Any]], schemas: Any) -> LLMReply:
-        reply = await self.llm.chat(messages, schemas)
+    async def _chat(
+        self, record: QueryRecord, messages: list[dict[str, Any]], schemas: Any, thinking: str | None = None
+    ) -> LLMReply:
+        reply = await self.llm.chat(messages, schemas, thinking=thinking)
         record.model_calls += 1
         record.prompt_tokens = max(record.prompt_tokens, reply.prompt_tokens or 0)
         record.completion_tokens += reply.completion_tokens or 0
@@ -280,6 +313,7 @@ class Agent:
         on_tool: ToolEventFn | None,
         note: str | None,
         record: QueryRecord,
+        background: Background | None = None,
     ) -> AgentResult:
         started = time.monotonic()
         memories = await self._recall(text)
@@ -293,9 +327,15 @@ class Agent:
         schemas = self.tools.schemas() or None
         result = AgentResult(text="")
 
-        for _ in range(self.cfg.max_tool_rounds):
+        thinking = background.thinking if background else None
+
+        def step(tools: Any) -> Awaitable[LLMReply]:
+            call = lambda: self._chat(record, messages, tools, thinking)  # noqa: E731
+            return background.step(task, call) if background else call()
+
+        for _ in range((background and background.max_rounds) or self.cfg.max_tool_rounds):
             task.thinking()
-            reply = await self._chat(record, messages, schemas)
+            reply = await step(schemas)
             result.model_calls += 1
             if not reply.tool_calls:
                 result.text = reply.content
@@ -318,7 +358,7 @@ class Agent:
         else:
             # Out of tool rounds: ask for a final answer with tools switched off.
             task.thinking()
-            reply = await self._chat(record, messages, None)
+            reply = await step(None)
             result.model_calls += 1
             result.text = reply.content
 

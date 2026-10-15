@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pi_assistant.builtin import Builtin
 from pi_assistant.databases import Databases
+from pi_assistant.mcp_registry import MCPRegistry
 from pi_assistant.news import NewsReader
 from pi_assistant.trading212 import Trading212
 
-BUILTINS: tuple[type[Builtin], ...] = (NewsReader, Trading212, Databases)
+BUILTINS: tuple[type[Builtin], ...] = (NewsReader, Trading212, Databases, MCPRegistry)

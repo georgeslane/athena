@@ -116,6 +116,21 @@ environment = "live"                   # or "demo" for the practice account, whi
 # these files are ever opened. Name them however you like:
 # "budget" = "/home/you/budget.db"
 
+[mcp_registry]
+# Lets Athena search the official MCP Registry for servers that would help with something it
+# can't do yet, and suggest them (see README, "Tasks"). You add any you want on the dashboard.
+enabled = true
+
+[tasks]
+# Things Athena does by itself, now or on a schedule, then messages you about (see README,
+# "Tasks"). They wait while you're chatting, and stop for you while they run.
+enabled = true
+quiet_minutes = 5                      # a task waits until you haven't messaged for this long
+max_minutes = 30                       # the most a run works for, not counting waiting for you
+max_tool_rounds = 25
+thinking = "on"                        # tasks aren't in a hurry
+confirm_minutes = 60                   # how long a task waits for you to allow a tool that asks
+
 [siri]
 # Ask by voice: "Hey Siri, Ask Athena" on your iPhone or Mac (see README, "Siri").
 # Your question and the answer also appear in the Telegram chat.
