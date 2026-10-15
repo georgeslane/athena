@@ -24,7 +24,9 @@ import tomlkit
 from tomlkit.container import Container
 from tomlkit.items import AoT, Comment, InlineTable, Table, Whitespace
 
+from pi_assistant.catalog import Field, Integration, Secret
 from pi_assistant.config import Config, ConfigError, parse_config
+from pi_assistant.integrations import BUILTINS
 from pi_assistant.tools import matches_any
 
 # Athena's own secrets. The dashboard can't change them or pass them to a server.
@@ -40,117 +42,10 @@ class SettingsError(Exception):
     """A change that can't be made, with a message for the dashboard to show."""
 
 
-@dataclass(frozen=True)
-class Field:
-    key: str  # where it lives in the tool's section, e.g. "environment" or "env.MCP_EMAIL_SERVER_IMAP_HOST"
-    label: str
-    kind: str = "text"  # text, select or map (names to values, e.g. news feeds)
-    help: str = ""
-    options: tuple[tuple[str, str], ...] = ()  # for select: (value, label)
-    columns: tuple[str, str] = ("Name", "Value")  # for map: what the names and values are
-    item: str = "one"  # for map: what each entry is, for "Add a feed" and the like
-    required: bool = False  # needed before the tool can be switched on
-    example: bool = False  # the default is an example to replace, so it doesn't count as set
-
-
-@dataclass(frozen=True)
-class Secret:
-    name: str  # in .env
-    label: str
-    help: str = ""
-    required: bool = True
-    # Where the config refers to it, and how, e.g. "headers.Authorization" and "Bearer ${GITHUB_TOKEN}".
-    path: str = ""
-    template: str = ""
-
-
-@dataclass(frozen=True)
-class Integration:
-    id: str
-    title: str
-    summary: str
-    section: str  # in config.toml
-    builtin: bool = False
-    fields: tuple[Field, ...] = ()
-    secrets: tuple[Secret, ...] = ()
-    defaults: dict[str, Any] = field(default_factory=dict)  # an MCP server's section, when it isn't there yet
-    setup: str = ""  # anything to do before switching it on
-    asks: str = ""  # which of its tools ask first
-
-
 _MAC_SETUP = "Runs on your Mac, which needs setting up first: see the README, “Your Macs”."
 
 CATALOG: tuple[Integration, ...] = (
-    Integration(
-        "news",
-        "News",
-        "Reads the news feeds you list. Only those are ever fetched.",
-        "news",
-        builtin=True,
-        fields=(
-            Field(
-                "feeds",
-                "Feeds",
-                "map",
-                "RSS or Atom feeds, by any name you like.",
-                columns=("Name", "URL"),
-                item="a feed",
-            ),
-        ),
-        asks="Never asks: it only reads your feeds.",
-    ),
-    Integration(
-        "trading212",
-        "Trading 212",
-        "Reads your Trading 212 account, and places or cancels the orders you approve.",
-        "trading212",
-        builtin=True,
-        fields=(
-            Field(
-                "environment",
-                "Account",
-                "select",
-                "The practice account needs a key made in practice mode.",
-                options=(("live", "Real money"), ("demo", "Practice")),
-            ),
-        ),
-        secrets=(
-            Secret(
-                "TRADING212_API_KEY",
-                "API key",
-                "From Settings > API in the Trading 212 app.",
-                path="api_key",
-                template="${TRADING212_API_KEY}",
-            ),
-            Secret(
-                "TRADING212_API_SECRET",
-                "API secret",
-                "Shown with the key. Keys made before Trading 212 added secrets have none.",
-                required=False,
-                path="api_secret",
-                template="${TRADING212_API_SECRET}",
-            ),
-        ),
-        asks="Placing and cancelling orders always ask first.",
-    ),
-    Integration(
-        "databases",
-        "Databases",
-        "Answers questions from SQLite databases on the Pi. It can only read them.",
-        "sqlite",
-        builtin=True,
-        fields=(
-            Field(
-                "databases",
-                "Databases",
-                "map",
-                "Files on the Pi, by any name you like. A path can be relative to the config's folder.",
-                columns=("Name", "Path"),
-                item="a database",
-            ),
-        ),
-        asks="Never asks: it can only read.",
-    ),
+    *(builtin.entry for builtin in BUILTINS),
     Integration(
         "time",
         "Time",

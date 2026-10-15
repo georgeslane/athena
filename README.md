@@ -384,7 +384,7 @@ To give the assistant a new ability, look for an MCP server that provides it. Mo
    - Send `/tools` in Telegram to see them there too.
    - Run `uv run pi-assistant eval -m <your model>` to check the model still picks the right tools.
 
-To update a server later, read what changed, change its pinned version and restart: Athena locks the new version's dependencies when it starts it. If no safe server exists for something, the assistant can have a built-in tool instead, like `read_news` in `src/pi_assistant/news.py`. A built-in tool is a name, a description, a JSON schema for its arguments and a Python function, added in `build_services`. A tool that asks first can also have a `preview` function, which checks the arguments and says in words what the call will do, for the approval message. `trading212_place_order` has one.
+To update a server later, read what changed, change its pinned version and restart: Athena locks the new version's dependencies when it starts it. If no safe server exists for something, the assistant can have a built-in integration instead, like the news reader in `src/pi_assistant/news.py`. Each is one class in a module of its own, which says what it needs: its section of `config.toml` and the settings in it, how the dashboard shows it, how it starts, the tools it gives the model, and `doctor`'s check of it (see `src/pi_assistant/builtin.py`). Adding the class to `BUILTINS` in `src/pi_assistant/integrations.py` is then all it takes for Athena to run it, the dashboard to show it and `doctor` to check it. Each tool is a name, a description, a JSON schema for its arguments and a Python function. A tool that asks first can also have a `preview` function, which checks the arguments and says in words what the call will do, for the approval message. `trading212_place_order` has one.
 
 ## Memory
 
@@ -512,10 +512,11 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/siri.py` | The endpoint the Siri shortcut calls |
 | `src/pi_assistant/documents.py` | Indexing your documents from your Mac, when you ask |
 | `src/pi_assistant/mac_documents.py` | The read-only documents server that runs on your Mac |
-| `src/pi_assistant/news.py` | The built-in news reader |
+| `src/pi_assistant/builtin.py`, `integrations.py` | What a built-in integration is, and the list of them |
+| `src/pi_assistant/news.py`, `trading212.py`, `databases.py` | The built-in integrations: news feeds, Trading 212, and SQLite databases |
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, and the page itself (plain HTML, CSS and JavaScript) |
-| `src/pi_assistant/settings.py` | What the dashboard's Tools tab can change, and how it edits `config.toml` and `.env` |
+| `src/pi_assistant/settings.py`, `catalog.py` | What the dashboard's Tools tab can change, and how it edits `config.toml` and `.env` |
 | `src/pi_assistant/stats.py` | Usage statistics, per session and in total |
 | `src/pi_assistant/webserver.py` | The small HTTP server behind Siri's endpoint, the status API and the dashboard |
 | `src/pi_assistant/assets/` | The Athena icon, used by the dashboard and this README |

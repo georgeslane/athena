@@ -49,7 +49,7 @@ async def test_reloading_applies_the_tools_settings_from_config_toml(services, m
     path.write_text(CONFIG + '\n[news.feeds]\n"BBC" = "https://feeds.bbci.co.uk/news/rss.xml"\n')
     services.rewarm.clear()
     await services.reload()
-    assert "read_news" in names() and services.news is not None
+    assert "read_news" in names() and services.builtins.get("news") is not None
     assert services.rewarm.is_set()  # the prompt has changed, so the model server reads it again
 
     # Keys added to .env since Athena started are used.
@@ -59,7 +59,7 @@ async def test_reloading_applies_the_tools_settings_from_config_toml(services, m
     assert services.builtins.problems == {"trading212": "TRADING212_API_KEY isn't set in .env"}
     (path.parent / ".env").write_text("TRADING212_API_KEY=key-from-env\n")
     await services.reload()
-    assert services.trading212 is not None and "trading212_portfolio" in names()
+    assert services.builtins.get("trading212") is not None and "trading212_portfolio" in names()
     os.environ.pop("TRADING212_API_KEY")
 
     path.write_text("this isn't [ toml")

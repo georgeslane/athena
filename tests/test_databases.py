@@ -6,8 +6,7 @@ from pathlib import Path
 import pytest
 
 from pi_assistant.app import build_services
-from pi_assistant.config import SQLiteConfig
-from pi_assistant.databases import Databases, _first_word, _ReadOnly
+from pi_assistant.databases import Databases, SQLiteConfig, _first_word, _ReadOnly
 from pi_assistant.tools import ToolError
 
 
@@ -202,6 +201,6 @@ def test_tools_exist_only_when_databases_are_listed(config, tmp_path):
     services = build_services(config)
     tools = {t.name: t for t in services.tools.all()}
     assert not tools["database_query"].needs_confirmation  # local and read-only
-    assert services.databases.paths == {"budget": tmp_path / "budget.db"}
+    assert services.builtins.get("databases").paths == {"budget": tmp_path / "budget.db"}
     services.memory.store.close()
     services.history.close()

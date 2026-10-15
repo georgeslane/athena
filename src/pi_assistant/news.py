@@ -16,13 +16,18 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
-from typing import Any
+from typing import TYPE_CHECKING, Any, Self
 from zoneinfo import ZoneInfo
 
 import httpx
+from pydantic import Field as Setting
 
-from pi_assistant.config import NewsConfig
+from pi_assistant.builtin import FAIL, OK, Builtin, Report, Section
+from pi_assistant.catalog import Field, Integration
 from pi_assistant.tools import Tool
+
+if TYPE_CHECKING:
+    from pi_assistant.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +39,14 @@ _SPACE = re.compile(r"\s+")
 _OLDEST = datetime.min.replace(tzinfo=UTC)
 
 
+class NewsConfig(Section):
+    # News feeds (RSS or Atom) the assistant can read, by name. Only these are ever
+    # fetched, so reading them doesn't need your approval (see README, "News").
+    enabled: bool = True
+    feeds: dict[str, str] = Setting(default_factory=dict)
+    cache_minutes: float = 10.0
+
+
 @dataclass
 class Item:
     source: str
@@ -43,7 +56,50 @@ class Item:
     published: datetime | None
 
 
-class NewsReader:
+class NewsReader(Builtin):
+    section = "news"
+    Settings = NewsConfig
+    entry = Integration(
+        "news",
+        "News",
+        "Reads the news feeds you list. Only those are ever fetched.",
+        "news",
+        builtin=True,
+        fields=(
+            Field(
+                "feeds",
+                "Feeds",
+                "map",
+                "RSS or Atom feeds, by any name you like.",
+                columns=("Name", "URL"),
+                item="a feed",
+            ),
+        ),
+        asks="Never asks: it only reads your feeds.",
+    )
+
+    @classmethod
+    def wanted(cls, cfg: Config) -> bool:
+        return cfg.news.enabled and bool(cfg.news.feeds)
+
+    @classmethod
+    def start(cls, cfg: Config) -> Self:
+        return cls(cfg.news, cfg.agent.timezone)
+
+    @classmethod
+    async def check(cls, cfg: Config, report: Report, http: httpx.AsyncClient | None = None) -> None:
+        reader = cls(cfg.news, cfg.agent.timezone, http=http)
+        try:
+            for name in cfg.news.feeds:
+                try:
+                    items = await reader._items(name)
+                except Exception as exc:
+                    report(FAIL, f"{name}: {type(exc).__name__}: {exc}")
+                else:
+                    report(OK, f"{name}: {len(items)} item{'' if len(items) == 1 else 's'}")
+        finally:
+            await reader.close()
+
     def __init__(self, cfg: NewsConfig, timezone: str = "UTC", http: httpx.AsyncClient | None = None):
         self.cfg = cfg
         try:

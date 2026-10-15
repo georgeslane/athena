@@ -12,10 +12,11 @@ from typing import Any
 import httpx
 
 from pi_assistant.app import build_services
+from pi_assistant.builtin import FAIL, OK, WARN
 from pi_assistant.config import Config
 from pi_assistant.dashboard import MIN_TOKEN_CHARS as MIN_PASSWORD_CHARS
-from pi_assistant.databases import Databases
 from pi_assistant.documents import DOCUMENTS_INDEXED, DocumentsError, connect_mac
+from pi_assistant.integrations import BUILTINS
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager, ServerStatus
 from pi_assistant.memory import Embedder, MemoryStore
@@ -25,10 +26,7 @@ from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.siri import MIN_TOKEN_CHARS
 from pi_assistant.status_api import is_loopback
 from pi_assistant.tool_approvals import ToolApprovals
-from pi_assistant.tools import Tool, ToolError
-from pi_assistant.trading212 import Trading212
-
-OK, WARN, FAIL = "\033[32m✓\033[0m", "\033[33m!\033[0m", "\033[31m✗\033[0m"
+from pi_assistant.tools import Tool
 
 _PROBE_TOOL = {
     "type": "function",
@@ -172,17 +170,13 @@ async def run_doctor(cfg: Config) -> bool:
     print(f"\nDashboard ({cfg.dashboard.host}:{cfg.dashboard.port})")
     await check_dashboard(cfg, report)
 
-    # 9. Trading 212 ---------------------------------------------------------------------------
-    if cfg.trading212.enabled:
-        print(f"\nTrading 212 ({cfg.trading212.environment})")
-        await check_trading212(cfg, report)
+    # 9. Built-in integrations that are switched on --------------------------------------------
+    for kind in BUILTINS:
+        if kind.wanted(cfg):
+            print(f"\n{kind.entry.title}")
+            await kind.check(cfg, report)
 
-    # 10. Databases --------------------------------------------------------------------------------
-    if cfg.sqlite.enabled and cfg.sqlite.databases:
-        print("\nDatabases")
-        check_databases(cfg, report)
-
-    # 11. The prompt ---------------------------------------------------------------------------
+    # 10. The prompt ---------------------------------------------------------------------------
     print("\nThe prompt: what the model reads before every reply")
     if model_ok:
         await check_prompt(cfg, mcp_tools, report)
@@ -326,38 +320,6 @@ async def check_siri(cfg: Config, report: Callable[[str, str], None]) -> None:
         report(OK, "listening")
     except httpx.HTTPError:
         report(WARN, "not answering. It runs inside the bot: is the pi-assistant service running?")
-
-
-async def check_trading212(
-    cfg: Config, report: Callable[[str, str], None], http: httpx.AsyncClient | None = None
-) -> None:
-    if not cfg.trading212.api_key:
-        report(FAIL, "TRADING212_API_KEY is not set (.env)")
-        return
-    client = Trading212(cfg.trading212, cfg.agent.timezone, http=http)
-    try:
-        summary, missing = await client.check()
-    except ToolError as exc:
-        report(FAIL, str(exc))
-        return
-    finally:
-        await client.close()
-    report(OK, f"connected to your {client.account}, {summary.get('id')} in {summary.get('currency')}")
-    if missing:
-        report(WARN, f"the key can't read: {', '.join(missing)}. Add them in Trading 212, under Settings > API")
-    else:
-        report(OK, "the key can read everything Athena uses")
-
-
-def check_databases(cfg: Config, report: Callable[[str, str], None]) -> None:
-    for name, path in cfg.sqlite.databases.items():
-        file = cfg.resolve(path)
-        try:
-            tables = Databases(cfg.sqlite, {name: file}).count_tables(name)
-        except ToolError as exc:
-            report(FAIL, f"{name}: {exc}")
-        else:
-            report(OK, f"{name}: {tables} table{'' if tables == 1 else 's'}, read-only ({file})")
 
 
 async def check_status_api(cfg: Config, report: Callable[[str, str], None]) -> None:

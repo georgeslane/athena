@@ -17,13 +17,17 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, Self
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from pi_assistant.config import Trading212Config
+from pi_assistant.builtin import FAIL, OK, WARN, Builtin, Report, Section, Unavailable
+from pi_assistant.catalog import Field, Integration, Secret
 from pi_assistant.tools import Tool, ToolError
+
+if TYPE_CHECKING:
+    from pi_assistant.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +56,16 @@ PERMISSION_CHECKS = [
     *((path, scope, {"limit": 1}) for path, scope in HISTORY.values()),
     ("/metadata/exchanges", "metadata", None),
 ]
+
+
+class Trading212Config(Section):
+    # Your Trading 212 Invest or Stocks ISA account (see README, "Trading 212"). Reading
+    # it runs without asking; placing or cancelling an order always asks you first.
+    enabled: bool = False
+    api_key: str = ""
+    api_secret: str = ""  # keys made before Trading 212 added secrets have none
+    environment: Literal["live", "demo"] = "live"  # "demo" is the practice account, with its own key
+    timeout_seconds: float = 15.0
 
 
 @dataclass
@@ -114,7 +128,69 @@ class Order:
         return body
 
 
-class Trading212:
+class Trading212(Builtin):
+    section = "trading212"
+    Settings = Trading212Config
+    entry = Integration(
+        "trading212",
+        "Trading 212",
+        "Reads your Trading 212 account, and places or cancels the orders you approve.",
+        "trading212",
+        builtin=True,
+        fields=(
+            Field(
+                "environment",
+                "Account",
+                "select",
+                "The practice account needs a key made in practice mode.",
+                options=(("live", "Real money"), ("demo", "Practice")),
+            ),
+        ),
+        secrets=(
+            Secret(
+                "TRADING212_API_KEY",
+                "API key",
+                "From Settings > API in the Trading 212 app.",
+                path="api_key",
+                template="${TRADING212_API_KEY}",
+            ),
+            Secret(
+                "TRADING212_API_SECRET",
+                "API secret",
+                "Shown with the key. Keys made before Trading 212 added secrets have none.",
+                required=False,
+                path="api_secret",
+                template="${TRADING212_API_SECRET}",
+            ),
+        ),
+        asks="Placing and cancelling orders always ask first.",
+    )
+
+    @classmethod
+    def start(cls, cfg: Config) -> Self:
+        if not cfg.trading212.api_key:
+            raise Unavailable("TRADING212_API_KEY isn't set in .env")
+        return cls(cfg.trading212, cfg.agent.timezone)
+
+    @classmethod
+    async def check(cls, cfg: Config, report: Report, http: httpx.AsyncClient | None = None) -> None:
+        if not cfg.trading212.api_key:
+            report(FAIL, "TRADING212_API_KEY is not set (.env)")
+            return
+        client = cls(cfg.trading212, cfg.agent.timezone, http=http)
+        try:
+            summary, missing = await client.check_key()
+        except ToolError as exc:
+            report(FAIL, str(exc))
+            return
+        finally:
+            await client.close()
+        report(OK, f"connected to your {client.account}, {summary.get('id')} in {summary.get('currency')}")
+        if missing:
+            report(WARN, f"the key can't read: {', '.join(missing)}. Add them in Trading 212, under Settings > API")
+        else:
+            report(OK, "the key can read everything Athena uses")
+
     def __init__(self, cfg: Trading212Config, timezone: str = "UTC", http: httpx.AsyncClient | None = None):
         self.cfg = cfg
         self.base = API.format(environment=cfg.environment)
@@ -247,7 +323,7 @@ class Trading212:
             ),
         ]
 
-    async def check(self) -> tuple[dict[str, Any], list[str]]:
+    async def check_key(self) -> tuple[dict[str, Any], list[str]]:
         """The account summary, and the reading permissions the key is missing. For `doctor`."""
         summary = await self._get("/account/summary", "account")
         missing = []

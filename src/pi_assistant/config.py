@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, create_model, model_validator
+
+from pi_assistant.builtin import Section
+from pi_assistant.integrations import BUILTINS
 
 DEFAULT_CONFIG_PATH = "config.toml"
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -25,10 +28,7 @@ class ConfigError(Exception):
     """Raised when the config file is missing or invalid."""
 
 
-class _Section(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
+_Section = Section  # each section of config.toml
 THINKING = ("on", "short", "off")  # how much a model that can think does, before answering
 
 
@@ -145,33 +145,6 @@ class DashboardConfig(_Section):
     token: str = Field(default_factory=lambda: os.environ.get("DASHBOARD_TOKEN", ""))
 
 
-class NewsConfig(_Section):
-    # News feeds (RSS or Atom) the assistant can read, by name. Only these are ever
-    # fetched, so reading them doesn't need your approval (see README, "News").
-    enabled: bool = True
-    feeds: dict[str, str] = Field(default_factory=dict)
-    cache_minutes: float = 10.0
-
-
-class Trading212Config(_Section):
-    # Your Trading 212 Invest or Stocks ISA account (see README, "Trading 212"). Reading
-    # it runs without asking; placing or cancelling an order always asks you first.
-    enabled: bool = False
-    api_key: str = ""
-    api_secret: str = ""  # keys made before Trading 212 added secrets have none
-    environment: Literal["live", "demo"] = "live"  # "demo" is the practice account, with its own key
-    timeout_seconds: float = 15.0
-
-
-class SQLiteConfig(_Section):
-    # SQLite databases the assistant can query, by name (see README, "Databases"). Only these
-    # files are ever opened, and only for reading.
-    enabled: bool = True
-    databases: dict[str, str] = Field(default_factory=dict)
-    max_rows: int = 100
-    timeout_seconds: float = 10.0  # a query running longer than this is stopped
-
-
 class SiriConfig(_Section):
     # Lets an Apple Shortcut ask the assistant, so you can ask by voice (see README, "Siri").
     enabled: bool = False
@@ -220,7 +193,7 @@ class MCPServerConfig(_Section):
         return "sse" if (self.url or "").rstrip("/").endswith("/sse") else "http"
 
 
-class Config(_Section):
+class _Config(_Section):
     data_dir: str = "data"
     llm: LLMConfig
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
@@ -231,9 +204,6 @@ class Config(_Section):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     siri: SiriConfig = Field(default_factory=SiriConfig)
-    news: NewsConfig = Field(default_factory=NewsConfig)
-    trading212: Trading212Config = Field(default_factory=Trading212Config)
-    sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.
@@ -242,7 +212,7 @@ class Config(_Section):
     path: Path | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
-    def _embeddings_from_the_model_server(self) -> Config:
+    def _embeddings_from_the_model_server(self) -> _Config:
         """With no base_url of their own, embeddings come from the model's server, with the model's key."""
         if not self.embeddings.base_url:
             self.embeddings.base_url = self.llm.base_url
@@ -265,6 +235,15 @@ class Config(_Section):
     @property
     def log_dir(self) -> Path:
         return self.resolve(self.data_dir) / "logs"
+
+
+# Athena's settings: the sections above, and one for each built-in integration (integrations.py).
+Config = create_model(
+    "Config",
+    __base__=_Config,
+    __module__=__name__,
+    **{b.section: (b.Settings, Field(default_factory=b.Settings)) for b in BUILTINS},  # type: ignore[call-overload]
+)
 
 
 def expand_env(value: Any) -> Any:

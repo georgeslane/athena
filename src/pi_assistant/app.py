@@ -7,19 +7,20 @@ import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 from dotenv import dotenv_values
 
 from pi_assistant.agent import Agent
+from pi_assistant.builtin import Builtin, Unavailable
 from pi_assistant.config import THINKING, Config, parse_config
 from pi_assistant.dashboard import DashboardServer
-from pi_assistant.databases import Databases
 from pi_assistant.documents import DocumentIndex
 from pi_assistant.history import ConversationStore, Exchange, Session
+from pi_assistant.integrations import BUILTINS
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
-from pi_assistant.news import NewsReader
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.settings import PROTECTED_SECRETS, Settings
@@ -28,51 +29,49 @@ from pi_assistant.status import StatusTracker
 from pi_assistant.status_api import StatusServer
 from pi_assistant.tool_approvals import ToolApprovals
 from pi_assistant.tools import Tool, ToolRegistry
-from pi_assistant.trading212 import Trading212
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class Builtins:
-    """The built-in tools that come and go with the config: news, databases and Trading 212."""
+    """The built-in integrations that are running, which come and go with the config (integrations.py)."""
 
-    news: NewsReader | None = None
-    databases: Databases | None = None
-    trading212: Trading212 | None = None
+    running: dict[str, Builtin] = field(default_factory=dict)  # by id, such as "news"
     tools: list[Tool] = field(default_factory=list)
     problems: dict[str, str] = field(default_factory=dict)  # why one that's switched on isn't running
 
     @classmethod
     def build(cls, cfg: Config) -> Builtins:
         b = cls()
-        if cfg.news.enabled and cfg.news.feeds:
-            b.news = NewsReader(cfg.news, cfg.agent.timezone)
-        if cfg.sqlite.enabled and cfg.sqlite.databases:
-            b.databases = Databases(
-                cfg.sqlite, {name: cfg.resolve(path) for name, path in cfg.sqlite.databases.items()}
-            )
-        if cfg.trading212.enabled and not cfg.trading212.api_key:
-            b.problems["trading212"] = "TRADING212_API_KEY isn't set in .env"
-            log.warning("Trading 212 is switched on, but TRADING212_API_KEY isn't set in .env, so it's left out")
-        elif cfg.trading212.enabled:
-            b.trading212 = Trading212(cfg.trading212, cfg.agent.timezone)
-        for source in (b.news, b.databases, b.trading212):
-            b.tools.extend(source.tools() if source else [])
+        for kind in BUILTINS:
+            if not kind.wanted(cfg):
+                continue
+            try:
+                b.running[kind.entry.id] = kind.start(cfg)
+            except Unavailable as exc:
+                b.problems[kind.entry.id] = str(exc)
+                log.warning("%s is switched on, but %s, so it's left out", kind.entry.title, exc)
+        for builtin in b.running.values():
+            b.tools.extend(builtin.tools())
         return b
 
-    def running(self) -> dict[str, tuple[list[str], str | None]]:
+    def get(self, id: str) -> Any:
+        return self.running.get(id)
+
+    def status(self) -> dict[str, tuple[list[str], str | None]]:
         """For each, the names of its tools in use and what's wrong, for the dashboard."""
         return {
-            name: ([t.name for t in source.tools()] if source else [], self.problems.get(name))
-            for name, source in (("news", self.news), ("databases", self.databases), ("trading212", self.trading212))
+            kind.entry.id: (
+                [t.name for t in self.running[kind.entry.id].tools()] if kind.entry.id in self.running else [],
+                self.problems.get(kind.entry.id),
+            )
+            for kind in BUILTINS
         }
 
     async def close(self) -> None:
-        if self.news:
-            await self.news.close()
-        if self.trading212:
-            await self.trading212.close()
+        for builtin in self.running.values():
+            await builtin.close()
 
 
 @dataclass
@@ -104,18 +103,6 @@ class Services:
         self._indexer: asyncio.Task[None] | None = None
         self._index_again = False
         self.agent.on_saved = self._conversation_saved
-
-    @property
-    def news(self) -> NewsReader | None:
-        return self.builtins.news
-
-    @property
-    def databases(self) -> Databases | None:
-        return self.builtins.databases
-
-    @property
-    def trading212(self) -> Trading212 | None:
-        return self.builtins.trading212
 
     def approve_tools(self, server: str, tools: dict[str, str]) -> None:
         """Let the model use tools that were held back because they're new or changed: {tool: fingerprint}."""
@@ -167,7 +154,7 @@ class Services:
             try:
                 async with self.agent.paused():
                     old, self.builtins = self.builtins, Builtins.build(cfg)
-                    for section in ("news", "trading212", "sqlite", "mcp_servers", "documents"):
+                    for section in (*(b.section for b in BUILTINS), "mcp_servers", "documents"):
                         setattr(self.config, section, getattr(cfg, section))
                     await self.mcp.configure(cfg.mcp_servers, reconnect=reconnect)
                     self.documents.configure(cfg.documents)
