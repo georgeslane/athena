@@ -696,3 +696,41 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .version { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); }
 .version h3 { font-size: 14.5px; margin: 0; }
 .version summary { font-size: 13px; color: var(--muted); cursor: pointer; }
+
+/* The board: projects handed to Claude, each an epic with its stories in columns. */
+.epic { padding: 16px; display: grid; gap: 10px; }
+.epic-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.epic-head h3 { margin: 0; font-size: 17px; overflow-wrap: anywhere; flex: 1 1 200px; }
+.epic-key { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #fff; background: #8a5cd0; padding: 2px 7px; border-radius: 5px; }
+.lozenge { font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 8px; border-radius: 5px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); }
+.lozenge[data-status="in progress"] { color: var(--working); background: color-mix(in srgb, var(--working) 13%, var(--surface)); border-color: transparent; }
+.lozenge[data-status="blocked"] { color: var(--failed); background: color-mix(in srgb, var(--failed) 13%, var(--surface)); border-color: transparent; }
+.lozenge[data-status="done"] { color: var(--idle); background: color-mix(in srgb, var(--idle) 15%, var(--surface)); border-color: transparent; }
+.lozenge[data-status="merged"] { color: #8a5cd0; background: color-mix(in srgb, #8a5cd0 14%, var(--surface)); border-color: transparent; }
+.epic-progress, .epic-summary, .epic-notes { margin: 0; font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.epic-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.epic-bar .bar { margin-top: 0; }
+.epic-requirements summary, .story-more summary { font-size: 13px; color: var(--muted); cursor: pointer; }
+.epic-requirements { display: grid; gap: 8px; }
+.board-columns { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+.board-column { display: grid; gap: 8px; padding: 10px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--border); min-width: 0; }
+.board-column h4 { margin: 0 0 2px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+.board-column h4 .count { font-weight: 600; padding: 0 6px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); }
+.story { display: grid; gap: 4px; padding: 9px 11px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); min-width: 0; }
+.story[data-status="blocked"] { border-left: 3px solid var(--failed); }
+.story[data-status="done"] .story-title { color: var(--muted); }
+.story-head { display: flex; align-items: center; gap: 8px; }
+.story-key { font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.flag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--failed); }
+.story-title { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.story-note { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.story-details { margin: 6px 0 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.criteria { margin: 6px 0 0; padding-left: 18px; font-size: 13px; display: grid; gap: 3px; overflow-wrap: anywhere; }
+.done-epics { padding: 14px 16px; }
+.done-epics > summary { cursor: pointer; font-weight: 650; }
+.done-epics > .stack { margin-top: 12px; }
+@media (max-width: 719px) {
+  .board-columns { grid-template-columns: minmax(0, 1fr); }
+  .board-column:has(.column-empty) { display: flex; align-items: center; justify-content: space-between; }
+  .board-column:has(.column-empty) h4 { margin: 0; }
+}

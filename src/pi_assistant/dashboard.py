@@ -26,6 +26,9 @@ The page talks to Athena with JSON:
   GET    /api/memory            what's in memory, the documents indexed from your Mac, and suggested memories
   POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning
   POST   /api/memory/suggestions/<id>  {"action": "approve" | "discard", "text"}: a memory a task suggested
+  GET    /api/projects          the board: projects handed to Claude, as epics of stories
+  POST   /api/projects/refresh  read them from GitHub now
+  POST   /api/projects/restart  {"folder"}: start Claude again on one
   GET    /api/skills            skills, and what Athena's suggested
   POST   /api/skills            add one: {"name", "description", "body"}
   POST   /api/skills/<id>       change one: {"name", "description", "body"}, or {"restore": version id}
@@ -66,6 +69,7 @@ from pi_assistant.settings import EnvFile, Running, Settings, SettingsError
 from pi_assistant.status import StatusFeed
 from pi_assistant.status_api import wait_seconds
 from pi_assistant.tasks import EXAMPLES, NEVER_UNASKED, SCHEDULES
+from pi_assistant.tools import ToolError
 from pi_assistant.webserver import HTTPError, Request, Response, Server
 
 if TYPE_CHECKING:
@@ -243,6 +247,8 @@ class DashboardServer(Server):
             return _json(await self.search(_body(request)))
         if path.startswith("/api/memory/suggestions/") and method == "POST":
             return _json(await self._memory_suggestion(path.removeprefix("/api/memory/suggestions/"), _body(request)))
+        if path in ("/api/projects", "/api/projects/refresh", "/api/projects/restart"):
+            return await self._projects(request, path, method)
         if path == "/api/skills" or path.startswith("/api/skills/"):
             return self._skills(request, path.removeprefix("/api/skills").strip("/"), method)
         if path.startswith("/api/documents/"):
@@ -335,6 +341,24 @@ class DashboardServer(Server):
         else:
             raise HTTPError(400, 'Say what to do: {"action": "approve" | "discard"}.')
         return self.memory()
+
+    async def _projects(self, request: Request, path: str, method: str) -> Response:
+        projects = self.s.builtins.get("claude_projects")
+        if projects is None:
+            why = self.s.builtins.problems.get("claude_projects")
+            off = f"Projects for Claude can't start: {why}." if why else "Projects for Claude are switched off."
+            raise HTTPError(409, f"{off} Set them up on the Tools tab.")
+        if path == "/api/projects" and method == "GET":
+            return _json(projects.board())
+        if path == "/api/projects/refresh" and method == "POST":
+            return _json(await self.s.check_projects() or projects.board())
+        if path == "/api/projects/restart" and method == "POST":
+            try:
+                await projects.restart(str(_body(request).get("folder") or ""))
+            except ToolError as exc:
+                raise HTTPError(400, str(exc)) from None
+            return _json(projects.board())
+        raise HTTPError(405, "There's nothing like that here.")
 
     def _skills(self, request: Request, which: str, method: str) -> Response:
         skills = self.s.skills

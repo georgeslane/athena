@@ -31,6 +31,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Sessions**: `/session` clears the conversation from the model's context, so replies stay quick, while the memory keeps everything you've talked about.
 - **Tasks it does by itself**: a briefing every weekday morning, research while you're busy, or a weekly look for MCP servers that would help. Athena never starts one while you're chatting, and stops for you if you start. It messages you what it found. See [Tasks](#tasks).
 - **Skills**: notes on how to do things your way, which Athena reads before doing them. You write and edit them on the dashboard, Athena writes them when you ask, and after using one it suggests improvements for you to approve. See [Skills](#skills).
+- **Projects for Claude**: Athena hands coding projects to Claude as pull requests in a private GitHub repo, with requirements broken into stories, after you approve them. The dashboard's Board tab shows each as an epic with its stories, following Claude's progress. Athena tells you when one's done, and starts Claude again if it couldn't start or stopped part way, such as at your usage limit. See [Projects for Claude](#projects-for-claude).
 - **Alerts**: a message in Telegram when the Mac's model server, an MCP server or anything else Athena needs stops working, and when it's back, and when Athena itself has stopped. See [Alerts](#alerts).
 - **Your documents, searched by meaning**: choose folders on your Mac in the dashboard, and Athena indexes them when you ask. Ask it in Telegram about something in them, and it says which file and can summarise it. The dashboard's search finds them too. See [Documents](#documents).
 - **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
@@ -100,12 +101,13 @@ Then:
 
 ## Dashboard
 
-A web page for Athena, on your iPhone or Mac. It has five tabs:
+A web page for Athena, on your iPhone or Mac. It has six tabs:
 
 - **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory. Under Connections, **Thinking** switches the model's thinking on, short or off, as `/think` does.
 - **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, run them now, pause, resume or delete them, and read what each said last time. See [Tasks](#tasks).
 - **Memory:** what Athena wanted to remember while it worked by itself, to save, change or discard. Search what it remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents).
 - **Skills:** read, write, change and delete skills, see each one's history and go back to an earlier version, and approve, change or discard the skills and changes Athena suggests, shown line by line. See [Skills](#skills).
+- **Board:** the coding projects Athena has handed to Claude, each an epic with its stories in To do, In progress and Done, as Claude reports them. See [Projects for Claude](#projects-for-claude).
 - **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
 
 A number on the Memory and Skills tabs says how many of Athena's suggestions are waiting for you. It follows your device's light or dark mode. In Safari on an iPhone, Share > Add to Home Screen makes it an app.
@@ -497,6 +499,40 @@ A skill is how to do something your way: how you like trip plans laid out, what 
 - **After using a skill**, answering you or on a task, Athena looks back at how that went once you've finished chatting: a step that was missing, or something you corrected. If a change would help next time, it suggests one and tells you in Telegram. These reviews run like tasks, waiting while you chat and taking one step at a time, so `[tasks] enabled = false` turns them off too.
 - **Spotting habits:** `recent_work` lists what Athena did over the last days and the tools it used for each, which the "Skills from habits" example task uses to suggest new skills each week.
 
+## Projects for Claude
+
+Athena can hand coding projects to Claude, which works on them by itself and reports back. A skill of yours can say when, such as "give coding tasks of moderate complexity or more to Claude".
+
+1. **Athena hands a project over** with `hand_to_claude`: a title, a summary, and stories, each with what must be true for it to be done. It always asks you first, in Telegram, showing everything it will push, even in a task allowed to use other tools without asking. Once you allow it, Athena:
+   - makes a branch, `project/<project>-<YYYY-MM-DD>`, from `main`
+   - commits one file to it, `<project>-<YYYY-MM-DD>/Requirements.md`
+   - opens a pull request from it, and labels it `claude`
+2. **The label starts Claude**: a [routine](https://code.claude.com/docs/en/routines) with a GitHub trigger on pull requests being labelled. It follows `CLAUDE.md` at the root of the repo (from `deploy/zeus-solutions/CLAUDE.md`).
+3. **Claude pushes its work to the branch** as it goes. `status.json` says where the project and each story are, and `Solution.md`, when it's done, says how each success criterion is met. You merge the pull request when you're happy with it, or close it to call the project off, which takes it off the board.
+4. **The Board tab** reads the pull requests every `poll_minutes` (30), or when you press **Check now**. Each project is an epic, with its stories in To do, In progress and Done, and a link to its pull request. Blocked stories are flagged in red, with Claude's note. Athena tells you in Telegram when a project's done or Claude's stuck, and asking it "how's Claude getting on?" uses `claude_projects`.
+5. **When Claude's stuck**, it asks you in its note. Tell Athena the answer: `answer_claude` adds it to `Answers.md` on the branch, after asking you, and starts Claude again.
+
+**When you're at your usage limit.** A run that would start while you're at your Claude usage limit is rejected, and one that reaches it part way just stops. Neither is tried again, so Athena watches for both:
+
+- **Claude didn't start:** no `status.json` 30 minutes (`start_minutes`) after the label.
+- **Claude stopped part way:** nothing pushed to the branch for 2 hours (`stalled_minutes`). `CLAUDE.md` has Claude push at least every 20 minutes, so a run cut short loses little.
+
+Athena starts it again by taking the label off and putting it back, which fires the routine again. Each time, it waits twice as long before the next try, up to 8 times as long, so a 5-hour usage window is covered. It tries `max_restarts` (6) times. Claude carries on from what it pushed, rather than starting again. You're told the first time, and if Athena gives up, and the board says when it'll try next. **Restart Claude** on the board does the same straight away. Projects that are done or blocked are left alone.
+
+Athena reads the repo rather than receiving webhooks: the Pi has no address the internet can reach, and that stays so.
+
+**Set it up:**
+
+1. Make a **private** repository on GitHub. Athena refuses to push to a public one, since requirements can be personal.
+2. Put [`deploy/zeus-solutions/CLAUDE.md`](deploy/zeus-solutions/CLAUDE.md) at its root, on `main`, as `CLAUDE.md`.
+3. Make a [fine-grained token](https://github.com/settings/personal-access-tokens/new) with access to **only that repository**, and the permissions **Contents** and **Pull requests**, both read and write. The Pi still can't push anywhere else.
+4. On the dashboard's **Tools** tab, open **Projects for Claude**: set the repository (`owner/name`), paste the token, and switch it on. Or set `[claude_projects]` in `config.toml`, and `PROJECTS_GITHUB_TOKEN` in `.env`. Then run `uv run pi-assistant doctor`.
+5. Install the [Claude GitHub App](https://github.com/apps/claude) on the repository, and make a routine at [claude.ai/code/routines](https://claude.ai/code/routines):
+   - **Repository:** this one.
+   - **Prompt:** "A pull request labelled `claude` has asked you to work on a project in this repository. Follow CLAUDE.md at its root."
+   - **Trigger:** GitHub event, **Pull request**, action **labeled**, with these filters: **Labels** contains `claude`, **Head branch** starts with `project/`, **Is merged** is false.
+   - **Environment:** network access for whatever the projects need, such as package registries.
+
 ## Alerts
 
 Every `every_minutes` (5), Athena checks that the model server and embeddings server answer, that each MCP server that's switched on is connected, that each built-in integration started, and that there's more than `min_free_gb` (1 GB) free where its data is. Once something has failed `after_failures` (2) checks in a row, you get a message in Telegram saying what and why, and another when it works again. Set these under `[alerts]`, or `enabled = false` to stop them.
@@ -560,6 +596,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, and the page itself (plain HTML, CSS and JavaScript) |
 | `src/pi_assistant/tasks.py`, `channel.py` | Tasks Athena does by itself, and how it reaches you about them |
+| `src/pi_assistant/claude_projects.py`, `deploy/zeus-solutions/` | Handing coding projects to Claude through GitHub, the board of them, and the guide for Claude's side |
 | `src/pi_assistant/skills.py` | Skills: kept with every version, Athena's suggestions, and the tools to read and write them |
 | `src/pi_assistant/alerts.py`, `scripts/tell-stopped.py` | Telling you when something Athena needs stops working, and when Athena itself has stopped |
 | `src/pi_assistant/mcp_registry.py` | The built-in search of the official MCP Registry, for suggesting servers |
@@ -600,11 +637,12 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 
 - Only allowlisted Telegram users can use the bot. Messages from anyone else are ignored and logged.
 - Secrets stay in `.env` (mode 600). `config.toml`, `.env` and `data/` are git-ignored.
-- `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing on the Pi can be pushed to GitHub. `git pull` still works.
+- `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing in it can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
 - Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)).
 - Local servers run in a [sandbox](#sandbox) without your home folder, so they can't read `.env`, your memories or your SSH keys, and without the network if they don't need it. A server with network access can reach anything the Pi can, though, so the approval before a tool runs is still what stops your data being sent somewhere.
 - A server's tools that are new or have changed since you approved them are held back from the model until you approve them on the dashboard ([When a server's tools change](#when-a-servers-tools-change)).
+- The Pi can push to one GitHub repository only, for [Projects for Claude](#projects-for-claude), if you set it up: its token reaches that repo alone, Athena refuses to push if it's public, and each push of requirements or answers asks you first in Telegram, showing everything it contains. A task can't be allowed to skip that. Starting Claude again only takes a label off a pull request and puts it back.
 - What Athena remembers, and skills it writes or changes, while working by itself are suggestions until you approve them on the dashboard, so a web page it reads can't plant a memory or rewrite a skill unseen.
 - Tasks run without you watching, so they can't do more than you could approve: one Athena suggests needs your OK, any tool that asks first still asks you in Telegram unless you've allowed that task to use it, and a task can't schedule others without asking. Allowing a task to fetch or search without asking lets it send what's in its instructions and what it's read to those sites unseen, so allow only what it needs.
 - Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
