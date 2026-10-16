@@ -40,11 +40,10 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 RestrictSUIDSGID=yes
 ProtectKernelModules=yes
-# Not ProtectKernelTunables= or ProtectKernelLogs=: they cover parts of /proc, and then the sandbox can't
-# mount a /proc of its own. Without capabilities, Athena can't change the kernel's settings anyway.
+# Not ProtectKernelTunables=, ProtectKernelLogs= or ProtectHostname=: they cover parts of /proc, and then
+# the sandbox can't mount a /proc of its own. Without capabilities, Athena can't change those anyway.
 ProtectControlGroups=yes
 ProtectClock=yes
-ProtectHostname=yes
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

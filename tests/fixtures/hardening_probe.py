@@ -87,6 +87,15 @@ attempt("see the system's /tmp", lambda: os.stat(plan["tmp_canary"]))
 attempt("use sudo", sudo)
 
 
+# Anything mounted over part of /proc, which stops the sandbox mounting a /proc of its own: for when it can't.
+try:
+    with open("/proc/self/mountinfo") as f:
+        covered = [line.split()[4] for line in f if line.split()[4].startswith("/proc/")]
+    results["(mounted over /proc)"] = ", ".join(covered) or "nothing"
+except OSError as exc:
+    results["(mounted over /proc)"] = str(exc)
+
+
 # The MCP servers' sandbox, within all this.
 async def sandboxed():
     sandbox = Sandbox.detect()

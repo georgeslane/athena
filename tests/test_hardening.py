@@ -153,6 +153,7 @@ def probed(listener, tmp_path_factory):
 def test_athena_can_do_its_job_under_its_unit_and_nothing_more(probed):
     results, repo = probed
     print(json.dumps(results, indent=2))  # what happened, for when it fails
+    assert results["(mounted over /proc)"] == "nothing", "the sandbox can't mount /proc"
     assert {name: results[name] for name in MUST} == dict.fromkeys(MUST, "yes")
     assert [name for name in MUST_NOT if results[name] == "yes"] == []
     assert "SET_BY_PROBE=yes" in (repo / ".env").read_text()
