@@ -46,6 +46,7 @@ read_only_paths = ["{DEMO.parent}"]
 
 MUST = [
     "run Athena",
+    "use openat2",
     "write its data",
     "change config.toml",
     "change .env",

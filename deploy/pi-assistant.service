@@ -38,7 +38,8 @@ PrivateTmp=yes
 PrivateDevices=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
-RestrictSUIDSGID=yes
+# Not RestrictSUIDSGID=: systemd blocks openat2 for it, as it can't see the call's flags, and bubblewrap 0.12
+# and later open paths with openat2 and stop if it fails. NoNewPrivileges= means setuid programs gain nothing.
 ProtectKernelModules=yes
 # Not ProtectKernelTunables=, ProtectKernelLogs= or ProtectHostname=: they cover parts of /proc, and then
 # the sandbox can't mount a /proc of its own. Without capabilities, Athena can't change those anyway.
