@@ -105,7 +105,7 @@ A web page for Athena, on your iPhone or Mac. It has six tabs:
 
 - **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory. Under Connections, **Thinking** switches the model's thinking on, short or off, as `/think` does.
 - **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, run them now, pause, resume or delete them, and read what each said last time. See [Tasks](#tasks).
-- **Memory:** what Athena wanted to remember while it worked by itself, to save, change or discard. Search what it remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents).
+- **Memory:** what Athena wanted to remember while it worked by itself, to save, change or discard. Search what it remembers, your past conversations and your documents, by meaning. Choose the folders on your Mac to index, and index them: see [Documents](#documents). List your private words, which tools can't send where nothing about you should go: see [Privacy](#privacy).
 - **Skills:** read, write, change and delete skills, see each one's history and go back to an earlier version, and approve, change or discard the skills and changes Athena suggests, shown line by line. See [Skills](#skills).
 - **Board:** the coding projects Athena has handed to Claude, each an epic with its stories in To do, In progress and Done, as Claude reports them. See [Projects for Claude](#projects-for-claude).
 - **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
@@ -515,7 +515,7 @@ Athena can hand coding projects to Claude, which works on them by itself and rep
    - **pull request still open:** on the same branch
    - **already merged:** as a new round, on a branch `project/<folder>--2` (then `--3` and so on) from `main`, with a pull request of its own
 
-   The board keeps one epic per project, showing its latest round, with links to the earlier pull requests. You're told again when the new stories are done. What you type into **Add stories…** is yours, so it doesn't ask again, but it does go to GitHub: leave out anything personal.
+   The board keeps one epic per project, showing its latest round, with links to the earlier pull requests. You're told again when the new stories are done. What you type into **Add stories…** is yours, so it doesn't ask again, but it does go to GitHub, so it's [checked for personal details](#privacy) as Athena's are.
 
 **When you're at your usage limit.** A run that would start while you're at your Claude usage limit is rejected, and one that reaches it part way just stops. Neither is tried again, so Athena watches for both:
 
@@ -538,6 +538,22 @@ Athena reads the repo rather than receiving webhooks: the Pi has no address the 
    - **Trigger:** GitHub event, **Pull request**, action **labeled**, with these filters: **Labels** contains `claude`, **Head branch** starts with `project/`, **Is merged** is false.
    - **Environment:** network access for whatever the projects need, such as package registries.
 
+## Privacy
+
+Before a tool runs, Athena looks through everything it would send for:
+
+- **your private words:** ones you list on the dashboard's Memory tab, one per line, such as your full name, address, family's names and employer, and your name as `[agent] user_name` has it
+- **what identifies anyone:** email addresses (but not ones made for examples, like `@example.com`), phone numbers, postcodes, card and bank account numbers, National Insurance numbers, street addresses and precise coordinates
+- **Athena's secrets:** the values in `.env`, and anything shaped like an API key or token
+
+What it finds decides what happens:
+
+- **A secret** stops any tool, even one that doesn't ask first, such as `remember`.
+- **Personal details** stop the tools in `[privacy] block`: by default, those that send to Claude's projects (`hand_to_claude`, `answer_claude` and `extend_claude_project`). The model is told what it found, and to take it out and try again, so Claude only ever gets tasks anyone could ask. **Add stories…** on the board is checked the same way.
+- **Any other tool that asks first** starts its approval message with what it found, such as "⚠️ This has personal details in it: an email address (“…”)", so you can see it before you allow it.
+
+**Try some text** on the Memory tab shows what would be found. Add tools, or patterns like `post_*`, to `block` in `config.toml` to stop them too. The check matches whole words in any case. It can't tell your details from someone else's, so a generic task that happens to contain a postcode is stopped too, and the model rewrites it.
+
 ## Alerts
 
 Every `every_minutes` (5), Athena checks that the model server and embeddings server answer, that each MCP server that's switched on is connected, that each built-in integration started, and that there's more than `min_free_gb` (1 GB) free where its data is. Once something has failed `after_failures` (2) checks in a row, you get a message in Telegram saying what and why, and another when it works again. Set these under `[alerts]`, or `enabled = false` to stop them.
@@ -551,6 +567,8 @@ cd ~/pi-assistant && bash scripts/update.sh
 ```
 
 It pulls the latest code, updates the dependencies, installs any new or changed systemd units and restarts the service.
+
+The unit is hardened: if Athena, or a tool it runs, were taken over, it could change only its own data folder (`data_dir`), `config.toml` and `.env`. Its code, the scripts you run (some with `sudo`), your home folder and the rest of the system are read-only to it, it has its own `/tmp`, and it can't use `sudo` or gain privileges. If you move `data_dir`, run `bash scripts/install-units.sh` and restart, so the unit lets Athena write there. `systemd-analyze security pi-assistant` shows what's restricted.
 
 ## Development
 
@@ -642,6 +660,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 
 - Only allowlisted Telegram users can use the bot. Messages from anyone else are ignored and logged.
 - Secrets stay in `.env` (mode 600). `config.toml`, `.env` and `data/` are git-ignored.
+- systemd runs Athena [hardened](#updating): it can write only to its data folder, `config.toml` and `.env`, so a compromised Athena can't change its own code, the scripts you run with `sudo`, `~/.ssh` or anything else in your home folder, and can't use `sudo`.
+- No tool can send Athena's secrets, and tools that send to Claude's projects can't send your personal details: see [Privacy](#privacy).
 - `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing in it can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
 - Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)).

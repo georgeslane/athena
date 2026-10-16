@@ -84,7 +84,7 @@ def test_install(sandbox):
     assert result.returncode == 0, result.stderr
 
     assert "sudo apt-get install -y -qq git curl ca-certificates sqlite3 bubblewrap" in calls
-    assert "uv sync --no-dev" in calls
+    assert "uv sync --no-dev --compile-bytecode" in calls
     assert not [c for c in calls if "display" in c]  # the status board is its own project now
     assert not [c for c in calls if "ollama" in c]  # embeddings come from the Mac
     unit = (files / "pi-assistant.service").read_text()
@@ -96,6 +96,11 @@ def test_install(sandbox):
     for text in (unit, stopped):
         assert not re.search(r"^[^#].*@[A-Z_]+@", text, re.MULTILINE)  # every placeholder filled in
     assert "sudo systemctl enable pi-assistant" in calls
+    # Hardened: it can write to its data folder, config.toml and .env, and uv's own folders, and nothing else.
+    data = (repo / "data").resolve()
+    assert "ProtectSystem=strict" in unit and data.is_dir()
+    assert f'ReadWritePaths="{data}" -{repo}/config.toml -{repo}/.env' in unit
+    assert all((repo.parent / "home" / d).is_dir() for d in (".cache/uv", ".local/share/uv"))
     assert (repo / "config.toml").read_text() == (repo / "config.example.toml").read_text()
     assert (repo / ".env").stat().st_mode & 0o777 == 0o600
 
@@ -122,7 +127,7 @@ def test_update(sandbox):
     assert result.returncode == 0, result.stderr
     assert calls == [
         "git pull --ff-only",
-        "uv sync --no-dev",
+        "uv sync --no-dev --compile-bytecode",
         "dpkg -s bubblewrap",
         f"sudo tee {files}/pi-assistant.service",  # units that are new or changed are installed
         f"sudo tee {files}/pi-assistant-stopped.service",
@@ -234,3 +239,24 @@ def test_switching_needs_one_model(sandbox):
     for args in [(), ("a", "b"), ("--on-mac",), ("a", "--other")]:
         result, calls = run("switch-embeddings.sh", *args)
         assert result.returncode == 2 and "Usage" in result.stderr and calls == []
+
+
+@pytest.mark.parametrize(
+    "setting, where",
+    [
+        ('data_dir = "~/athena data"  # on the hard drive\n', "home/athena data"),
+        ("data_dir='/ABS'\n", "ABS"),  # a full path: the test's /ABS is made in its own folder below
+        ('[llm]\ndata_dir = "not/this/one"\n', "pi-assistant/data"),  # in a section, so not Athena's
+        ("", "pi-assistant/data"),
+    ],
+)
+def test_the_unit_can_write_to_the_data_folder_set_in_config(sandbox, setting, where, tmp_path):
+    repo, files, run = sandbox
+    if "/ABS" in setting:
+        setting = setting.replace("/ABS", str(tmp_path / "ABS"))
+    (repo / "config.toml").write_text(setting + (repo / "config.example.toml").read_text())
+    result, _ = run("install-units.sh")
+    assert result.returncode == 0, result.stderr
+    data = (tmp_path / where).resolve()
+    assert data.is_dir()
+    assert f'ReadWritePaths="{data}" -{repo}/config.toml' in (files / "pi-assistant.service").read_text()

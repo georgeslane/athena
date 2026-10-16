@@ -22,6 +22,7 @@ from pi_assistant.integrations import BUILTINS
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
+from pi_assistant.privacy import Privacy, TermStore
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.settings import PROTECTED_SECRETS, Settings
@@ -126,6 +127,14 @@ class Services:
         self.agent.prompt_extra = self.skills.index
         for tool in self.skills.tools():
             self.tools.add(tool)
+        # Keeps personal details and secrets from leaving in what tools send (privacy.py).
+        self.privacy = Privacy(
+            self.config.privacy,
+            TermStore(self.config.db_path),
+            user_name=lambda: self.config.agent.user_name,
+            env_path=self.config.env_path,
+        )
+        self.agent.privacy = self.privacy
         # Messages you when something Athena needs stops working (alerts.py).
         self.alerts = None
         if self.config.alerts.enabled:
@@ -225,6 +234,7 @@ class Services:
             await self.tasks.stop()
             self.tasks.store.close()
         self.skills.store.close()
+        self.privacy.close()
         if self.dashboard:
             await self.dashboard.stop()
         if self.status_api:

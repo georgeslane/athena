@@ -800,7 +800,49 @@ async def test_the_board_from_the_dashboard(athena, tmp_path):
         for bad in [{**more, "folder": "nope"}, {**more, "stories": []}, {**more, "summary": ""}]:
             assert (await http.post("/api/projects/extend", json=bad)).status_code == 400
 
+        # Nothing about you goes to Claude, even what you typed yourself.
+        pushed = len(github.events)
+        personal = {**more, "notes": "Email it to me at sam@mailbox.co.uk"}
+        refused = await http.post("/api/projects/extend", json=personal)
+        assert refused.status_code == 400
+        assert refused.json()["error"] == (
+            "That has an email address (“sam@mailbox.co.uk”) in it. "
+            "Take that out: Claude gets only what anyone could ask."
+        )
+        assert len(github.events) == pushed and "sam@" not in github.files(branch)[f"{project.folder}/Requirements.md"]
+
         github.token = "revoked"
         board = (await http.post("/api/projects/refresh", json={})).json()
         assert board["error"].startswith("GitHub refused the token") and board["projects"]  # the last board stays
         assert (await http.get("/api/projects/refresh")).status_code == 405
+
+
+# -- private words ----------------------------------------------------------------------------------
+
+
+async def test_private_words_from_the_memory_tab(athena):
+    async with client(athena) as http:
+        shown = (await http.get("/api/memory")).json()["privacy"]
+        assert shown == {
+            "terms": [],
+            "automatic": ["George"],  # [agent] user_name
+            "block": ["hand_to_claude", "answer_claude", "extend_claude_project"],
+        }
+        saved = (await http.post("/api/privacy", json={"terms": ["Elm Tree Road", " acme  widgets", ""]})).json()
+        assert saved["terms"] == ["acme widgets", "Elm Tree Road"]
+        assert athena.privacy.check("hand_to_claude", {"summary": "near elm tree road"}, asks=True).refused
+
+        too_short = await http.post("/api/privacy", json={"terms": ["Al"]})
+        assert too_short.status_code == 400 and "too short" in too_short.json()["error"]
+        assert (await http.post("/api/privacy", json={"terms": "Elm"})).status_code == 400
+        assert (await http.get("/api/memory")).json()["privacy"]["terms"] == ["acme widgets", "Elm Tree Road"]
+
+        # Trying some text: what's found, but never a secret's value.
+        found = (await http.post("/api/privacy/check", json={"text": f"George, ACME Widgets, {PASSWORD}"})).json()
+        assert found["findings"] == [
+            {"kind": "one of Athena's secrets, from .env", "text": ""},
+            {"kind": "your name", "text": "George"},
+            {"kind": "one of your private words", "text": "acme widgets"},
+        ]
+        assert (await http.post("/api/privacy/check", json={"text": "gold prices"})).json() == {"findings": []}
+        assert (await http.post("/api/privacy/check", json={})).status_code == 400

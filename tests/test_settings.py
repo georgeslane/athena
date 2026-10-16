@@ -530,3 +530,55 @@ def test_the_old_files_server_can_be_removed(setup):
     assert files["custom"] and files["title"] == "files"  # one of your own now, so it can be removed
     cfg = settings.remove_server("files")
     assert "files" not in cfg.mcp_servers and "[mcp_servers.files]" not in config.read_text()
+
+
+def test_where_the_repo_cant_be_written_to_config_and_env_are_changed_in_place(setup, tmp_path):
+    """As under systemd, where Athena can change config.toml and .env, and its data folder, but nothing else."""
+    settings, config, env = setup
+    data = tmp_path / "data"
+    data.mkdir()
+    before = config.read_text()
+    tmp_path.chmod(0o555)
+    try:
+        assert not os.access(tmp_path, os.W_OK) or os.geteuid() == 0
+        settings.update("github", {"secrets": {"GITHUB_TOKEN": "github-token-for-the-test"}, "enabled": True})
+    finally:
+        tmp_path.chmod(0o755)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env", "config.toml", "data"]  # no .tmp or .bak
+    assert dotenv_values(env)["GITHUB_TOKEN"] == "github-token-for-the-test"
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600 and stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert tomllib.loads(config.read_text())["mcp_servers"]["github"]["enabled"] is True
+    assert (data / "config.toml.bak").read_text() == before  # the copy kept from before goes in the data folder
+
+
+def test_a_file_that_cant_be_written_at_all_still_fails(setup, tmp_path):
+    settings, config, _ = setup
+    (tmp_path / "data").mkdir()
+    tmp_path.chmod(0o555)
+    config.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            settings.update("search", {"enabled": True})
+    finally:
+        tmp_path.chmod(0o755)
+
+
+def test_a_file_systemd_has_mounted_in_place_is_changed_in_place(setup, tmp_path, monkeypatch):
+    """Under systemd, config.toml and .env are mounted writable on their own, and can't be replaced."""
+    import errno
+
+    settings, config, env = setup
+    (tmp_path / "data").mkdir()
+
+    replace = os.replace
+
+    def busy(src, dst):
+        if Path(dst) in (config, env):
+            raise OSError(errno.EBUSY, "Device or resource busy")
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", busy)
+    settings.update("github", {"secrets": {"GITHUB_TOKEN": "github-token-for-the-test"}, "enabled": True})
+    assert dotenv_values(env)["GITHUB_TOKEN"] == "github-token-for-the-test"
+    assert tomllib.loads(config.read_text())["mcp_servers"]["github"]["enabled"] is True
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]

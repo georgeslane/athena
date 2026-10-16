@@ -18,6 +18,7 @@ from pi_assistant.config import AgentConfig
 from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient, LLMReply, ToolCall
 from pi_assistant.memory import MemoryHit, MemoryService
+from pi_assistant.privacy import Privacy, refusal, warning
 from pi_assistant.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 from pi_assistant.status import StatusTracker, Task, describe_error
 from pi_assistant.tools import ToolError, ToolRegistry, Turn, begin_turn
@@ -105,6 +106,8 @@ class Agent:
         self.on_saved: Callable[[], None] | None = None
         # Called with each answer, and the background work it was for (None: you), once it's finished.
         self.on_answered: Callable[[AgentResult, Background | None], None] | None = None
+        # Looks through what each tool would send for personal details and secrets (privacy.py).
+        self.privacy: Privacy | None = None
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # While paused, new messages wait; `busy` counts the ones being answered.
         self._open = asyncio.Event()
@@ -199,6 +202,9 @@ class Agent:
             return f"Error: only {', '.join(sorted(only))} can be used now.", FAILED
         if call.arguments is None:
             return f"Error: the arguments were not valid JSON: {call.raw_arguments[:200]}", FAILED
+        verdict = self.privacy.check(tool.name, call.arguments, asks=tool.needs_confirmation) if self.privacy else None
+        if verdict and verdict.refused:
+            return f"Error: {refusal(verdict)}", FAILED
         if tool.needs_confirmation:
             if confirm is None:
                 return "Error: this action needs the user's approval, which can't be requested here.", FAILED
@@ -208,6 +214,8 @@ class Agent:
                     summary = await asyncio.wait_for(tool.preview(call.arguments), self.cfg.tool_timeout_seconds)
                 except Exception as exc:  # nothing has been done, and the user hasn't been asked
                     return self._tool_error(call.name, exc), FAILED
+            if verdict and verdict.findings:
+                summary = warning(verdict) + (f"\n{summary}" if summary else "")
             try:
                 with task.approval(tool.name):
                     approved = await confirm(tool.name, call.arguments, summary)

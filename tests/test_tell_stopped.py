@@ -199,7 +199,16 @@ def sudo(*args):
 
 
 @pytest.fixture
-def systemd_athena(tmp_path, telegram):
+def outside_tmp():
+    """A folder for a repo that systemd runs Athena from: not in /tmp, as the unit gives Athena a /tmp of its own."""
+    root = Path.home() / f".athena-test-{os.getpid()}-{time.monotonic_ns()}"
+    root.mkdir()
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture
+def systemd_athena(outside_tmp, telegram):
     """Install the real units, for an Athena that runs ``athena`` (a shell script), and start it."""
     units = Path("/etc/systemd/system")
     dropins = {
@@ -208,7 +217,7 @@ def systemd_athena(tmp_path, telegram):
     }
 
     def start(athena: str) -> Path:
-        repo = athena_repo(tmp_path, CONFIG)
+        repo = athena_repo(outside_tmp, CONFIG)
         shutil.copy(REPO / "scripts" / "install-units.sh", repo / "scripts")
         shutil.copytree(REPO / "deploy", repo / "deploy")
         program = repo / ".venv" / "bin" / "pi-assistant"
@@ -261,8 +270,8 @@ def test_systemd_tells_you_when_athena_stops_for_good(systemd_athena, telegram):
 
 
 @pytest.mark.skipif(not _can_use_systemd(), reason="needs systemd and sudo: runs in CI")
-def test_systemd_says_nothing_when_athena_starts_again_by_itself(systemd_athena, telegram, tmp_path):
-    marker = tmp_path / "failed-once"
+def test_systemd_says_nothing_when_athena_starts_again_by_itself(systemd_athena, telegram, outside_tmp):
+    marker = outside_tmp / "athena" / "data" / "failed-once"  # where Athena can write
     since = time.time() - 1
     systemd_athena(f"#!/bin/sh\n[ -e {marker} ] && exec sleep 600\ntouch {marker}\necho 'A blip' >&2\nexit 1\n")
     log = watched(since)

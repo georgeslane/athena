@@ -17,3 +17,14 @@ EnvironmentFile=-@REPO_DIR@/.env
 ExecStart=/usr/bin/python3 -I @REPO_DIR@/scripts/tell-stopped.py
 # It watches for up to 15 minutes.
 TimeoutStartSec=20min
+
+# It only reads Athena's log and sends one message, so it can change nothing at all.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
