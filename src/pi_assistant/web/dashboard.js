@@ -1854,7 +1854,10 @@ function epicCard(p) {
   const doneCount = p.stories.filter((s) => s.status === "done").length;
   const links = [h("a.button.small", { href: p.url, target: "_blank", rel: "noopener noreferrer", text: p.number ? `Pull request #${p.number}` : "On GitHub" })];
   if (p.solution_url) links.push(h("a.button.small", { href: p.solution_url, target: "_blank", rel: "noopener noreferrer", text: "Solution" }));
-  if (p.pr === "open" && p.status !== "done") links.push(h("span.grow"), h("button.button.small", { type: "button", text: "Restart Claude", onclick: (e) => restartClaude(e, p) }));
+  for (const r of p.rounds || []) links.push(h("a.button.small.quiet", { href: r.url, target: "_blank", rel: "noopener noreferrer", text: `#${r.number} (${r.pr})` }));
+  links.push(h("span.grow"));
+  if (p.pr === "open" && p.status !== "done") links.push(h("button.button.small", { type: "button", text: "Restart Claude", onclick: (e) => restartClaude(e, p) }));
+  if (p.pr === "open" || p.pr === "merged") links.push(h("button.button.small", { type: "button", text: "Add stories…", onclick: () => addStories(p) }));
   const columns = COLUMNS.map(([status, label]) => {
     const stories = p.stories.filter((s) => s.status === status || (status === "in progress" && s.status === "blocked"));
     return h(
@@ -1869,7 +1872,7 @@ function epicCard(p) {
     "section.card.epic",
     { "data-status": projectState(p) },
     h("div.epic-head", {}, h("span.epic-key", { text: "Epic" }), h("h3", { text: p.title }), h("span.lozenge", { "data-status": projectState(p), text: PROJECT_STATES[projectState(p)] || p.status })),
-    h("p.hint", { text: [p.date && `Handed over ${day(p.date)}`, p.updated && `Claude last said ${when(Date.parse(p.updated) / 1000)}`].filter(Boolean).join(" · ") }),
+    h("p.hint", { text: [p.date && `Handed over ${day(p.date)}`, p.round > 1 && `Round ${p.round}`, p.updated && `Claude last said ${when(Date.parse(p.updated) / 1000)}`].filter(Boolean).join(" · ") }),
     p.progress ? h("p.epic-progress", {}, h("strong", { text: "Claude: " }), p.progress) : null,
     waitingNote(p),
     p.problem ? h("p.form-error", { text: p.problem }) : null,
@@ -1880,6 +1883,73 @@ function epicCard(p) {
     p.summary || p.notes ? h("details.epic-requirements", {}, h("summary", { text: "Requirements" }), requirements) : null,
     h("div.tool-actions", {}, links)
   );
+}
+
+// More work on a project: new stories, which Athena adds to its requirements, and starts Claude on.
+function addStories(p) {
+  const dialog = document.getElementById("dialog");
+  const summary = h("textarea", { rows: 3, required: true, placeholder: "Add an export to a spreadsheet, as the monthly totals are hard to share." });
+  const notes = h("textarea", { rows: 2, placeholder: "Optional: new constraints, such as a library to use." });
+  const list = h("div.story-forms");
+  const blank = () => {
+    const title = h("input", { type: "text", required: true, maxLength: 200, placeholder: "Export to a spreadsheet" });
+    const details = h("textarea", { rows: 2, placeholder: "Optional: what it is, for someone new to it." });
+    const done = h("textarea", { rows: 3, required: true, placeholder: "One per line, such as:\nAn .xlsx with a sheet per month\nIt opens in Numbers and Excel" });
+    const remove = h("button.button.small.quiet", { type: "button", text: "Remove", onclick: () => list.children.length > 1 && block.remove() });
+    const block = h(
+      "fieldset.story-form",
+      {},
+      h("label.field", {}, h("span.field-label", { text: "Story" }), title),
+      h("label.field", {}, h("span.field-label", { text: "Details" }), details),
+      h("label.field", {}, h("span.field-label", { text: "Done when" }), done),
+      h("div.tool-actions", {}, h("span.grow"), remove)
+    );
+    block.read = () => ({ title: title.value, details: details.value, done_when: done.value.split("\n").map((c) => c.trim()).filter(Boolean) });
+    return block;
+  };
+  list.append(blank());
+  const error = h("p.form-error", { role: "alert" });
+  const save = h("button.button.primary", { type: "submit", text: p.pr === "open" ? "Add and start Claude" : "Start a new round" });
+  const form = h(
+    "form.task-form",
+    {
+      onsubmit: async (event) => {
+        event.preventDefault();
+        save.disabled = true;
+        error.textContent = "";
+        try {
+          state.board = await call("POST", "/api/projects/extend", { folder: p.folder, summary: summary.value, notes: notes.value, stories: [...list.children].map((b) => b.read()) });
+          dialog.close();
+          renderBoard();
+          toast(`Added to “${p.title}”: Claude's on it.`);
+        } catch (e) {
+          error.textContent = e.message;
+          save.disabled = false;
+        }
+      },
+    },
+    h("h2", { text: `More for “${p.title}”` }),
+    h(
+      "p.note.setup",
+      {},
+      icon("info"),
+      h("span", {
+        text:
+          (p.pr === "open" ? "The new stories go on its open pull request, and Claude starts on them. " : "It's merged, so this opens a new pull request for it, and Claude starts on that. ") +
+          "They go to GitHub and Claude, so leave out anything personal.",
+      })
+    ),
+    h("label.field", {}, h("span.field-label", { text: "What's changing" }), summary),
+    list,
+    h("div", {}, h("button.button.small", { type: "button", text: "Another story", onclick: () => list.append(blank()) })),
+    h("label.field", {}, h("span.field-label", { text: "Notes" }), notes),
+    error,
+    h("div.tool-actions", {}, h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }), save)
+  );
+  dialog.onclose = null;
+  dialog.replaceChildren(form);
+  dialog.showModal();
+  summary.focus();
 }
 
 function storyCard(s) {

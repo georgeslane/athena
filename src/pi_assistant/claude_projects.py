@@ -12,6 +12,11 @@ and `Solution.md` when it's done. Athena reads the pull requests every poll_minu
 the dashboard), shows each project as an epic of stories on the Board tab, and tells you in Telegram
 when one is done, or Claude's stuck. You merge the pull request when you're happy with it.
 
+More work on a project (`extend_claude_project`, which asks first too) adds stories to its Requirements.md,
+numbered on from the last, under "## Changes, <date>". While its pull request is open, that's on the same
+branch, and Claude's started again. Once it's merged, it's a new round: a branch `project/<folder>--<n>`
+from main, and a pull request of its own. The board shows each folder as one epic, with its latest round.
+
 When Claude can't run: a run that would start while you're at your usage limit is rejected, and one that
 reaches it part way stops, and neither is tried again. So Athena watches for it:
   - no status.json start_minutes after the label: Claude didn't start
@@ -54,6 +59,7 @@ log = logging.getLogger(__name__)
 
 API = "https://api.github.com"
 PREFIX = "project/"  # each project's branch
+ROUND = re.compile(r"--(\d+)$")  # on a project's branch after the first round: folder names never have "--"
 REQUIREMENTS, STATUS, SOLUTION, ANSWERS, GUIDE = (
     "Requirements.md",
     "status.json",
@@ -61,7 +67,7 @@ REQUIREMENTS, STATUS, SOLUTION, ANSWERS, GUIDE = (
     "Answers.md",
     "CLAUDE.md",
 )
-HAND_TO_CLAUDE, ANSWER_CLAUDE = "hand_to_claude", "answer_claude"
+HAND_TO_CLAUDE, ANSWER_CLAUDE, EXTEND_CLAUDE = "hand_to_claude", "answer_claude", "extend_claude_project"
 STATES = ("to do", "in progress", "blocked", "done")  # a story's, on the board
 PROJECT_STATES = ("new", "in progress", "blocked", "done")
 MAX_STORIES, TITLE_CHARS, ANSWER_CHARS = 20, 80, 4000
@@ -133,6 +139,18 @@ class Project:
     restarts: int = 0  # how many times Athena's restarted it since Claude last pushed
     next_restart: float | None = None
     gave_up: bool = False
+    branch: str = ""  # the pull request's
+    round: int = 1  # 2 and on: more work after the first pull request was merged
+    rounds: list[dict[str, Any]] = field(default_factory=list)  # the earlier rounds' pull requests
+    fresh: list[str] = field(default_factory=list)  # the stories asked for last, under "## Changes", if any
+    started: bool = False  # Claude's started on what's asked now: status.json, mentioning any fresh stories
+
+
+def folder_of(branch: str) -> tuple[str, int]:
+    """A project branch's folder, and its round."""
+    name = branch.removeprefix(PREFIX)
+    match = ROUND.search(name)
+    return (name[: match.start()], int(match.group(1))) if match else (name, 1)
 
 
 def slug(title: str) -> str:
@@ -158,10 +176,27 @@ def render(title: str, summary: str, stories: list[dict[str, Any]], notes: str =
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_more(first: int, summary: str, stories: list[dict[str, Any]], when: str, notes: str = "") -> str:
+    """What's added to Requirements.md for more work: stories numbered from S<first>, under a dated heading."""
+    lines = [f"## Changes, {when}", "", summary.strip(), ""]
+    if notes.strip():
+        lines += [notes.strip(), ""]
+    for i, story in enumerate(stories, first):
+        lines.append(f"### S{i}: {' '.join(str(story['title']).split())}")
+        lines.append("")
+        if str(story.get("details") or "").strip():
+            lines += [str(story["details"]).strip(), ""]
+        lines.append("**Done when:**")
+        lines += [f"- {' '.join(str(c).split())}" for c in story["done_when"]]
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def parse(folder: str, text: str) -> Project:
     """A project from its Requirements.md. Forgiving: one written by hand still shows on the board."""
     lines = text.splitlines()
     title, summary, notes, section = folder, [], [], ""
+    fresh: list[str] = []
     stories: list[Story] = []
     story: Story | None = None
     in_criteria = False
@@ -171,11 +206,16 @@ def parse(folder: str, text: str) -> Project:
             continue
         if line.startswith("## "):
             section, story, in_criteria = line[3:].strip().lower(), None, False
+            if section.startswith("changes"):  # more work: what it's for goes with the notes
+                notes += ["", f"{line[3:].strip()}:"]
+                fresh = []
             continue
         match = _STORY.match(line)
         if match:
             story = Story(match.group(1).upper(), match.group(2))
             stories.append(story)
+            if section.startswith("changes"):
+                fresh.append(story.id)
             in_criteria = False
             continue
         if story is not None:
@@ -188,12 +228,14 @@ def parse(folder: str, text: str) -> Project:
             continue
         if not section:
             summary.append(line)
-        elif section.startswith("note"):
+        elif section.startswith(("note", "changes")):
             notes.append(line)
     for s in stories:
         s.details = s.details.strip()
     date = match.group(1) if (match := _FOLDER_DATE.search(folder)) else ""
-    return Project(folder, title, "\n".join(summary).strip(), "\n".join(notes).strip(), date, stories)
+    project = Project(folder, title, "\n".join(summary).strip(), "\n".join(notes).strip(), date, stories)
+    project.fresh = fresh
+    return project
 
 
 def state(value: Any, allowed: tuple[str, ...]) -> str:
@@ -215,6 +257,8 @@ def apply_status(project: Project, text: str | None) -> None:
             project.problem = f"{STATUS} couldn't be read: {exc}"
             status = {}
         stories = status.get("stories") if isinstance(status.get("stories"), dict) else {}
+        listed = {str(k).upper() for k in stories}
+        project.started = bool(project.problem) or not project.fresh or any(i in listed for i in project.fresh)
         for story in project.stories:
             said = stories.get(story.id) or stories.get(story.id.lower())
             if isinstance(said, dict):
@@ -228,6 +272,8 @@ def apply_status(project: Project, text: str | None) -> None:
             project.status = state(status["status"], PROJECT_STATES)
             if project.status == "new":  # status.json means Claude has started
                 project.status = "in progress"
+            if project.status == "done" and any(s.status != "done" for s in project.stories if s.id in project.fresh):
+                project.status = "in progress"  # more's been asked for since
             return
     moved = any(s.status != "to do" for s in project.stories)
     if project.stories and all(s.status == "done" for s in project.stories):
@@ -487,7 +533,17 @@ class ClaudeProjects(Builtin):
     async def refresh(self) -> list[str]:
         """Read the pull requests again, and start Claude again where it should be. Returns what to tell you."""
         try:
-            read = [found for pr in await self._pulls() if (found := await self._read(pr))]
+            rounds: dict[str, list[dict[str, Any]]] = {}  # each folder's pull requests, newest first
+            for pr in await self._pulls():
+                rounds.setdefault(folder_of(pr["head"]["ref"])[0], []).append(pr)
+            read = []
+            for folder, prs in rounds.items():
+                current = next((pr for pr in prs if pr.get("state") == "open"), prs[0])
+                if found := await self._read(current, folder):
+                    found[0].rounds = [
+                        _round(pr) for pr in sorted(prs, key=lambda pr: pr["number"]) if pr is not current
+                    ]
+                    read.append(found)
         except ToolError as exc:
             self.error, self.checked = str(exc), self.clock()
             self.store.keep(self.board())
@@ -510,9 +566,9 @@ class ClaudeProjects(Builtin):
         self.store.keep(self.board())
         return news
 
-    async def _read(self, pr: dict[str, Any]) -> tuple[Project, str] | None:
+    async def _read(self, pr: dict[str, Any], folder: str) -> tuple[Project, str] | None:
         """A pull request's project, and the branch's last commit. None if it isn't one of Athena's."""
-        folder, sha = pr["head"]["ref"][len(PREFIX) :], pr["head"]["sha"]
+        sha = pr["head"]["sha"]
         response = await self._request("GET", f"/repos/{self.cfg.repo}/contents/{quote(folder)}?ref={sha}")
         if response.status_code == 404:
             return None  # a branch called project/... that isn't one of Athena's
@@ -525,6 +581,7 @@ class ClaudeProjects(Builtin):
         apply_status(project, await self._blob(files[STATUS]) if STATUS in files else None)
         project.number, project.url = pr["number"], pr.get("html_url", "")
         project.pr = "merged" if pr.get("merged_at") else str(pr.get("state") or "open")
+        project.branch, project.round = pr["head"]["ref"], folder_of(pr["head"]["ref"])[1]
         if SOLUTION in files:
             project.solution_url = f"https://github.com/{self.cfg.repo}/blob/{sha}/{quote(folder)}/{SOLUTION}"
         project.last_push = await self._pushed_at(sha) if project.pr == "open" else 0.0
@@ -536,7 +593,7 @@ class ClaudeProjects(Builtin):
             return []
         if head != watch.head:  # Claude's pushed (or it's new): it's working
             watch.head, watch.restarts, watch.told_waiting, watch.gave_up = head, 0, False, False
-        started = project.status != "new"
+        started = project.started
         minutes = self.cfg.stalled_minutes if started else self.cfg.start_minutes
         wait = minutes * 60 * 2 ** min(watch.restarts, 3)
         since = max(project.last_push, watch.restarted)
@@ -593,6 +650,12 @@ class ClaudeProjects(Builtin):
         self.store.keep(self.board())
         return project
 
+    def _watching(self, folder: str, status: str) -> None:
+        """Watch a project afresh, as Claude's just been asked to work on it."""
+        watches = self.store.watches()
+        watches[folder] = Watch(status=status, restarted=self.clock())
+        self.store.keep_watches(watches)
+
     def board(self) -> dict[str, Any]:
         return {
             "repo": self.cfg.repo,
@@ -628,17 +691,7 @@ class ClaudeProjects(Builtin):
             raise ToolError(f"Give the project a title, of up to {TITLE_CHARS} characters.")
         if not summary:
             raise ToolError("Say what the project is for, in the summary.")
-        if not isinstance(stories, list) or not stories or len(stories) > MAX_STORIES:
-            raise ToolError(f"Give between 1 and {MAX_STORIES} stories.")
-        for i, story in enumerate(stories, 1):
-            if (
-                not isinstance(story, dict)
-                or not str(story.get("title") or "").strip()
-                or not isinstance(story.get("done_when"), list)
-                or not [c for c in story["done_when"] if str(c).strip()]
-            ):
-                raise ToolError(f"Story {i} needs a title, and done_when: what must be true for it to be done.")
-            story["done_when"] = [c for c in story["done_when"] if str(c).strip()]
+        _check_stories(stories)
         today = datetime.now(self.tz).date().isoformat()
         return title, render(title, summary, stories, str(args.get("notes") or "")), f"{slug(title)}-{today}"
 
@@ -661,7 +714,7 @@ class ClaudeProjects(Builtin):
         repo = self.cfg.repo
         taken = {item["name"] for item in await self._get(f"/repos/{repo}/contents?ref={quote(self.cfg.branch)}")}
         branches = await self._get(f"/repos/{repo}/git/matching-refs/heads/{PREFIX}")
-        taken |= {ref["ref"].removeprefix(f"refs/heads/{PREFIX}") for ref in branches}
+        taken |= {folder_of(ref["ref"].removeprefix("refs/heads/"))[0] for ref in branches}
         name, n = folder, 1
         while name in taken:
             n += 1
@@ -686,19 +739,17 @@ class ClaudeProjects(Builtin):
         )
         await self._call("POST", f"/repos/{repo}/issues/{pr['number']}/labels", json={"labels": [self.cfg.label]})
         project = parse(name, text)
-        project.number, project.url = pr["number"], pr.get("html_url", "")
+        project.number, project.url, project.branch = pr["number"], pr.get("html_url", ""), branch
         project.last_push = self.clock()
         self.projects.insert(0, project)
-        watches = self.store.watches()
-        watches[name] = Watch(status=project.status, restarted=self.clock())
-        self.store.keep_watches(watches)
+        self._watching(name, project.status)
         self.store.keep(self.board())
         log.info("Handed %s to Claude, as pull request #%s", name, pr["number"])
         return project
 
     async def answer(self, project: Project, text: str) -> None:
         """Add your answer to Answers.md on the project's branch, and start Claude again."""
-        branch, path = f"{PREFIX}{project.folder}", f"{quote(project.folder)}/{ANSWERS}"
+        branch, path = project.branch or f"{PREFIX}{project.folder}", f"{quote(project.folder)}/{ANSWERS}"
         response = await self._request("GET", f"/repos/{self.cfg.repo}/contents/{path}?ref={quote(branch)}")
         before, sha = "", None
         if response.status_code == 200:
@@ -717,6 +768,90 @@ class ClaudeProjects(Builtin):
             body["sha"] = sha
         await self._call("PUT", f"/repos/{self.cfg.repo}/contents/{path}", json=body)
         await self.restart(project.folder)
+
+    # -- more work on a project --
+
+    def _more(self, project: Project, args: dict[str, Any]) -> tuple[str, list[str]]:
+        """What's added to Requirements.md, and the new stories' ids. ToolError if the arguments aren't right."""
+        summary, stories = str(args.get("summary") or "").strip(), args.get("stories")
+        if not summary:
+            raise ToolError("Say what's changing, and why, in the summary.")
+        _check_stories(stories, len(project.stories))
+        first = max((int(s.id[1:]) for s in project.stories), default=0) + 1
+        when = datetime.now(self.tz).date().isoformat()
+        text = render_more(first, summary, stories, when, str(args.get("notes") or ""))
+        return text, [f"S{i}" for i in range(first, first + len(stories))]
+
+    async def _next_round(self, project: Project) -> tuple[int, str]:
+        """The next round's number, and its branch, which isn't taken."""
+        branches = await self._get(f"/repos/{self.cfg.repo}/git/matching-refs/heads/{PREFIX}{project.folder}")
+        taken = {ref["ref"].removeprefix("refs/heads/") for ref in branches}
+        n = max([project.round, *(r.get("round", 1) for r in project.rounds)]) + 1
+        while f"{PREFIX}{project.folder}--{n}" in taken:
+            n += 1
+        return n, f"{PREFIX}{project.folder}--{n}"
+
+    async def extend(self, project: Project, args: dict[str, Any]) -> Project:
+        """Add stories to a project, and start Claude on them: on its branch while its pull request is open, or
+        as a new round, with a pull request of its own, once it's merged."""
+        more, ids = self._more(project, args)
+        await self._check_private()
+        repo, path = self.cfg.repo, f"{quote(project.folder)}/{REQUIREMENTS}"
+        message = f"Athena: more for {project.title} ({', '.join(ids)})"
+        if project.pr == "open":
+            branch, new_round = project.branch, None
+        else:
+            new_round, branch = await self._next_round(project)
+            main = await self._main()
+            await self._call("POST", f"/repos/{repo}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": main})
+        response = await self._request("GET", f"/repos/{repo}/contents/{path}?ref={quote(branch)}")
+        if response.status_code == 404:
+            where = "its branch" if new_round is None else self.cfg.branch
+            raise ToolError(f"{project.folder}/{REQUIREMENTS} isn't on {where}, so there's nothing to add to.")
+        if response.status_code >= 400:
+            raise ToolError(f"GitHub said {response.status_code} reading {project.folder}/{REQUIREMENTS}.")
+        current = response.json()
+        before = base64.b64decode(current.get("content") or "").decode("utf-8", "replace")
+        text = before.rstrip() + "\n\n" + more
+        await self._call(
+            "PUT",
+            f"/repos/{repo}/contents/{path}",
+            json={
+                "message": message,
+                "content": base64.b64encode(text.encode()).decode(),
+                "branch": branch,
+                "sha": current["sha"],
+            },
+        )
+        extended = parse(project.folder, text)
+        for field_name in ("number", "url", "pr", "branch", "round", "rounds", "solution_url", "progress", "updated"):
+            setattr(extended, field_name, getattr(project, field_name))
+        done = {s.id: s for s in project.stories}
+        extended.stories = [done.get(s.id, s) for s in extended.stories]
+        extended.status, extended.last_push = "in progress", self.clock()
+        if new_round is None:
+            await self._restart(project.number)
+        else:
+            body = (
+                f"More work on [{project.title}]({project.url}): {str(args.get('summary') or '').strip()}\n\n"
+                f"New stories {', '.join(ids)}, in [`{project.folder}/{REQUIREMENTS}`](../blob/{branch}/"
+                f"{project.folder}/{REQUIREMENTS}). Claude: follow `{GUIDE}`, and push to `{branch}`."
+            )
+            title = f"{project.title} ({new_round})"
+            pr = await self._call(
+                "POST",
+                f"/repos/{repo}/pulls",
+                json={"title": title, "head": branch, "base": self.cfg.branch, "body": body},
+            )
+            await self._call("POST", f"/repos/{repo}/issues/{pr['number']}/labels", json={"labels": [self.cfg.label]})
+            extended.rounds = [*project.rounds, _round_of(project)]
+            extended.number, extended.url, extended.pr = pr["number"], pr.get("html_url", ""), "open"
+            extended.branch, extended.round, extended.solution_url = branch, new_round, ""
+        self.projects = [extended if p.folder == project.folder else p for p in self.projects]
+        self._watching(project.folder, extended.status)
+        self.store.keep(self.board())
+        log.info("Added %s to %s, on %s", ", ".join(ids), project.folder, branch)
+        return extended
 
     def _find(self, name: str, open_only: bool = False) -> Project:
         wanted = name.strip().lower()
@@ -765,6 +900,30 @@ class ClaudeProjects(Builtin):
             project = self._find(str(args.get("project") or ""), open_only=True)
             await self.answer(project, str(args.get("answer") or ""))
             return f"Passed the answer on, and started Claude again on “{project.title}”. {project.url}"
+
+        async def extend_preview(args: dict[str, Any]) -> str:
+            project = self._find(str(args.get("project") or ""))
+            more, ids = self._more(project, dict(args))
+            await self._check_private()
+            what = f"{len(ids)} stor{'y' if len(ids) == 1 else 'ies'} ({ids[0]}{f'–{ids[-1]}' if len(ids) > 1 else ''})"
+            if project.pr == "open":
+                return (
+                    f"This adds {what} to {project.folder}/{REQUIREMENTS} on its branch in {self.cfg.repo} (private), "
+                    f"and starts Claude again on “{project.title}”, made from everything below."
+                )
+            return (
+                f"“{project.title}” is merged, so this opens a new pull request for it in {self.cfg.repo} (private), "
+                f"from a new branch adding {what} to {project.folder}/{REQUIREMENTS}, and labels it "
+                f"“{self.cfg.label}”, which starts Claude: made from everything below."
+            )
+
+        async def extend_claude_project(args: dict[str, Any]) -> str:
+            project = await self.extend(self._find(str(args.get("project") or "")), args)
+            new = len(project.stories) - len([r for r in project.stories if r.status == "done"])
+            return (
+                f"Added to “{project.title}”, on pull request #{project.number}: Claude's starting on it, with {new} "
+                f"stor{'y' if new == 1 else 'ies'} to do. {project.url}"
+            )
 
         async def claude_projects(args: dict[str, Any]) -> str:
             if not self.projects:
@@ -823,6 +982,26 @@ class ClaudeProjects(Builtin):
                 preview=answer_preview,
             ),
             Tool(
+                name=EXTEND_CLAUDE,
+                description=(
+                    "Ask Claude for more work on a project it has, or has finished: new stories, each with success "
+                    "criteria, added to its requirements. Starts Claude on them. Asks the user first."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "project": {"type": "string", "description": "Its name or folder"},
+                        "summary": {"type": "string", "description": "What's changing, and why"},
+                        "stories": {"type": "array", "items": story},
+                        "notes": {"type": "string", "description": "New constraints, if any"},
+                    },
+                    "required": ["project", "summary", "stories"],
+                },
+                handler=extend_claude_project,
+                needs_confirmation=True,
+                preview=extend_preview,
+            ),
+            Tool(
                 name="claude_projects",
                 description=(
                     "How Claude's getting on with the coding projects you've handed it: each project's status and "
@@ -837,6 +1016,8 @@ class ClaudeProjects(Builtin):
         done = sum(1 for s in p.stories if s.status == "done")
         status = {"merged": "merged", "closed": "closed"}.get(p.pr, p.status)
         line = f"{p.folder}: {p.title} ({status}, {done} of {len(p.stories)} stories done)"
+        if p.round > 1:
+            line += f", round {p.round}"
         if p.waiting:
             line += f". Claude {'hasn’t started' if p.waiting == 'not started' else 'stopped part way'}"
             line += "; Athena gave up restarting it" if p.gave_up else f"; restarted {p.restarts} times"
@@ -848,6 +1029,40 @@ class ClaudeProjects(Builtin):
         for s in p.stories:
             lines.append(f"- {s.id} {s.title}: {s.status}" + (f". {s.note}" if s.note else ""))
         return "\n".join(lines)
+
+
+def _check_stories(stories: Any, already: int = 0) -> None:
+    """ToolError, saying what's wrong, unless ``stories`` is a list of good ones, and with ``already`` not too many."""
+    if not isinstance(stories, list) or not stories or len(stories) > MAX_STORIES:
+        raise ToolError(f"Give between 1 and {MAX_STORIES} stories.")
+    if already + len(stories) > 2 * MAX_STORIES:
+        raise ToolError(
+            f"The project would have over {2 * MAX_STORIES} stories: hand the rest over as a project of its own."
+        )
+    for i, story in enumerate(stories, 1):
+        if (
+            not isinstance(story, dict)
+            or not str(story.get("title") or "").strip()
+            or not isinstance(story.get("done_when"), list)
+            or not [c for c in story["done_when"] if str(c).strip()]
+        ):
+            raise ToolError(f"Story {i} needs a title, and done_when: what must be true for it to be done.")
+        story["done_when"] = [c for c in story["done_when"] if str(c).strip()]
+
+
+def _round(pr: dict[str, Any]) -> dict[str, Any]:
+    """An earlier round's pull request, as the board links to it."""
+    state = "merged" if pr.get("merged_at") else str(pr.get("state") or "open")
+    return {
+        "number": pr["number"],
+        "url": pr.get("html_url", ""),
+        "pr": state,
+        "round": folder_of(pr["head"]["ref"])[1],
+    }
+
+
+def _round_of(project: Project) -> dict[str, Any]:
+    return {"number": project.number, "url": project.url, "pr": project.pr, "round": project.round}
 
 
 def _time(iso: str) -> float:
