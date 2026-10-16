@@ -88,8 +88,8 @@ attempt("see the system's /tmp", lambda: os.stat(plan["tmp_canary"]))
 attempt("use sudo", sudo)
 
 
-# System calls that the sandbox needs, and a filter might refuse: bubblewrap 0.12 and later open paths with
-# openat2, and stop if that fails. (CI's bubblewrap is older, so the sandbox below doesn't show this.)
+# A system call the sandbox needs, which systemd blocks for RestrictSUIDSGID=: bubblewrap 0.12 and later open
+# paths with openat2, and stop if that fails. (CI's bubblewrap is older, so the sandbox below doesn't show this.)
 def openat2():
     libc = ctypes.CDLL(None, use_errno=True)
     how = (ctypes.c_uint64 * 3)(os.O_PATH, 0, 0)  # struct open_how: flags, mode, resolve
