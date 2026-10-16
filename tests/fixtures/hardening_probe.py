@@ -90,7 +90,8 @@ attempt("use sudo", sudo)
 # Anything mounted over part of /proc, which stops the sandbox mounting a /proc of its own: for when it can't.
 try:
     with open("/proc/self/mountinfo") as f:
-        covered = [line.split()[4] for line in f if line.split()[4].startswith("/proc/")]
+        # Except binfmt_misc, the system's own, on a folder that's always empty, which the kernel allows.
+        covered = [m for m in (line.split()[4] for line in f) if m.startswith("/proc/") and "binfmt_misc" not in m]
     results["(mounted over /proc)"] = ", ".join(covered) or "nothing"
 except OSError as exc:
     results["(mounted over /proc)"] = str(exc)
