@@ -1242,6 +1242,7 @@ const memory_ = {
   results: null,
   timer: null,
   suggested: new Map(), // each suggested memory, by id, built once so your edits survive the rest changing
+  privacy: null, // built once, so what you've typed survives the rest changing
 };
 
 async function loadMemory() {
@@ -1254,7 +1255,9 @@ function renderMemory() {
   if (!memory_.search) memory_.search = searchCard();
   setReviewCount("memories", m.suggestions.length);
   const suggested = m.suggestions.length ? suggestedMemories(m) : null;
-  document.getElementById("tab-memory").replaceChildren(h("div.stack", {}, suggested, memory_.search, documentsCard(m)));
+  if (!memory_.privacy) memory_.privacy = privacyCard();
+  memory_.privacy.show(m.privacy);
+  document.getElementById("tab-memory").replaceChildren(h("div.stack", {}, suggested, memory_.search, documentsCard(m), memory_.privacy.card));
   clearTimeout(memory_.timer);
   // While Athena indexes, follow how it's going.
   if (m.documents.running) memory_.timer = setTimeout(() => location.hash === "#memory" && loadMemory().catch(() => {}), 1000);
@@ -1366,6 +1369,102 @@ function result(r) {
     h("div.result-head", {}, h("span.result-kind", { text: r.kind === "fact" ? "Remembered" : "Conversation" }), h("span.result-date", { text: day(r.date) })),
     h("p.result-text", { text: r.text })
   );
+}
+
+// Words that identify you, which tools can't send where nothing about you should go, such as Claude's projects.
+function privacyCard() {
+  const terms = h("textarea.review-text.terms", { rows: 4, maxLength: 20000, "aria-label": "Private words, one per line", placeholder: "Your full name\nYour address\nYour family's names" });
+  let shown = ""; // as saved: what you've typed is kept until you save it
+  const automatic = h("p.hint");
+  const blocked = h("span");
+  const save = h("button.button.primary", { type: "submit", text: "Save" });
+  const form = h(
+    "form.privacy",
+    {
+      onsubmit: async (event) => {
+        event.preventDefault();
+        save.disabled = true;
+        try {
+          state.memory.privacy = await call("POST", "/api/privacy", { terms: terms.value.split("\n") });
+          shown = "";
+          view.show(state.memory.privacy);
+          toast("Saved your private words.");
+        } catch (e) {
+          toast(e.message, true);
+        } finally {
+          save.disabled = false;
+        }
+      },
+    },
+    terms,
+    automatic,
+    h("div.tool-actions", {}, h("span.grow"), save)
+  );
+  const text = h("input", { type: "search", placeholder: "Try some text", autocomplete: "off", enterkeyhint: "go", "aria-label": "Text to check" });
+  const check = h("button.button", { type: "submit", text: "Check" });
+  const found = h("div.results", { "aria-live": "polite" });
+  const tryIt = h(
+    "form.search.try",
+    {
+      onsubmit: async (event) => {
+        event.preventDefault();
+        if (!text.value.trim()) return text.focus();
+        check.disabled = true;
+        try {
+          const r = await call("POST", "/api/privacy/check", { text: text.value });
+          found.replaceChildren(
+            r.findings.length
+              ? h("ul.findings", {}, r.findings.map((f) => h("li", {}, h("span", { text: f.text ? `${f.kind}: ` : f.kind }), f.text ? h("strong", { text: f.text }) : null)))
+              : h("p.hint", { text: "Nothing personal found." })
+          );
+        } catch (e) {
+          found.replaceChildren(h("p.form-error", { role: "alert", text: e.message }));
+        } finally {
+          check.disabled = false;
+        }
+      },
+    },
+    text,
+    check
+  );
+  const card = h(
+    "section.card",
+    {},
+    h("div.card-head", {}, h("h2", { text: "Private words" }), h("span.aside", { text: "Never sent to Claude" })),
+    h(
+      "p.note",
+      {},
+      icon("lock"),
+      h("span", {}, "Words that identify you, one per line: your full name, address, family's names, employer. ", blocked, " Other tools that ask first tell you when they'd send one. Email addresses, phone numbers, postcodes, card and bank numbers and street addresses are caught without listing them.")
+    ),
+    form,
+    tryIt,
+    found
+  );
+  const view = {
+    card,
+    show(p) {
+      const saved = p.terms.join("\n");
+      if (terms.value === shown) terms.value = saved; // unless you've changed it and not saved yet
+      shown = saved;
+      requestAnimationFrame(() => {
+        terms.style.height = "auto";
+        terms.style.height = `${terms.scrollHeight + 2}px`;
+      });
+      automatic.textContent = p.automatic.length ? `And your name, from config.toml: ${p.automatic.join(", ")}.` : "";
+      const claude = ["hand_to_claude", "answer_claude", "extend_claude_project"];
+      blocked.textContent = !p.block.length
+        ? "No tool is stopped by them: [privacy] block in config.toml is empty."
+        : p.block.length === claude.length && claude.every((t) => p.block.includes(t))
+          ? "Athena won't send any of them to Claude."
+          : `These tools won't send any of them: ${p.block.join(", ")}.`;
+    },
+  };
+  terms.addEventListener("input", () => {
+    terms.style.height = "auto";
+    terms.style.height = `${terms.scrollHeight + 2}px`;
+  });
+  return view;
 }
 
 function documentsCard(m) {

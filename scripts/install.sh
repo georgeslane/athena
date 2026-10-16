@@ -52,7 +52,7 @@ uv --version
 
 step "Installing Python dependencies"
 cd "$REPO_DIR"
-uv sync --no-dev
+uv sync --no-dev --compile-bytecode  # Athena can't write to .venv itself, under systemd
 
 step "Disabling git push (secrets and memories live in this folder)"
 bash scripts/disable-git-push.sh

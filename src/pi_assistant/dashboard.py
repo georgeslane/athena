@@ -248,6 +248,18 @@ class DashboardServer(Server):
             return _json(await self.search(_body(request)))
         if path.startswith("/api/memory/suggestions/") and method == "POST":
             return _json(await self._memory_suggestion(path.removeprefix("/api/memory/suggestions/"), _body(request)))
+        if path == "/api/privacy" and method == "POST":
+            try:
+                self.s.privacy.set_terms(_body(request).get("terms"))
+            except ValueError as exc:
+                raise HTTPError(400, str(exc)) from None
+            return _json(self.privacy())
+        if path == "/api/privacy/check" and method == "POST":
+            text = _body(request).get("text")
+            if not isinstance(text, str) or len(text) > 20_000:
+                raise HTTPError(400, 'Send the text to check: {"text": "..."}, up to 20,000 characters.')
+            found = self.s.privacy.find([text])
+            return _json({"findings": [{"kind": f.kind, "text": "" if f.secret else f.text} for f in found]})
         if path in ("/api/projects", "/api/projects/refresh", "/api/projects/restart", "/api/projects/extend"):
             return await self._projects(request, path, method)
         if path == "/api/skills" or path.startswith("/api/skills/"):
@@ -359,6 +371,12 @@ class DashboardServer(Server):
             project = next((p for p in projects.projects if p.folder == folder and p.pr in ("open", "merged")), None)
             if project is None:
                 raise HTTPError(400, f"There's no project {folder} on the board.")
+            sent = {k: body.get(k) for k in ("summary", "stories", "notes")}
+            verdict = self.s.privacy.check("extend_claude_project", sent, asks=True)
+            if verdict.refused:
+                raise HTTPError(
+                    400, f"That has {verdict.describe()} in it. Take that out: Claude gets only what anyone could ask."
+                )
             try:
                 await projects.extend(project, body)
             except ToolError as exc:
@@ -487,6 +505,15 @@ class DashboardServer(Server):
             "documents": self.s.documents.summary(),
             # Facts Athena wanted to remember while working by itself, waiting for you to approve them.
             "suggestions": [dataclasses.asdict(s) for s in self.s.memory.store.suggestions()],
+            "privacy": self.privacy(),
+        }
+
+    def privacy(self) -> dict[str, Any]:
+        """Your private words, which tools can't send where nothing about you should go (privacy.py)."""
+        return {
+            "terms": self.s.privacy.store.all(),
+            "automatic": self.s.privacy.automatic(),
+            "block": self.s.config.privacy.block,
         }
 
     def skills(self) -> dict[str, Any]:

@@ -211,6 +211,13 @@ class MCPServerConfig(_Section):
         return "sse" if (self.url or "").rstrip("/").endswith("/sse") else "http"
 
 
+class PrivacyConfig(_Section):
+    # Before a tool runs, Athena looks through what it would send for personal details (privacy.py).
+    # These tools send where nothing about you should go, so they're stopped if they'd send any: the
+    # model is told to take them out. Other tools that ask first tell you what was found when they ask.
+    block: list[str] = Field(default_factory=lambda: ["hand_to_claude", "answer_claude", "extend_claude_project"])
+
+
 class _Config(_Section):
     data_dir: str = "data"
     llm: LLMConfig
@@ -224,6 +231,7 @@ class _Config(_Section):
     siri: SiriConfig = Field(default_factory=SiriConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+    privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.

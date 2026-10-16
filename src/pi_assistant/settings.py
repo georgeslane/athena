@@ -12,6 +12,7 @@ shown too, with its command or URL, and can be added and removed from the dashbo
 from __future__ import annotations
 
 import copy
+import errno
 import os
 import re
 import tomllib
@@ -281,11 +282,21 @@ def _env_line(name: str, value: str) -> str:
 
 
 def write_private(path: Path, text: str, mode: int | None = None) -> None:
-    """Replace ``path`` with ``text`` in one step, so a crash never leaves it half-written."""
+    """Replace ``path`` with ``text`` in one step, so a crash never leaves it half-written.
+
+    Where its folder can't be written to but it can, it's written in place: under systemd, Athena can
+    change config.toml and .env but nothing else in the repo (deploy/pi-assistant.service).
+    """
     if mode is None:
         mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     tmp = path.with_name(f"{path.name}.tmp")  # .env.tmp and config.toml.tmp are git-ignored
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    except OSError as exc:
+        if exc.errno not in (errno.EROFS, errno.EACCES, errno.EPERM) or not os.access(path, os.W_OK):
+            raise
+        _write_in_place(path, text, mode)
+        return
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
@@ -294,6 +305,16 @@ def write_private(path: Path, text: str, mode: int | None = None) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _write_in_place(path: Path, text: str, mode: int) -> None:
+    """Not in one step: a crash part way leaves it half-written, but it's small, so that's unlikely."""
+    with path.open("r+b") as f:
+        f.write(text.encode())
+        f.truncate()
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(path, mode)
 
 
 # -- config.toml ------------------------------------------------------------------------------
@@ -768,7 +789,11 @@ class Settings:
         if env_changes:
             self.env.update(env_changes)
         if text != self.path.read_text():
-            write_private(self.path.with_name(f"{self.path.name}.bak"), self.path.read_text())
+            before = self.path.read_text()
+            try:
+                write_private(self.path.with_name(f"{self.path.name}.bak"), before)
+            except OSError:  # the repo can't be written to, under systemd: Athena's data folder can
+                write_private(cfg.resolve(cfg.data_dir) / f"{self.path.name}.bak", before)
             write_private(self.path, text)
         return cfg
 

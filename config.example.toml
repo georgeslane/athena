@@ -152,6 +152,13 @@ every_minutes = 5                      # how often it checks
 after_failures = 2                     # failed checks in a row before you're told, so a blip isn't
 min_free_gb = 1                        # less free space than this where its data is is a problem
 
+[privacy]
+# Before a tool runs, Athena looks through what it would send for personal details (see README,
+# "Privacy"): your private words, listed on the dashboard (Memory), your name, email addresses,
+# phone numbers, postcodes and the like. These tools are stopped if they'd send any; other tools
+# that ask first tell you what they found when they ask. Secrets from .env stop every tool.
+block = ["hand_to_claude", "answer_claude", "extend_claude_project"]
+
 [siri]
 # Ask by voice: "Hey Siri, Ask Athena" on your iPhone or Mac (see README, "Siri").
 # Your question and the answer also appear in the Telegram chat.

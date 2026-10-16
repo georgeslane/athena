@@ -9,7 +9,7 @@ main() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   export PATH="$HOME/.local/bin:$PATH"
   git pull --ff-only
-  uv sync --no-dev
+  uv sync --no-dev --compile-bytecode  # Athena can't write to .venv itself, under systemd
   if ! dpkg -s bubblewrap >/dev/null 2>&1; then
     # Local MCP servers run in a bubblewrap sandbox, and won't start without it.
     sudo apt-get install -y -qq bubblewrap >/dev/null
