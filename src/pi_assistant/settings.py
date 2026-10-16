@@ -301,7 +301,13 @@ def write_private(path: Path, text: str, mode: int | None = None) -> None:
         with os.fdopen(fd, "w") as f:
             f.write(text)
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:  # systemd has mounted it in place, so it can't be replaced
+                raise
+            tmp.unlink()
+            _write_in_place(path, text, mode)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

@@ -110,12 +110,16 @@ def log_lines(unit: str) -> list[str]:
 def unit_state(unit: str) -> dict[str, str]:
     """systemd's ActiveState, SubState and Result for the unit. Empty if it can't be asked."""
     try:
-        out = subprocess.run(
+        done = subprocess.run(
             ["systemctl", "show", "-p", "ActiveState,SubState,Result", unit], capture_output=True, text=True, timeout=10
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Couldn't ask systemctl about {unit}: {exc}", file=sys.stderr)
         return {}
-    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    state = dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
+    if not state:
+        print(f"systemctl said nothing about {unit}: {done.stderr.strip()}", file=sys.stderr)
+    return state
 
 
 def settle(unit: str) -> tuple[str, str]:

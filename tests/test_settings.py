@@ -561,3 +561,24 @@ def test_a_file_that_cant_be_written_at_all_still_fails(setup, tmp_path):
             settings.update("search", {"enabled": True})
     finally:
         tmp_path.chmod(0o755)
+
+
+def test_a_file_systemd_has_mounted_in_place_is_changed_in_place(setup, tmp_path, monkeypatch):
+    """Under systemd, config.toml and .env are mounted writable on their own, and can't be replaced."""
+    import errno
+
+    settings, config, env = setup
+    (tmp_path / "data").mkdir()
+
+    replace = os.replace
+
+    def busy(src, dst):
+        if Path(dst) in (config, env):
+            raise OSError(errno.EBUSY, "Device or resource busy")
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", busy)
+    settings.update("github", {"secrets": {"GITHUB_TOKEN": "github-token-for-the-test"}, "enabled": True})
+    assert dotenv_values(env)["GITHUB_TOKEN"] == "github-token-for-the-test"
+    assert tomllib.loads(config.read_text())["mcp_servers"]["github"]["enabled"] is True
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]

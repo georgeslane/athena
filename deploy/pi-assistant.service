@@ -30,6 +30,7 @@ RestartSec=10
 # own within this (sandbox.py), which needs user namespaces and mounts, so those stay allowed.
 # tests/test_hardening.py checks all this under systemd, in CI.
 ProtectSystem=strict
+ProtectHome=read-only
 ReadWritePaths="@DATA_DIR@" -@REPO_DIR@/config.toml -@REPO_DIR@/.env
 # uv's downloads and Pythons, for the MCP servers' environments, and npm's for servers started with npx.
 ReadWritePaths=-@HOME@/.cache/uv -@HOME@/.local/share/uv -@HOME@/.npm
@@ -39,8 +40,8 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 RestrictSUIDSGID=yes
 ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectKernelLogs=yes
+# Not ProtectKernelTunables= or ProtectKernelLogs=: they cover parts of /proc, and then the sandbox can't
+# mount a /proc of its own. Without capabilities, Athena can't change the kernel's settings anyway.
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
