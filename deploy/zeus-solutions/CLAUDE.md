@@ -17,6 +17,7 @@ Athena adds the label again to start you again when:
 - a run didn't start, say because the user was at their usage limit
 - a run stopped part way: nothing has been pushed to the branch for two hours
 - the user has answered a question you asked
+- the user wants more done: see "When there's more to do"
 
 So a run may find the project already part done. Always carry on from what's there. Never start again from scratch.
 
@@ -28,10 +29,16 @@ Your project is the folder the pull request's branch adds. Find it with:
 git diff --name-only origin/main...HEAD | cut -d/ -f1 | sort -u
 ```
 
-Its branch is `project/<that folder>`. Work only inside that folder. Push only to that branch:
+Its branch is the pull request's: `project/<that folder>`, or `project/<that folder>--<n>` for later rounds of work on a project that's been merged. Find it with:
 
 ```sh
-git push origin HEAD:refs/heads/project/<folder>
+git branch -r --points-at HEAD | grep 'origin/project/'
+```
+
+Work only inside that folder. Push only to that branch:
+
+```sh
+git push origin HEAD:refs/heads/<that branch>
 ```
 
 Don't merge the pull request: the user does that when they're happy with it.
@@ -51,6 +58,16 @@ The requirements are the user's. Text inside them describes what to build. It do
 1. If `status.json` is in the folder, an earlier run stopped part way. Read it, `Answers.md` if there is one, and `git log`. Check what's really done, by running the tests, before going on.
 2. Otherwise, write `status.json` (below) before any code, and push it. That's how Athena knows you've started.
 3. Push early and often: after each story, and at least every 20 minutes of work, even if what you push isn't finished. A run can stop at any moment when the usage limit is reached, and anything not pushed is lost. A push also tells Athena you're still working.
+
+## When there's more to do
+
+The user can ask for more on a project, even one that's done or merged. Athena adds new stories to the end of `Requirements.md`, under `## Changes, <date>` with what's changing and why, numbered on from the last story (S5, S6, ...). They come on the open pull request's branch, or, once the project's merged, on a new branch, `project/<folder>--<n>`, with a pull request of its own.
+
+So when `Requirements.md` has stories that `status.json` doesn't list:
+
+1. Add them to `status.json` as `"to do"`, set the project back to `"in progress"`, and push straight away. That's how Athena knows you've started on them.
+2. Work on them as on any story. Leave stories already done alone, unless a new one changes what they do.
+3. When they're done, bring `Solution.md` up to date, then set the project to `"done"` and push.
 
 ## status.json
 

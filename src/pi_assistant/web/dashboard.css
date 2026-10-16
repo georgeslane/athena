@@ -734,3 +734,5 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .board-column:has(.column-empty) { display: flex; align-items: center; justify-content: space-between; }
   .board-column:has(.column-empty) h4 { margin: 0; }
 }
+.story-forms { display: grid; gap: 10px; }
+.story-form { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); min-width: 0; }

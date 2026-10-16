@@ -511,6 +511,11 @@ Athena can hand coding projects to Claude, which works on them by itself and rep
 3. **Claude pushes its work to the branch** as it goes. `status.json` says where the project and each story are, and `Solution.md`, when it's done, says how each success criterion is met. You merge the pull request when you're happy with it, or close it to call the project off, which takes it off the board.
 4. **The Board tab** reads the pull requests every `poll_minutes` (30), or when you press **Check now**. Each project is an epic, with its stories in To do, In progress and Done, and a link to its pull request. Blocked stories are flagged in red, with Claude's note. Athena tells you in Telegram when a project's done or Claude's stuck, and asking it "how's Claude getting on?" uses `claude_projects`.
 5. **When Claude's stuck**, it asks you in its note. Tell Athena the answer: `answer_claude` adds it to `Answers.md` on the branch, after asking you, and starts Claude again.
+6. **For more work on a project**, done or not, name it to Athena by its title or folder, such as "add a CSV export to the bank statements project", or press **Add stories…** on its epic. `extend_claude_project` adds new stories to its `Requirements.md`, numbered on from the last, under a dated "Changes" heading, after asking you, and starts Claude on them:
+   - **pull request still open:** on the same branch
+   - **already merged:** as a new round, on a branch `project/<folder>--2` (then `--3` and so on) from `main`, with a pull request of its own
+
+   The board keeps one epic per project, showing its latest round, with links to the earlier pull requests. You're told again when the new stories are done. What you type into **Add stories…** is yours, so it doesn't ask again, but it does go to GitHub: leave out anything personal.
 
 **When you're at your usage limit.** A run that would start while you're at your Claude usage limit is rejected, and one that reaches it part way just stops. Neither is tried again, so Athena watches for both:
 

@@ -63,7 +63,7 @@ log = logging.getLogger(__name__)
 
 NOTHING = "NOTHING TO REPORT"  # what a task replies when there's nothing worth telling you
 # Tools a task can't be allowed to use without asking: starting more tasks, and pushing to GitHub.
-NEVER_UNASKED = {"schedule_task", "hand_to_claude", "answer_claude"}
+NEVER_UNASKED = {"schedule_task", "hand_to_claude", "answer_claude", "extend_claude_project"}
 MIN_EVERY = timedelta(minutes=15)
 MISSED_GRACE = timedelta(hours=6)  # a regular run missed by more than this (Athena was off) is skipped
 RETRIES = (600, 1800)  # after a run fails: try again in 10 minutes, then 30, then give up on that run

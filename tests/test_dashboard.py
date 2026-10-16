@@ -787,6 +787,19 @@ async def test_the_board_from_the_dashboard(athena, tmp_path):
         assert athena.history.load("111")[-1] == {"role": "assistant", "content": said[0]}
         assert (await http.get("/api/projects")).json()["projects"][0]["status"] == "done"
 
+        # More work, from the board: you wrote it, so it's not asked about again.
+        more = {
+            "folder": project.folder,
+            "summary": "Sharing.",
+            "stories": [{"title": "Export", "done_when": ["xlsx"]}],
+        }
+        board = (await http.post("/api/projects/extend", json=more)).json()
+        assert [s["id"] for s in board["projects"][0]["stories"]] == ["S1", "S2", "S3"]
+        assert "### S3: Export" in github.files(branch)[f"{project.folder}/Requirements.md"]
+        assert github.events[-1] == ("labeled", 1, "claude")
+        for bad in [{**more, "folder": "nope"}, {**more, "stories": []}, {**more, "summary": ""}]:
+            assert (await http.post("/api/projects/extend", json=bad)).status_code == 400
+
         github.token = "revoked"
         board = (await http.post("/api/projects/refresh", json={})).json()
         assert board["error"].startswith("GitHub refused the token") and board["projects"]  # the last board stays

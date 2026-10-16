@@ -29,6 +29,7 @@ The page talks to Athena with JSON:
   GET    /api/projects          the board: projects handed to Claude, as epics of stories
   POST   /api/projects/refresh  read them from GitHub now
   POST   /api/projects/restart  {"folder"}: start Claude again on one
+  POST   /api/projects/extend   {"folder", "summary", "stories", "notes"}: more work on one, for Claude
   GET    /api/skills            skills, and what Athena's suggested
   POST   /api/skills            add one: {"name", "description", "body"}
   POST   /api/skills/<id>       change one: {"name", "description", "body"}, or {"restore": version id}
@@ -247,7 +248,7 @@ class DashboardServer(Server):
             return _json(await self.search(_body(request)))
         if path.startswith("/api/memory/suggestions/") and method == "POST":
             return _json(await self._memory_suggestion(path.removeprefix("/api/memory/suggestions/"), _body(request)))
-        if path in ("/api/projects", "/api/projects/refresh", "/api/projects/restart"):
+        if path in ("/api/projects", "/api/projects/refresh", "/api/projects/restart", "/api/projects/extend"):
             return await self._projects(request, path, method)
         if path == "/api/skills" or path.startswith("/api/skills/"):
             return self._skills(request, path.removeprefix("/api/skills").strip("/"), method)
@@ -352,6 +353,17 @@ class DashboardServer(Server):
             return _json(projects.board())
         if path == "/api/projects/refresh" and method == "POST":
             return _json(await self.s.check_projects() or projects.board())
+        if path == "/api/projects/extend" and method == "POST":
+            body = _body(request)
+            folder = str(body.get("folder") or "")
+            project = next((p for p in projects.projects if p.folder == folder and p.pr in ("open", "merged")), None)
+            if project is None:
+                raise HTTPError(400, f"There's no project {folder} on the board.")
+            try:
+                await projects.extend(project, body)
+            except ToolError as exc:
+                raise HTTPError(400, str(exc)) from None
+            return _json(projects.board())
         if path == "/api/projects/restart" and method == "POST":
             try:
                 await projects.restart(str(_body(request).get("folder") or ""))

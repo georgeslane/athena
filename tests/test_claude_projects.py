@@ -20,9 +20,12 @@ from pi_assistant.claude_projects import (
     BoardStore,
     ClaudeProjects,
     ClaudeProjectsConfig,
+    _check_stories,
     apply_status,
+    folder_of,
     parse,
     render,
+    render_more,
     slug,
 )
 from pi_assistant.tools import ToolError
@@ -644,4 +647,157 @@ def test_it_needs_a_token_and_a_repo(config):
 def test_a_task_always_asks_before_pushing_to_github():
     from pi_assistant.tasks import NEVER_UNASKED
 
-    assert {"hand_to_claude", "answer_claude"} <= NEVER_UNASKED
+    assert {"hand_to_claude", "answer_claude", "extend_claude_project"} <= NEVER_UNASKED
+
+
+# -- more work on a project ------------------------------------------------------------------------------
+
+MORE = [{"title": "Export to a spreadsheet", "done_when": ["An .xlsx with a sheet per month"]}]
+
+
+def merge(github, number):
+    """Merge a pull request, as you would on GitHub, deleting its branch."""
+    pr = github.pulls[number - 1]
+    github.commit("main", github.files(pr["branch"]))
+    pr["state"], pr["merged_at"] = "closed", "2026-10-17T10:00:00Z"
+
+
+def test_more_stories_read_back_after_the_first():
+    text = (
+        render("Bank statements", "Sum it up.", STORIES)
+        + "\n"
+        + render_more(3, "Totals are hard to share.", MORE, "2026-10-20")
+    )
+    project = parse("bank-statements-2026-10-15", text)
+    assert [(s.id, s.title) for s in project.stories] == [
+        ("S1", "Read the bank's CSV"),
+        ("S2", "Monthly totals"),
+        ("S3", "Export to a spreadsheet"),
+    ]
+    assert project.stories[2].done_when == ["An .xlsx with a sheet per month"]
+    assert project.notes == "Changes, 2026-10-20:\n\nTotals are hard to share."
+    assert folder_of("project/bank-statements-2026-10-15") == ("bank-statements-2026-10-15", 1)
+    assert folder_of("project/bank-statements-2026-10-15-2--3") == ("bank-statements-2026-10-15-2", 3)
+
+    # Claude said it was done, before the new story: it isn't now, and hasn't started on the new one.
+    apply_status(project, status("done", S1="done", S2="done"))
+    assert (project.status, project.started) == ("in progress", False)
+    apply_status(project, status("in progress", S1="done", S2="done", S3="to do"))
+    assert project.started
+    first_round = parse("p", render("P", "S.", STORIES))
+    apply_status(first_round, status("in progress"))  # any status.json means Claude's started a first round
+    assert first_round.started
+
+
+async def test_more_work_on_an_open_project_goes_on_its_branch(projects, github):
+    project = await hand(projects)
+    branch = f"project/{project.folder}"
+    github.commit(branch, {f"{project.folder}/status.json": status("done", S1="done", S2="done")})
+    told = await projects.refresh()
+    assert len(told) == 1 and told[0].startswith("✅")
+
+    extend = tool(projects, "extend_claude_project")
+    assert extend.needs_confirmation
+    args = {"project": "bank", "summary": "Totals are hard to share.", "stories": MORE}
+    assert await extend.preview(args) == (
+        f"This adds 1 story (S3) to {project.folder}/Requirements.md on its branch in {REPO} (private), and starts "
+        "Claude again on “Bank statements”, made from everything below."
+    )
+    labelled = len(github.labelled())
+    said = await extend.handler(args)
+    assert said.startswith(
+        "Added to “Bank statements”, on pull request #1: Claude's starting on it, with 1 story to do."
+    )
+    requirements = github.files(branch)[f"{project.folder}/Requirements.md"]
+    assert requirements.startswith(render("Bank statements", "Sum up my spending.", STORIES))
+    assert f"## Changes, {today()}\n\nTotals are hard to share.\n\n### S3: Export to a spreadsheet" in requirements
+    assert len(github.labelled()) == labelled + 1 and len(github.pulls) == 1  # Claude's started again
+    shown = projects.projects[0]
+    assert [(s.id, s.status) for s in shown.stories] == [("S1", "done"), ("S2", "done"), ("S3", "to do")]
+    assert shown.status == "in progress"
+
+    # On the board: not done, and Claude hasn't started on the new story...
+    assert await projects.refresh() == []
+    assert (projects.projects[0].status, projects.projects[0].started) == ("in progress", False)
+    # ...until it lists it. Then when it's done, you're told again.
+    github.commit(branch, {f"{project.folder}/status.json": status("done", S1="done", S2="done", S3="done")})
+    (done,) = await projects.refresh()
+    assert done.startswith("✅ Claude has finished “Bank statements”")
+
+
+async def test_more_work_on_a_merged_project_is_a_new_round(projects, github):
+    project = await hand(projects)
+    branch = f"project/{project.folder}"
+    github.commit(branch, {f"{project.folder}/status.json": status("done", S1="done", S2="done")})
+    github.commit(branch, {f"{project.folder}/Solution.md": "# How"})
+    merge(github, 1)
+    await projects.refresh()
+    assert projects.projects[0].pr == "merged"
+
+    extend = tool(projects, "extend_claude_project")
+    args = {"project": project.folder, "summary": "Totals are hard to share.", "stories": MORE * 2}
+    assert await extend.preview(args) == (
+        f"“Bank statements” is merged, so this opens a new pull request for it in {REPO} (private), from a new branch "
+        f"adding 2 stories (S3–S4) to {project.folder}/Requirements.md, and labels it “claude”, which starts Claude: "
+        "made from everything below."
+    )
+    await extend.handler(args)
+    second = f"project/{project.folder}--2"
+    pr = github.pulls[1]
+    assert (pr["branch"], pr["title"]) == (second, "Bank statements (2)")
+    assert pr["body"].startswith("More work on [Bank statements](https://github.com/someone/zeus-solutions/pull/1)")
+    assert github.labelled()[-1] == ("labeled", 2, "claude")
+    files = github.files(second)
+    assert files[f"{project.folder}/Solution.md"] == "# How"  # it starts from what was merged
+    assert "### S4: Export to a spreadsheet" in files[f"{project.folder}/Requirements.md"]
+    assert "### S3" not in github.files("main")[f"{project.folder}/Requirements.md"]  # main waits for the merge
+
+    # One epic for the folder, showing its latest round, with the first linked.
+    assert await projects.refresh() == []
+    (shown,) = projects.projects
+    assert (shown.number, shown.round, shown.branch, shown.status, shown.started) == (
+        2,
+        2,
+        second,
+        "in progress",
+        False,
+    )
+    assert shown.rounds == [{"number": 1, "url": f"https://github.com/{REPO}/pull/1", "pr": "merged", "round": 1}]
+    assert [s.status for s in shown.stories] == ["done", "done", "to do", "to do"]
+    assert "(in progress, 2 of 4 stories done), round 2" in projects._describe(shown)
+
+    # If Claude doesn't start on it, it's started again, as for any project.
+    projects.clock.wait(31 * 60)
+    (said,) = await projects.refresh()
+    assert said.startswith("⏳ Claude hasn't started on “Bank statements”") and github.labelled()[-1][1] == 2
+
+    # An answer goes to this round's branch, and a third round after this one's merged gets its own.
+    github.commit(second, {f"{project.folder}/status.json": status("blocked", S3="blocked", S4="to do")})
+    await projects.refresh()
+    await projects.answer(projects.projects[0], "Use openpyxl.")
+    assert f"{project.folder}/Answers.md" in github.files(second)
+    merge(github, 2)
+    await projects.refresh()
+    await projects.extend(projects.projects[0], {"summary": "Charts.", "stories": MORE})
+    assert github.pulls[2]["branch"] == f"project/{project.folder}--3"
+    await projects.refresh()
+    assert [r["number"] for r in projects.projects[0].rounds] == [1, 2]
+
+    # A new project with the same name that day still gets a folder of its own.
+    assert (await hand(projects)).folder == f"{project.folder}-2"
+
+
+async def test_more_work_that_isnt_right_is_refused_before_asking(projects, github):
+    await hand(projects)
+    extend = tool(projects, "extend_claude_project")
+    before = len(github.requests)
+    for args, why in [
+        ({"project": "bank", "stories": MORE}, "Say what's changing"),
+        ({"project": "bank", "summary": "s", "stories": []}, "between 1 and 20 stories"),
+        ({"project": "boats", "summary": "s", "stories": MORE}, "No project matches"),
+    ]:
+        with pytest.raises(ToolError, match=why):
+            await extend.preview(args)
+    assert len(github.requests) == before
+    with pytest.raises(ToolError, match="hand the rest over as a project of its own"):
+        _check_stories(MORE * 15, already=30)
