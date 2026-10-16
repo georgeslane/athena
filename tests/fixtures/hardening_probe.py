@@ -5,6 +5,7 @@ It reads what to try from probe.json, in the folder it's started in (the test's 
 """
 
 import asyncio
+import ctypes
 import json
 import os
 import socket
@@ -85,6 +86,20 @@ attempt("write to your home folder", create(home / f".athena-probe-{os.getpid()}
 attempt("change ~/.bashrc", change(home / ".bashrc"))
 attempt("see the system's /tmp", lambda: os.stat(plan["tmp_canary"]))
 attempt("use sudo", sudo)
+
+
+# System calls that the sandbox needs, and a filter might refuse: bubblewrap 0.12 and later open paths with
+# openat2, and stop if that fails. (CI's bubblewrap is older, so the sandbox below doesn't show this.)
+def openat2():
+    libc = ctypes.CDLL(None, use_errno=True)
+    how = (ctypes.c_uint64 * 3)(os.O_PATH, 0, 0)  # struct open_how: flags, mode, resolve
+    fd = libc.syscall(437, -100, b"/", ctypes.byref(how), ctypes.sizeof(how))  # SYS_openat2, AT_FDCWD
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+    os.close(fd)
+
+
+attempt("use openat2", openat2)
 
 
 # Anything mounted over part of /proc, which stops the sandbox mounting a /proc of its own: for when it can't.

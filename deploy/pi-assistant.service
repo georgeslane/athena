@@ -48,8 +48,8 @@ LockPersonality=yes
 RestrictRealtime=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
-SystemCallFilter=@system-service @mount
-SystemCallErrorNumber=EPERM
+# No SystemCallFilter=: it applies to the sandbox and every server too, and answers system calls it doesn't
+# list, or know of, with an error. bubblewrap 0.12 and later open paths with openat2, and stop if it fails.
 UMask=0077
 
 [Install]
