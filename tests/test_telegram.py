@@ -65,14 +65,14 @@ def test_handlers_depend_on_allowlist(config):
     app = make_bot(config, None).build()
     handlers = app.handlers[0]
     assert any(isinstance(h, CallbackQueryHandler) for h in handlers)
-    assert sum(isinstance(h, MessageHandler) for h in handlers) == 2  # owner text + strangers
+    assert sum(isinstance(h, MessageHandler) for h in handlers) == 3  # your text, your photos, and strangers
 
     setup_app = make_bot(config, None, allowed=()).build()
     assert [type(h) for h in setup_app.handlers[0]] == [MessageHandler]
 
 
 async def test_message_round_trip_with_confirmation(config):
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         approved = await confirm("delete_note", {"name": "shopping"})
         return AgentResult(text=f"**{'Deleted' if approved else 'Kept'}** it")
 
@@ -107,7 +107,7 @@ async def test_message_round_trip_with_confirmation(config):
 
 
 async def test_confirmation_times_out_as_denied(config):
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         return AgentResult(text="Kept it" if not await confirm("x", {}) else "Did it")
 
     bot = make_bot(config, respond)
@@ -122,7 +122,7 @@ async def test_confirmation_shows_long_arguments_in_full(config):
     body = "Hi Sam,\n\n" + "Here's the plan for the weekend. " * 200 + "\nP.S. the door code is 4321."
     args = {"to": "sam@example.com", "body": body}
 
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         return AgentResult(text="Sent" if await confirm("send_email", args) else "Not sent")
 
     bot = make_bot(config, respond)
@@ -145,7 +145,7 @@ async def test_agent_errors_become_friendly_replies(config):
     import httpx
     import openai
 
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         raise openai.APIConnectionError(request=httpx.Request("POST", "http://mac/v1/chat/completions"))
 
     bot = make_bot(config, respond)
@@ -212,7 +212,7 @@ async def test_keeps_the_model_server_warm(config):
 async def test_confirmation_shows_what_the_tool_says_it_will_do(config):
     args = {"side": "buy", "ticker": "AAPL_US_EQ", "quantity": 2}
 
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         approved = await confirm("trading212_place_order", args, "Buy 2 Apple <Inc> at the market price.")
         return AgentResult(text="Bought" if approved else "Not bought")
 
@@ -361,7 +361,7 @@ async def test_think_shows_and_changes_how_much_the_model_thinks(config):
 async def test_stop_stops_the_answer_in_progress(config):
     started = asyncio.Event()
 
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         started.set()
         await asyncio.Event().wait()  # thinking for ever
 
@@ -381,7 +381,7 @@ async def test_stop_stops_the_answer_in_progress(config):
 
 
 async def test_stop_while_waiting_for_your_approval(config):
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         await confirm("delete_note", {"name": "shopping"})
         return AgentResult(text="Never sent")
 
@@ -403,7 +403,7 @@ async def test_stop_while_waiting_for_your_approval(config):
 async def test_retry_stops_and_asks_again(config):
     asked = []
 
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         asked.append(text)
         if len(asked) == 1:
             await asyncio.Event().wait()  # the first time it never finishes
@@ -428,13 +428,13 @@ async def test_retry_stops_and_asks_again(config):
 async def test_retry_takes_back_the_last_answer_and_asks_again(config):
     asked, taken = [], []
 
-    async def respond(chat_id, text, confirm, note=None, channel=None):
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
         asked.append(text)
         return AgentResult(text=f"Answer {len(asked)}", saved=True)
 
     async def take_back(chat_id):
         taken.append(chat_id)
-        return SimpleNamespace(question="What's the weather tomorrow?")
+        return SimpleNamespace(question="What's the weather tomorrow?", photos=())
 
     bot = make_bot(config, respond)
     bot.s.take_back_last_exchange = take_back
@@ -532,3 +532,136 @@ async def test_tasks_reach_you_through_telegram(config):
     upd, _ = button_update(ME, prompt.kwargs["reply_markup"].inline_keyboard[0][0].callback_data)
     await bot.on_button(upd, SimpleNamespace(bot=bot._bot))
     assert await asyncio.wait_for(asking, 2) is True
+
+
+# -- photos ---------------------------------------------------------------------------------------------
+
+JPEG = b"\xff\xd8\xff\xe0" + b"a photo" * 10
+
+
+class PhotoBot(FakeBot):
+    """A bot that serves files by id, as Telegram does."""
+
+    def __init__(self, files):
+        super().__init__()
+        self.files, self.fetched = files, []
+
+    async def get_file(self, file_id):
+        self.fetched.append(file_id)
+
+        async def download_as_bytearray():
+            return bytearray(self.files[file_id])
+
+        return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+
+def photo_update(user_id, sizes, caption=None, group=None, chat_id=1, document=None):
+    photo = [SimpleNamespace(file_id=f, width=w, height=h) for f, w, h in sizes]
+    message = SimpleNamespace(photo=photo, caption=caption, media_group_id=group, document=document, text=None)
+    return SimpleNamespace(
+        effective_chat=SimpleNamespace(id=chat_id), effective_user=SimpleNamespace(id=user_id), message=message
+    )
+
+
+def asking(answer="It's a cat."):
+    asked = []
+
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+        asked.append((text, photos))
+        return AgentResult(text=answer, saved=True)
+
+    return asked, respond
+
+
+def test_photos_are_handled_only_from_you(config):
+    app = make_bot(config, None).build()
+    handlers = [h for h in app.handlers[0] if isinstance(h, MessageHandler)]
+    assert len(handlers) == 3  # your text, your photos, and strangers
+    assert handlers[1].callback.__name__ == "on_photo"
+
+
+async def test_a_photo_and_its_caption_go_to_the_model(config):
+    asked, respond = asking()
+    bot = make_bot(config, respond)
+    files = {"small": b"\xff\xd8\xff small", "big": JPEG, "huge": b"\xff\xd8\xff huge"}
+    ctx = SimpleNamespace(bot=PhotoBot(files))
+    sizes = [("small", 320, 240), ("big", 1280, 960), ("huge", 4000, 3000)]
+    await bot.on_photo(photo_update(ME, sizes, caption=" What's this? "), ctx)
+    ((text, photos),) = asked
+    assert text == "What's this?" and [(p.data, p.mime) for p in photos] == [(JPEG, "image/jpeg")]
+    assert ctx.bot.fetched == ["big"]  # the largest copy that isn't huge
+    assert ctx.bot.sent[-1].text == "It's a cat."
+    assert bot._last[1].photos == photos  # for /retry
+
+
+async def test_an_album_is_answered_once(config, monkeypatch):
+    import pi_assistant.telegram_bot as telegram_bot
+
+    monkeypatch.setattr(telegram_bot, "ALBUM_SECONDS", 0.2)
+    asked, respond = asking("Two cats.")
+    bot = make_bot(config, respond)
+    files = {f"p{i}": b"\xff\xd8\xff" + bytes([i]) for i in range(7)}
+    ctx = SimpleNamespace(bot=PhotoBot(files))
+    for i in range(7):
+        caption = "Which is fluffier?" if i == 3 else None
+        await bot.on_photo(photo_update(ME, [(f"p{i}", 800, 600)], caption=caption, group="album1"), ctx)
+    await asyncio.sleep(0.5)
+    ((text, photos),) = asked
+    assert text == "Which is fluffier?" and len(photos) == 5
+    assert [m.text for m in ctx.bot.sent] == ["I'll look at the first 5 photos, not all of them.", "Two cats."]
+    assert bot._albums == {}
+
+
+async def test_images_sent_as_files_are_checked(config):
+    asked, respond = asking()
+    bot = make_bot(config, respond)
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    files = {"png": png, "pdf": b"%PDF-1.7 not an image"}
+    ctx = SimpleNamespace(bot=PhotoBot(files))
+
+    def document(file_id, size=1000):
+        return SimpleNamespace(file_id=file_id, file_size=size)
+
+    await bot.on_photo(photo_update(ME, [], document=document("png")), ctx)
+    assert asked[-1][1][0].mime == "image/png"
+    await bot.on_photo(photo_update(ME, [], document=document("pdf")), ctx)
+    assert ctx.bot.sent[-1].text == "I can only look at JPEG, PNG, WebP and GIF images."
+    await bot.on_photo(photo_update(ME, [], document=document("png", size=9_000_000)), ctx)
+    assert ctx.bot.sent[-1].text.startswith("That image is over 8 MB.")
+    assert len(asked) == 1 and ctx.bot.fetched == ["png", "pdf"]  # the big one wasn't downloaded
+
+
+async def test_a_model_that_cant_take_photos_says_so(config):
+    import httpx
+    import openai
+
+    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+        request = httpx.Request("POST", "http://llm.test/v1/chat/completions")
+        raise openai.BadRequestError(
+            "Model does not support images", response=httpx.Response(400, request=request), body=None
+        )
+
+    bot = make_bot(config, respond)
+    ctx = SimpleNamespace(bot=PhotoBot({"p": JPEG}))
+    await bot.on_photo(photo_update(ME, [("p", 800, 600)]), ctx)
+    assert "can't take photos" in ctx.bot.sent[-1].text and "doctor" in ctx.bot.sent[-1].text
+
+
+async def test_retry_sends_the_photos_again(config, tmp_path):
+    from pi_assistant.photos import Photo, PhotoStore
+
+    asked, respond = asking()
+    store = PhotoStore(tmp_path / "photos")
+    name = store.keep(Photo(JPEG))
+
+    async def take_back(chat_id):
+        return SimpleNamespace(question="[Photo] What's this?", photos=(name, "gone.jpg"))
+
+    bot = make_bot(config, respond)
+    bot.s.take_back_last_exchange = take_back
+    bot.s.history = SimpleNamespace(photos=store)
+    ctx = SimpleNamespace(bot=FakeBot(), args=[])
+    await bot.cmd_retry(command_update()[0], ctx)
+    ((text, photos),) = asked
+    assert text == "[Photo] What's this?" and [p.data for p in photos] == [JPEG]  # one that's gone is left out
+    assert ctx.bot.sent[0].text == "🔁 Trying again: [Photo] What's this?"

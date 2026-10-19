@@ -10,6 +10,9 @@ dashboard). It applies to every chat, and usage statistics are counted per sessi
 
 Each reply also notes the tools Athena used for it, in order, so it can look back at how it
 did things and write skills for what it does the same way often (skills.py).
+
+A message with photos notes them by name, and they're kept in the data folder (photos.py). The model
+sees the photos of the last few such messages, and the rest just as their text, which says "[Photo]".
 """
 
 from __future__ import annotations
@@ -20,8 +23,10 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from pi_assistant.memory import connect_db
+from pi_assistant.photos import IN_CONTEXT, Photo, PhotoStore, with_photos
 
 
 @dataclass(frozen=True)
@@ -41,11 +46,13 @@ class Exchange:
     answer: str
     created_at: str
     tools: list[str] | None = None  # the tools used for the reply, in order; None if it wasn't noted
+    photos: tuple[str, ...] = ()  # the message's photos, by name in the PhotoStore
 
 
 class ConversationStore:
     def __init__(self, db_path: Path, max_messages: int = 40):
         self.max_messages = max(4, max_messages)
+        self.photos = PhotoStore(db_path.parent / "photos")
         self._conn = connect_db(db_path)
         self._lock = threading.Lock()
         with self._lock, self._conn:
@@ -73,6 +80,8 @@ class ConversationStore:
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(messages)")}
             if "tools" not in columns:  # a database from before replies noted their tools
                 self._conn.execute("ALTER TABLE messages ADD COLUMN tools TEXT")
+            if "photos" not in columns:  # or before messages could have photos
+                self._conn.execute("ALTER TABLE messages ADD COLUMN photos TEXT")
         self.session = self._current_session() or self.new_session(first_message=0)
 
     def _current_session(self) -> Session | None:
@@ -108,11 +117,12 @@ class ConversationStore:
             (chat_id, message_id),
         )
 
-    def load(self, chat_id: str) -> list[dict[str, str]]:
-        """Messages the model should see, oldest first, always starting with a user message."""
+    def load(self, chat_id: str) -> list[dict[str, Any]]:
+        """Messages the model should see, oldest first, always starting with a user message. The last IN_CONTEXT
+        messages with photos have them, as long as they're kept."""
         with self._lock, self._conn:
             rows = self._conn.execute(
-                "SELECT id, role, content FROM messages WHERE chat_id = ? AND id > ? ORDER BY id",
+                "SELECT id, role, content, photos FROM messages WHERE chat_id = ? AND id > ? ORDER BY id",
                 (chat_id, self._window_start(chat_id)),
             ).fetchall()
             if len(rows) > self.max_messages:
@@ -124,18 +134,33 @@ class ConversationStore:
                 cut_after = rows[len(rows) - len(keep) - 1][0]
                 self._set_window_start(chat_id, cut_after)
                 rows = keep
-        return [{"role": role, "content": content} for _, role, content in rows]
+        shown = {row[0] for row in [r for r in rows if r[3]][-IN_CONTEXT:]}
+        messages: list[dict[str, Any]] = []
+        for message_id, role, content, names in rows:
+            photos = [p for name in json.loads(names) if (p := self.photos.load(name))] if message_id in shown else []
+            messages.append({"role": role, "content": with_photos(content, photos)})
+        return messages
 
     def append_exchange(
-        self, chat_id: str, user_text: str, assistant_text: str, tools: list[str] | None = None
+        self,
+        chat_id: str,
+        user_text: str,
+        assistant_text: str,
+        tools: list[str] | None = None,
+        photos: list[Photo] | None = None,
     ) -> None:
-        """Keep a message and the reply to it, with the tools used for the reply, if they're known."""
+        """Keep a message, with its photos if it has any, and the reply to it, with the tools used for the reply
+        if they're known."""
         now = datetime.now(UTC).isoformat(timespec="seconds")
         used = json.dumps(tools) if tools is not None else None
+        kept = json.dumps([self.photos.keep(p) for p in photos]) if photos else None
         with self._lock, self._conn:
             self._conn.executemany(
-                "INSERT INTO messages (chat_id, role, content, created_at, tools) VALUES (?, ?, ?, ?, ?)",
-                [(chat_id, "user", user_text, now, None), (chat_id, "assistant", assistant_text, now, used)],
+                "INSERT INTO messages (chat_id, role, content, created_at, tools, photos) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (chat_id, "user", user_text, now, None, kept),
+                    (chat_id, "assistant", assistant_text, now, used, None),
+                ],
             )
 
     def take_last(self, chat_id: str) -> Exchange | None:
@@ -143,16 +168,17 @@ class ConversationStore:
         for /retry, which answers it again."""
         with self._lock, self._conn:
             rows = self._conn.execute(
-                "SELECT id, role, content, created_at FROM messages WHERE chat_id = ? AND id > ? "
+                "SELECT id, role, content, created_at, photos FROM messages WHERE chat_id = ? AND id > ? "
                 "ORDER BY id DESC LIMIT 2",
                 (chat_id, self._window_start(chat_id)),
             ).fetchall()
             if len(rows) < 2 or rows[0][1] != "assistant" or rows[1][1] != "user":
                 return None
-            (answer_id, _, answer, created_at), (question_id, _, question, _) = rows
+            (answer_id, _, answer, created_at, _), (question_id, _, question, _, names) = rows
             self._conn.execute("PRAGMA secure_delete = ON")  # overwrite what's deleted, rather than just unlink it
             self._conn.execute("DELETE FROM messages WHERE id IN (?, ?)", (question_id, answer_id))
-        return Exchange(answer_id, chat_id, question, answer, created_at)
+        # Its photos are kept: /retry sends them again.
+        return Exchange(answer_id, chat_id, question, answer, created_at, photos=tuple(json.loads(names or "[]")))
 
     def exchanges_after(self, message_id: int, limit: int = 32) -> list[Exchange]:
         """Up to ``limit`` exchanges whose reply came after ``message_id``, oldest first."""
@@ -184,11 +210,12 @@ class ConversationStore:
             self._set_window_start(chat_id, self._last_message_id())
 
     def clear(self) -> Session:
-        """Delete every message, in every chat, and start a new session."""
+        """Delete every message, and every photo, in every chat, and start a new session."""
         with self._lock, self._conn:
             self._conn.execute("PRAGMA secure_delete = ON")  # overwrite what's deleted, rather than just unlink it
             self._conn.execute("DELETE FROM messages")
             self._conn.execute("DELETE FROM chat_state")
+        self.photos.clear()
         return self.new_session()
 
     def close(self) -> None:

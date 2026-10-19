@@ -18,6 +18,7 @@ from pi_assistant.config import AgentConfig
 from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient, LLMReply, ToolCall
 from pi_assistant.memory import MemoryHit, MemoryService
+from pi_assistant.photos import Photo, label, with_photos
 from pi_assistant.privacy import Privacy, refusal, warning
 from pi_assistant.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 from pi_assistant.status import StatusTracker, Task, describe_error
@@ -277,8 +278,10 @@ class Agent:
         note: str | None = None,
         channel: str = "",
         background: Background | None = None,
+        photos: list[Photo] | None = None,
     ) -> AgentResult:
-        """Answer ``text``. ``note`` goes in the context block for this message only, e.g. how it was sent.
+        """Answer ``text``, and ``photos`` if it came with any. ``note`` goes in the context block for this message
+        only, e.g. how it was sent.
 
         ``channel`` says where it came from, such as "Siri", for the usage statistics. ``background``
         is for a task Athena works on by itself: it doesn't hold up changes to the tools, which it
@@ -291,10 +294,11 @@ class Agent:
                 self.chatting.set()
                 stack.callback(self._answered_you)
             await stack.enter_async_context(self._locks[chat_id])
-            task = self.status.begin(background.label if background else text)
+            shown = text or (label(len(photos)) if photos else "")  # a photo without a caption
+            task = self.status.begin(background.label if background else shown)
             record = QueryRecord(session=self.history.session.id, channel=channel or self.status.channel)
             try:
-                result = await self._respond(chat_id, text, task, confirm, on_tool, note, record, background)
+                result = await self._respond(chat_id, text, task, confirm, on_tool, note, record, background, photos)
             except BaseException as exc:  # including cancellation, so the board never sticks on "working"
                 task.finish(exc)
                 record.error = describe_error(exc)
@@ -361,21 +365,24 @@ class Agent:
         note: str | None,
         record: QueryRecord,
         background: Background | None = None,
+        photos: list[Photo] | None = None,
     ) -> AgentResult:
-        memories = await self._recall(text)
+        memories = await self._recall(text) if text.strip() else []
+        if photos and not text.startswith(label(len(photos))):  # as it is when /retry sends it again
+            text = f"{label(len(photos))} {text}".rstrip()  # so the history, memory and skills know of them
         # Dynamic context goes in the newest user message, not the system prompt, so
         # everything before it is byte-identical to the previous request (prompt cache hit).
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.prompt()},
             *self.history.load(chat_id),
-            {"role": "user", "content": f"{self.build_context(memories, note)}\n\n{text}"},
+            {"role": "user", "content": with_photos(f"{self.build_context(memories, note)}\n\n{text}", photos or [])},
         ]
         result = await self._work(messages, task, confirm, on_tool, record, background)
         if not result.text.strip():
             result.text = "Sorry, I didn't manage to produce an answer. Could you rephrase that?"
             record.error = "No answer"
         else:
-            self.history.append_exchange(chat_id, text, result.text, tools=result.tools_used)
+            self.history.append_exchange(chat_id, text, result.text, tools=result.tools_used, photos=photos)
             result.saved = True
         return result
 

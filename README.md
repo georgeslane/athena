@@ -22,7 +22,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 
 ## What it does
 
-- **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it.
+- **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it. Send photos too, with a question as the caption, if your model can see: see [Photos](#photos).
 - **Ask by voice**: say "Hey Siri, Ask Athena" on your iPhone or Mac. Siri reads the answer out, and your question and the answer also appear in the Telegram chat.
 - **Tool calling with MCP**: connects to any MCP server, on the Pi, on your Mac over SSH, or remote over HTTP. Per-server filters choose which tools the model sees.
 - **A general assistant**: [recommended servers](#mcp-servers) let it use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own. Built-in tools look up [market prices](#markets), read your [Trading 212](#trading-212) account and place the trades you approve, and query [SQLite databases](#databases) you choose.
@@ -70,7 +70,7 @@ Then:
 
 ## Using it
 
-**Telegram**: send any message. Commands:
+**Telegram**: send any message, or a photo (see [Photos](#photos)). Commands:
 
 | Command | What it does |
 |---|---|
@@ -85,6 +85,12 @@ Then:
 | `/tools` | List tools and the status of each MCP server. |
 | `/reload` | Read the tools' settings in `config.toml` again and reconnect to MCP servers, for example after the Mac restarts. |
 | `/status` | Model server, memory and tool health. |
+
+### Photos
+
+Send a photo, with what you want to know as its caption, such as "what's wrong with this plant?" or "add this to my shopping list". Several sent together (up to 5) are answered as one message, and so is an image sent as a file (JPEG, PNG, WebP or GIF, up to 8 MB). Ask about a photo again later in the session and the model still sees it: the last 3 messages with photos keep them, and older ones become "[Photo]" in the conversation. `/retry` sends a photo again.
+
+It needs a model that can see, such as Qwen 3.6 35B-A3B. Some MLX conversions of a model leave out the part that sees, so `doctor` shows the model a red square and checks it says red. Photos go only to your model server, never to a tool, and are kept in `data/photos/`, readable only by Athena's user, until you forget everything.
 
 **Command line** (run from the repo with `uv run pi-assistant <command>`):
 
@@ -622,6 +628,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
 | `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
+| `src/pi_assistant/photos.py` | Photos you send: kept in the data folder, and shown to the model |
 | `src/pi_assistant/siri.py` | The endpoint the Siri shortcut calls |
 | `src/pi_assistant/documents.py` | Indexing your documents from your Mac, when you ask |
 | `src/pi_assistant/mac_documents.py` | The read-only documents server that runs on your Mac |
@@ -683,7 +690,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - The Pi can push to one GitHub repository only, for [Projects for Claude](#projects-for-claude), if you set it up: its token reaches that repo alone, Athena refuses to push if it's public, and each push of requirements or answers asks you first in Telegram, showing everything it contains. A task can't be allowed to skip that. Starting Claude again only takes a label off a pull request and puts it back.
 - What Athena remembers, and skills it writes or changes, while working by itself are suggestions until you approve them on the dashboard, so a web page it reads can't plant a memory or rewrite a skill unseen.
 - Tasks run without you watching, so they can't do more than you could approve: one Athena suggests needs your OK, any tool that asks first still asks you in Telegram unless you've allowed that task to use it, and a task can't schedule others without asking. Allowing a task to fetch or search without asking lets it send what's in its instructions and what it's read to those sites unseen, so allow only what it needs.
-- Telegram bot chats aren't end-to-end encrypted, so messages pass through Telegram's servers even though the model is local.
+- Telegram bot chats aren't end-to-end encrypted, so messages and photos pass through Telegram's servers even though the model is local.
 - The Pi reaches your Macs over SSH with a key of its own, which `~/.ssh/authorized_keys` on each Mac restricts to starting Athena's servers there: no shell, no port forwarding. The documents server is read-only, only sees what's in your home folder (or the scope you gave), never hidden files or `~/Library` apart from iCloud Drive, and is only started when you index or choose folders.
 - The email server only sends to addresses in `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`, and can't delete or move mail, even if you approve. The GitHub token can only read public repositories.
 - Reading your Trading 212 account doesn't ask, but placing or cancelling an order always does, and that can't be switched off. The key's own permissions have the last word: without permission to execute orders it can't trade at all, and restricted to your IP address it's useless anywhere else.
