@@ -626,14 +626,16 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/documents.py` | Indexing your documents from your Mac, when you ask |
 | `src/pi_assistant/mac_documents.py` | The read-only documents server that runs on your Mac |
 | `src/pi_assistant/builtin.py`, `integrations.py` | What a built-in integration is, and the list of them |
-| `src/pi_assistant/news.py`, `trading212.py`, `databases.py` | The built-in integrations: news feeds, Trading 212, and SQLite databases |
+| `src/pi_assistant/news.py`, `markets.py`, `trading212.py`, `databases.py` | The built-in integrations: news feeds, market data from Yahoo Finance, Trading 212, and SQLite databases |
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
-| `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, and the page itself (plain HTML, CSS and JavaScript) |
+| `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, as a table of routes, and the page itself: plain HTML, CSS and JavaScript modules, with no build step. `dashboard.js` starts it, `core.js` has what the tabs share, and each tab has a module of its own |
 | `src/pi_assistant/tasks.py`, `channel.py` | Tasks Athena does by itself, and how it reaches you about them |
 | `src/pi_assistant/claude_projects.py`, `deploy/zeus-solutions/` | Handing coding projects to Claude through GitHub, the board of them, and the guide for Claude's side |
+| `src/pi_assistant/project_files.py`, `github_repo.py` | A project's Requirements.md and status.json, and the client for its GitHub repository |
 | `src/pi_assistant/skills.py` | Skills: kept with every version, Athena's suggestions, and the tools to read and write them |
 | `src/pi_assistant/alerts.py`, `scripts/tell-stopped.py` | Telling you when something Athena needs stops working, and when Athena itself has stopped |
 | `src/pi_assistant/mcp_registry.py` | The built-in search of the official MCP Registry, for suggesting servers |
+| `src/pi_assistant/privacy.py` | Keeping personal details and secrets out of what tools send |
 | `src/pi_assistant/settings.py`, `catalog.py` | What the dashboard's Tools tab can change, and how it edits `config.toml` and `.env` |
 | `src/pi_assistant/stats.py` | Usage statistics, per session and in total |
 | `src/pi_assistant/webserver.py` | The small HTTP server behind Siri's endpoint, the status API and the dashboard |

@@ -16,18 +16,8 @@ import httpx
 import pytest
 
 from pi_assistant.builtin import FAIL, OK, WARN, Unavailable
-from pi_assistant.claude_projects import (
-    BoardStore,
-    ClaudeProjects,
-    ClaudeProjectsConfig,
-    _check_stories,
-    apply_status,
-    folder_of,
-    parse,
-    render,
-    render_more,
-    slug,
-)
+from pi_assistant.claude_projects import BoardStore, ClaudeProjects, ClaudeProjectsConfig
+from pi_assistant.project_files import apply_status, check_stories, folder_of, parse, render, render_more, slug
 from pi_assistant.tools import ToolError
 
 REPO = "someone/zeus-solutions"
@@ -800,4 +790,4 @@ async def test_more_work_that_isnt_right_is_refused_before_asking(projects, gith
             await extend.preview(args)
     assert len(github.requests) == before
     with pytest.raises(ToolError, match="hand the rest over as a project of its own"):
-        _check_stories(MORE * 15, already=30)
+        check_stories(MORE * 15, already=30)
