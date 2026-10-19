@@ -165,6 +165,11 @@ async def athena():
         if not (demo.connected and demo.sandboxed):
             raise RuntimeError(f"the MCP server: connected {demo.connected}, sandboxed {demo.sandboxed}, {demo.error}")
         services.privacy.set_terms(["Probe Word"])
+        # Built-ins that keep files, such as yfinance's cache, keep them in the data folder.
+        if services.builtins.get("markets") is None:
+            raise RuntimeError(f"Markets didn't start: {services.builtins.problems.get('markets')}")
+        if not (data / "yfinance").is_dir():
+            raise RuntimeError("yfinance's cache isn't in the data folder")
         url = f"http://127.0.0.1:{services.dashboard.port}/health"
         health = await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=5).read())
         if health != b"ok":

@@ -25,7 +25,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Chat over Telegram**: long polling, so the Pi needs no open ports. Only Telegram user IDs you list can use it.
 - **Ask by voice**: say "Hey Siri, Ask Athena" on your iPhone or Mac. Siri reads the answer out, and your question and the answer also appear in the Telegram chat.
 - **Tool calling with MCP**: connects to any MCP server, on the Pi, on your Mac over SSH, or remote over HTTP. Per-server filters choose which tools the model sees.
-- **A general assistant**: [recommended servers](#mcp-servers) let it use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own. Built-in tools read your [Trading 212](#trading-212) account and place the trades you approve, and query [SQLite databases](#databases) you choose.
+- **A general assistant**: [recommended servers](#mcp-servers) let it use your Calendar and Reminders, read the news, look up company filings and GitHub repos, and handle an email address of its own. Built-in tools look up [market prices](#markets), read your [Trading 212](#trading-212) account and place the trades you approve, and query [SQLite databases](#databases) you choose.
 - **Approval before actions**: MCP tools show *Allow / Deny* buttons in Telegram, with their full arguments, before they run. Use `confirm` to choose which tools ask; by default they all do.
 - **Long-term memory**: the model saves facts with `remember` and looks them up with `search_memory`, which also finds what you talked about in earlier sessions, and your documents. Related facts are added to each message automatically. Embeddings come from [EmbeddingGemma 2](#embeddings), served by oMLX on the Mac with the model, and are stored in SQLite on the Pi with [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Sessions**: `/session` clears the conversation from the model's context, so replies stay quick, while the memory keeps everything you've talked about.
@@ -267,17 +267,18 @@ The dashboard lists each of these, ready to switch on, and `config.example.toml`
 | Web search | [DuckDuckGo](https://github.com/nickclyde/duckduckgo-mcp-server) | Pi | Every search |
 | [Calendar and Reminders](#your-macs-calendar-reminders-and-documents) | [iMCP](https://github.com/mattt/iMCP) | Mac, over SSH | Adding events and reminders |
 | [News](#news) | `read_news`, built in | Pi | Never |
+| [Markets](#markets) | `market_*`, built in: Yahoo Finance | Pi | Never |
 | [Trading 212](#trading-212) | `trading212_*`, built in | Pi | Placing and cancelling orders |
 | [Databases](#databases) | `database_*`, built in: read-only SQLite | Pi | Never |
 | [Company filings](#company-filings) | [EdgarTools](https://github.com/dgunning/edgartools) | Pi | Never |
 | [GitHub](#github) | [GitHub's own server](https://github.com/github/github-mcp-server): read-only | GitHub | Never |
 | [Email](#email) | [mcp-email-server](https://github.com/Wh1isper/mcp-email-server) | Pi | Sending |
 
-What asks first follows one rule: a tool asks if it can change something, or can send what's in the conversation somewhere someone else could read it. Reading your own files, calendar and databases keeps everything on your network, and reading your Trading 212 account only asks Trading 212 for what it already holds. Looking things up in public sources (your news feeds, the SEC, GitHub's public repos) sends only the lookup itself, to that service. Fetching a URL, searching the web and sending email can reach anyone, and adding a calendar event can email an alarm to any address, so those ask. To make any server ask first, set `confirm = ["*"]` on it.
+What asks first follows one rule: a tool asks if it can change something, or can send what's in the conversation somewhere someone else could read it. Reading your own files, calendar and databases keeps everything on your network, and reading your Trading 212 account only asks Trading 212 for what it already holds. Looking things up in public sources (your news feeds, Yahoo Finance, the SEC, GitHub's public repos) sends only the lookup itself, to that service. Fetching a URL, searching the web and sending email can reach anyone, and adding a calendar event can email an alarm to any address, so those ask. To make any server ask first, set `confirm = ["*"]` on it.
 
 Versions are pinned, as in `mcp-email-server==1.11.0`, so a new release can't change what runs on your Pi until you choose to update. So are the packages each server depends on: see [How servers are installed](#how-servers-are-installed).
 
-Tools only run when the model uses them, but every tool's description is part of every prompt, so the model knows what it can use. With everything above switched on, the descriptions come to about 10,000 tokens, against about 1,300 for the system prompt and the first three servers. Email, SEC filings and GitHub account for two-thirds of that, while Trading 212's five tools add about 650 and the database tools about 200.
+Tools only run when the model uses them, but every tool's description is part of every prompt, so the model knows what it can use. With everything above switched on, the descriptions come to about 10,000 tokens, against about 1,300 for the system prompt and the first three servers. Email, SEC filings and GitHub account for two-thirds of that, while Trading 212's five tools add about 650, the market tools about 400 and the database tools about 200.
 
 On most messages that costs almost nothing, because oMLX caches the part of the prompt it has already read, and the assistant keeps the cache warm: at startup, after each reply, when the tools change, and every 10 minutes (`llm.warm_up_minutes`). But when the cache is cold, for example just after the Mac restarts, the next message waits while the Mac reads the whole prompt again. On an M1 Pro that could be a minute with every server on. To see what yours costs, run `doctor`: its last section measures how many tokens the tools add, how long your Mac takes to read them, and whether oMLX's cache is working. If it's slow, switch off servers you rarely use, or narrow their `include` lists.
 
@@ -321,6 +322,16 @@ printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' | sudo tee
 ### News
 
 `read_news` reads the news feeds (RSS or Atom) listed under `[news.feeds]` in `config.toml`, and only those. All the model chooses is which feed to read and how many items, so it can't be used to send anything anywhere, and doesn't ask first. Most news sites have a feed: add their address with any name you like. To read a whole article, the model uses `fetch`, which asks first.
+
+### Markets
+
+Prices and history for stocks, funds, indices, currencies and commodities, from Yahoo Finance, through [yfinance](https://github.com/ranaroussi/yfinance). Switch it on under **Markets** on the Tools tab, or with `enabled = true` under `[markets]`. It has three tools:
+
+- `market_quote`: the latest price of up to 10 symbols, with the change on the day, the day's and year's range, and for stocks the market cap, P/E and dividend yield
+- `market_history`: how one symbol has moved over a period, from a day to its whole history: the change from the close before, the high and low, and up to 40 closing prices
+- `market_search`: symbols by name, such as "Rolls-Royce" (RR.L) or "gold" (GC=F)
+
+Symbols are Yahoo's: `.L` for London, `^` for indices (`^FTSE`), `=F` for commodity futures (`GC=F` gold, `CL=F` oil), `=X` for currencies (`GBPUSD=X`). It never asks first: all that leaves the Pi is the symbols, which must look like symbols, and searches of up to 60 characters, to Yahoo. Prices can be delayed by 15 minutes or more, depending on the exchange. yfinance isn't an official Yahoo API, so if Yahoo changes something, it can stop working until yfinance is updated.
 
 ### Trading 212
 
