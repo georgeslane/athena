@@ -20,6 +20,7 @@ from pi_assistant.integrations import BUILTINS
 from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager, ServerStatus
 from pi_assistant.memory import Embedder, MemoryStore
+from pi_assistant.photos import can_see
 from pi_assistant.sandbox import Sandbox, SandboxError
 from pi_assistant.search_eval import describe_embeddings_error
 from pi_assistant.server_envs import ServerEnvs
@@ -71,6 +72,15 @@ async def run_doctor(cfg: Config) -> bool:
             model_ok = True
         else:
             report(FAIL, f"model answered without calling the tool: {reply.content[:120]!r}")
+        try:
+            sees, said = await can_see(llm)
+        except Exception as exc:
+            report(WARN, f"photos: the model server refused one ({type(exc).__name__}), so photos you send won't work")
+        else:
+            if sees:
+                report(OK, "photos: the model can see them")
+            else:
+                report(WARN, f"photos: shown a red square, the model said {said[:60]!r}, so it may not see photos")
     except Exception as exc:
         report(FAIL, f"{type(exc).__name__}: {exc}")
         report(WARN, "Check oMLX is running, listening on the network (not just localhost), and the API key matches.")

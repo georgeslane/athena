@@ -8,7 +8,7 @@ import html
 import json
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -38,6 +38,7 @@ from pi_assistant.app import Services
 from pi_assistant.config import THINKING, ConfigError
 from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
 from pi_assistant.memory import Found
+from pi_assistant.photos import MAX_BYTES, MAX_PER_MESSAGE, Photo, label, mime_of
 from pi_assistant.siri import VOICE_NOTE, SiriServer
 from pi_assistant.status import State
 from pi_assistant.tool_approvals import ToolChange
@@ -57,6 +58,25 @@ class _Asked:
 
     text: str
     answered: bool = False
+    photos: list[Photo] = field(default_factory=list)
+
+
+@dataclass
+class _Album:
+    """Photos sent together, which arrive as a message each, gathered to be answered as one."""
+
+    chat_id: int
+    photos: list[Photo] = field(default_factory=list)
+    caption: str = ""
+    timer: asyncio.Task[None] | None = None
+
+
+class _NotAPhoto(Exception):
+    """An image Athena can't take. The message says why, for the chat."""
+
+
+ALBUM_SECONDS = 1.5  # after an album's last photo arrives, how long to wait for more
+MAX_SIDE = 2048  # of the copies Telegram keeps of a photo, the largest up to this many pixels is used
 
 
 COMMANDS = [
@@ -85,6 +105,8 @@ class TelegramBot:
         self._telling: set[asyncio.Task[None]] = set()
         self._answering: dict[int, set[asyncio.Task[Any]]] = {}  # for each chat, replies /stop can stop
         self._last: dict[int, _Asked] = {}
+        self._albums: dict[str, _Album] = {}  # by Telegram's media group id
+        self._replying: set[asyncio.Task[None]] = set()  # albums being answered
         self._bot: Bot | None = None
 
     # -- setup ----------------------------------------------------------------------------
@@ -117,6 +139,7 @@ class TelegramBot:
             app.add_handler(CommandHandler("reload", self.cmd_reload, filters=me))
             app.add_handler(CommandHandler("status", self.cmd_status, filters=me))
             app.add_handler(MessageHandler(me & filters.TEXT & ~filters.COMMAND, self.on_text))
+            app.add_handler(MessageHandler(me & (filters.PHOTO | filters.Document.IMAGE), self.on_photo))
             app.add_handler(CallbackQueryHandler(self.on_button, pattern=r"^confirm:"))
             app.add_handler(CallbackQueryHandler(self.on_think_button, pattern=r"^think:"))
             app.add_handler(CallbackQueryHandler(self.on_task_button, pattern=r"^task:"))
@@ -318,6 +341,61 @@ class TelegramBot:
         if reply is not None:
             await self._send(ctx.bot, chat_id, reply)
 
+    async def on_photo(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A photo, or an image sent as a file, with its caption as what you're asking. Photos sent together
+        arrive one by one, so they're gathered for a moment and answered as one message."""
+        assert update.effective_chat and update.message
+        msg, chat_id = update.message, update.effective_chat.id
+        try:
+            photo = await self._download(ctx.bot, msg)
+        except _NotAPhoto as exc:
+            await self._send(ctx.bot, chat_id, str(exc))
+            return
+        caption = (msg.caption or "").strip()
+        if not msg.media_group_id:
+            await self._answer_photos(ctx.bot, chat_id, caption, [photo])
+            return
+        album = self._albums.setdefault(msg.media_group_id, _Album(chat_id))
+        album.photos.append(photo)
+        album.caption = album.caption or caption  # Telegram puts the caption on one of them
+        if album.timer:
+            album.timer.cancel()
+        album.timer = asyncio.create_task(self._album_done(ctx.bot, msg.media_group_id))
+        self._replying.add(album.timer)
+        album.timer.add_done_callback(self._replying.discard)
+
+    async def _album_done(self, bot: Bot, group: str) -> None:
+        await asyncio.sleep(ALBUM_SECONDS)
+        album = self._albums.pop(group)  # a photo arriving after this starts another
+        photos, left_out = album.photos[:MAX_PER_MESSAGE], len(album.photos) - MAX_PER_MESSAGE
+        if left_out > 0:
+            await self._send(bot, album.chat_id, f"I'll look at the first {MAX_PER_MESSAGE} photos, not all of them.")
+        await self._answer_photos(bot, album.chat_id, album.caption, photos)
+
+    async def _answer_photos(self, bot: Bot, chat_id: int, caption: str, photos: list[Photo]) -> None:
+        reply = await self._reply(bot, chat_id, caption, photos=photos)
+        if reply is not None:
+            await self._send(bot, chat_id, reply)
+
+    async def _download(self, bot: Bot, msg: Any) -> Photo:
+        """A message's photo or image, as Telegram has it. _NotAPhoto if it's one Athena can't take."""
+        if msg.photo:
+            # Telegram keeps a photo at several sizes, smallest first: the largest that isn't huge will do.
+            fitting = [p for p in msg.photo if max(p.width, p.height) <= MAX_SIDE]
+            file_id = (fitting or msg.photo[:1])[-1].file_id
+        else:
+            if (msg.document.file_size or 0) > MAX_BYTES:
+                raise _NotAPhoto(
+                    f"That image is over {MAX_BYTES // 1_000_000} MB. Send it as a photo instead, "
+                    "and Telegram makes it smaller."
+                )
+            file_id = msg.document.file_id
+        data = bytes(await (await bot.get_file(file_id)).download_as_bytearray())
+        mime = mime_of(data)
+        if mime is None:
+            raise _NotAPhoto("I can only look at JPEG, PNG, WebP and GIF images.")
+        return Photo(data, mime)
+
     async def ask_from_siri(self, bot: Bot, prompt: str) -> str:
         """Answer a question asked through Siri. Both are posted to the chat; the answer is returned as speech."""
         chat_id = self.cfg.allowed_user_ids[0]  # a private chat with the bot has the user's ID
@@ -345,20 +423,27 @@ class TelegramBot:
         return "That's taking a while, so I'll send the answer to Telegram."
 
     async def _reply(
-        self, bot: Bot, chat_id: int, text: str, note: str | None = None, channel: str = "Telegram"
+        self,
+        bot: Bot,
+        chat_id: int,
+        text: str,
+        note: str | None = None,
+        channel: str = "Telegram",
+        photos: list[Photo] | None = None,
     ) -> str | None:
-        """The agent's reply to ``text``, showing "typing..." and asking for approvals in the chat meanwhile.
+        """The agent's reply to ``text``, and ``photos`` with it, showing "typing..." and asking for approvals in
+        the chat meanwhile.
 
         None if /stop stopped it.
         """
         typing = asyncio.create_task(self._keep_typing(bot, chat_id))
-        asked = self._last[chat_id] = _Asked(text)
+        asked = self._last[chat_id] = _Asked(text, photos=list(photos or []))
 
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
             return await self._confirm(bot, chat_id, tool, args, summary)
 
         answering = asyncio.create_task(
-            self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note, channel=channel)
+            self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note, channel=channel, photos=photos)
         )
         self._answering.setdefault(chat_id, set()).add(answering)
         try:
@@ -383,6 +468,8 @@ class TelegramBot:
             )
         except openai.APIStatusError as exc:
             reply = f"The model server returned an error ({exc.status_code}): {exc.message}"
+            if photos:
+                reply += "\nMaybe the model can't take photos: `uv run pi-assistant doctor` checks."
         except Exception as exc:
             log.exception("Agent failed")
             reply = f"Something went wrong: {type(exc).__name__}: {exc}"
@@ -455,17 +542,22 @@ class TelegramBot:
         await self._stop(chat_id)
         last = self._last.get(chat_id)
         if last and not last.answered:  # stopped, or it went wrong
-            text = last.text
+            text, photos = last.text, last.photos
         elif exchange := await self.s.take_back_last_exchange(str(chat_id)):
-            text = exchange.question
+            text, photos = exchange.question, self._kept_photos(exchange.photos)  # its text says [Photo]
         else:
             await update.effective_message.reply_text("There's nothing to try again in this session.")  # type: ignore[union-attr]
             return
         shown = text if len(text) <= 200 else text[:199].rstrip() + "…"
+        if photos and not shown.startswith(label(len(photos))):
+            shown = f"{label(len(photos))} {shown}".rstrip()
         await ctx.bot.send_message(chat_id, f"🔁 Trying again: {shown}", link_preview_options=NO_PREVIEW)
-        reply = await self._reply(ctx.bot, chat_id, text)
+        reply = await self._reply(ctx.bot, chat_id, text, photos=photos)
         if reply is not None:
             await self._send(ctx.bot, chat_id, reply)
+
+    def _kept_photos(self, names: tuple[str, ...]) -> list[Photo]:
+        return [photo for name in names if (photo := self.s.history.photos.load(name))]
 
     async def cmd_think(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         choice = " ".join(ctx.args or []).strip().lower()
