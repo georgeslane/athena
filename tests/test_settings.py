@@ -98,6 +98,7 @@ def test_everything_is_listed_without_secret_values(setup, monkeypatch):
     listed = settings.describe(Running())
     assert [t["id"] for t in listed] == [
         "news",
+        "markets",
         "trading212",
         "databases",
         "mcp_registry",

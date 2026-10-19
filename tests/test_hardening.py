@@ -42,6 +42,9 @@ args = ["{DEMO}"]
 confirm = []
 network = false
 read_only_paths = ["{DEMO.parent}"]
+
+[markets]
+enabled = true
 """
 
 MUST = [

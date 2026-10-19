@@ -103,6 +103,12 @@ port = 8092
 "Financial Times" = "https://www.ft.com/rss/home"
 "Hacker News" = "https://hnrss.org/frontpage"
 
+[markets]
+# Prices and history for stocks, funds, indices, currencies and commodities, from Yahoo Finance
+# (see README, "Markets"). It sends Yahoo only ticker symbols and short searches, so it doesn't
+# ask first. Switch it on here or on the dashboard's Tools tab.
+enabled = false
+
 [trading212]
 # Your Trading 212 Invest or Stocks ISA account (see README, "Trading 212"). Reading it
 # doesn't ask; placing or cancelling an order always asks you first, in Telegram.
