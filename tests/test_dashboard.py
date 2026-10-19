@@ -846,3 +846,25 @@ async def test_private_words_from_the_memory_tab(athena):
         ]
         assert (await http.post("/api/privacy/check", json={"text": "gold prices"})).json() == {"findings": []}
         assert (await http.post("/api/privacy/check", json={})).status_code == 400
+
+
+def test_every_route_has_a_handler_that_takes_its_parts():
+    import inspect
+    import re
+
+    from pi_assistant.dashboard import ROUTES, DashboardServer
+
+    for method, path, handler in ROUTES:
+        assert method in (None, "GET", "POST", "DELETE"), path
+        params = list(inspect.signature(getattr(DashboardServer, handler)).parameters)
+        assert params[:3] == ["self", "request", "method"], handler
+        assert set(params[3:]) == set(re.compile(path).groupindex), handler
+
+
+async def test_paths_it_doesnt_know_are_refused(athena):
+    async with client(athena) as http:
+        assert (await http.get("/api/nothing")).status_code == 404
+        assert (await http.post("/api/nothing", json={})).status_code == 405
+        assert (await http.get("/api/tools/demo")).status_code == 404  # a server is changed or removed, not read
+        assert (await http.post("/api/overview", json={})).status_code == 405
+        assert (await http.get("/api/skills/")).status_code == 200  # a trailing slash is fine

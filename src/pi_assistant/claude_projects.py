@@ -32,13 +32,12 @@ push anywhere else, and the repo must be private: Athena won't push to a public 
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import quote
@@ -48,6 +47,28 @@ import httpx
 
 from pi_assistant.builtin import FAIL, OK, WARN, Builtin, Report, Section, Unavailable
 from pi_assistant.catalog import Field, Integration, Secret
+from pi_assistant.github_repo import GitHubRepo
+from pi_assistant.project_files import (
+    ANSWER_CHARS,
+    ANSWERS,
+    GUIDE,
+    PREFIX,
+    REQUIREMENTS,
+    SOLUTION,
+    STATUS,
+    TITLE_CHARS,
+    Project,
+    apply_status,
+    check_stories,
+    folder_of,
+    parse,
+    project_from,
+    project_round,
+    pull_round,
+    render,
+    render_more,
+    slug,
+)
 from pi_assistant.tools import Tool, ToolError
 
 if TYPE_CHECKING:
@@ -57,38 +78,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-API = "https://api.github.com"
-PREFIX = "project/"  # each project's branch
-ROUND = re.compile(r"--(\d+)$")  # on a project's branch after the first round: folder names never have "--"
-REQUIREMENTS, STATUS, SOLUTION, ANSWERS, GUIDE = (
-    "Requirements.md",
-    "status.json",
-    "Solution.md",
-    "Answers.md",
-    "CLAUDE.md",
-)
 HAND_TO_CLAUDE, ANSWER_CLAUDE, EXTEND_CLAUDE = "hand_to_claude", "answer_claude", "extend_claude_project"
-STATES = ("to do", "in progress", "blocked", "done")  # a story's, on the board
-PROJECT_STATES = ("new", "in progress", "blocked", "done")
-MAX_STORIES, TITLE_CHARS, ANSWER_CHARS = 20, 80, 4000
-_SAME = {  # what Claude might write for each state
-    "todo": "to do",
-    "to-do": "to do",
-    "new": "to do",
-    "not started": "to do",
-    "in_progress": "in progress",
-    "in-progress": "in progress",
-    "doing": "in progress",
-    "started": "in progress",
-    "complete": "done",
-    "completed": "done",
-    "finished": "done",
-    "stuck": "blocked",
-}
-_FOLDER_DATE = re.compile(r"-(\d{4}-\d{2}-\d{2})(?:-\d+)?$")
-_STORY = re.compile(r"^###\s+(S\d+)\s*[:.\-–]\s*(.+?)\s*$")
-_DONE_WHEN = re.compile(r"^\**\s*done when\s*:?\s*\**\s*:?\s*$", re.IGNORECASE)
-_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.+?)\s*$")
 
 
 class ClaudeProjectsConfig(Section):
@@ -103,185 +93,6 @@ class ClaudeProjectsConfig(Section):
     stalled_minutes: float = 120.0  # no push for this long: Claude stopped part way
     max_restarts: int = 6  # then Athena gives up, and tells you
     timeout_seconds: float = 30.0
-
-
-# -- what's in the repo ------------------------------------------------------------------------------
-
-
-@dataclass
-class Story:
-    id: str  # S1, S2, ...
-    title: str
-    details: str = ""
-    done_when: list[str] = field(default_factory=list)
-    status: str = "to do"
-    note: str = ""  # Claude's, from status.json
-
-
-@dataclass
-class Project:
-    folder: str  # <project>-<YYYY-MM-DD>
-    title: str
-    summary: str = ""
-    notes: str = ""
-    date: str = ""
-    stories: list[Story] = field(default_factory=list)
-    status: str = "new"
-    updated: str = ""  # when Claude last said, from status.json
-    progress: str = ""  # Claude's one line on where it's at
-    problem: str = ""  # why status.json couldn't be read, if it couldn't
-    url: str = ""  # the pull request
-    solution_url: str = ""
-    number: int = 0  # the pull request's
-    pr: str = "open"  # open, merged or closed
-    last_push: float = 0.0  # when the branch last changed
-    waiting: str = ""  # "not started" or "stopped": Claude isn't working on it, and Athena's restarting it
-    restarts: int = 0  # how many times Athena's restarted it since Claude last pushed
-    next_restart: float | None = None
-    gave_up: bool = False
-    branch: str = ""  # the pull request's
-    round: int = 1  # 2 and on: more work after the first pull request was merged
-    rounds: list[dict[str, Any]] = field(default_factory=list)  # the earlier rounds' pull requests
-    fresh: list[str] = field(default_factory=list)  # the stories asked for last, under "## Changes", if any
-    started: bool = False  # Claude's started on what's asked now: status.json, mentioning any fresh stories
-
-
-def folder_of(branch: str) -> tuple[str, int]:
-    """A project branch's folder, and its round."""
-    name = branch.removeprefix(PREFIX)
-    match = ROUND.search(name)
-    return (name[: match.start()], int(match.group(1))) if match else (name, 1)
-
-
-def slug(title: str) -> str:
-    """A folder name for a title: lower case, words joined by hyphens."""
-    words = re.findall(r"[a-z0-9]+", title.lower())
-    name = "-".join(words)[:50].rstrip("-")
-    return name or "project"
-
-
-def render(title: str, summary: str, stories: list[dict[str, Any]], notes: str = "") -> str:
-    """Requirements.md, as Athena writes it: what parse() reads back."""
-    lines = [f"# {title.strip()}", "", summary.strip(), "", "## Stories", ""]
-    for i, story in enumerate(stories, 1):
-        lines.append(f"### S{i}: {' '.join(str(story['title']).split())}")
-        lines.append("")
-        if str(story.get("details") or "").strip():
-            lines += [str(story["details"]).strip(), ""]
-        lines.append("**Done when:**")
-        lines += [f"- {' '.join(str(c).split())}" for c in story["done_when"]]
-        lines.append("")
-    if notes.strip():
-        lines += ["## Notes", "", notes.strip(), ""]
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_more(first: int, summary: str, stories: list[dict[str, Any]], when: str, notes: str = "") -> str:
-    """What's added to Requirements.md for more work: stories numbered from S<first>, under a dated heading."""
-    lines = [f"## Changes, {when}", "", summary.strip(), ""]
-    if notes.strip():
-        lines += [notes.strip(), ""]
-    for i, story in enumerate(stories, first):
-        lines.append(f"### S{i}: {' '.join(str(story['title']).split())}")
-        lines.append("")
-        if str(story.get("details") or "").strip():
-            lines += [str(story["details"]).strip(), ""]
-        lines.append("**Done when:**")
-        lines += [f"- {' '.join(str(c).split())}" for c in story["done_when"]]
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def parse(folder: str, text: str) -> Project:
-    """A project from its Requirements.md. Forgiving: one written by hand still shows on the board."""
-    lines = text.splitlines()
-    title, summary, notes, section = folder, [], [], ""
-    fresh: list[str] = []
-    stories: list[Story] = []
-    story: Story | None = None
-    in_criteria = False
-    for line in lines:
-        if line.startswith("# ") and title == folder and not section:
-            title = line[2:].strip() or folder
-            continue
-        if line.startswith("## "):
-            section, story, in_criteria = line[3:].strip().lower(), None, False
-            if section.startswith("changes"):  # more work: what it's for goes with the notes
-                notes += ["", f"{line[3:].strip()}:"]
-                fresh = []
-            continue
-        match = _STORY.match(line)
-        if match:
-            story = Story(match.group(1).upper(), match.group(2))
-            stories.append(story)
-            if section.startswith("changes"):
-                fresh.append(story.id)
-            in_criteria = False
-            continue
-        if story is not None:
-            if _DONE_WHEN.match(line.strip()):
-                in_criteria = True
-            elif in_criteria and (item := _ITEM.match(line)):
-                story.done_when.append(item.group(1))
-            elif not in_criteria:
-                story.details = f"{story.details}\n{line}" if story.details else line
-            continue
-        if not section:
-            summary.append(line)
-        elif section.startswith(("note", "changes")):
-            notes.append(line)
-    for s in stories:
-        s.details = s.details.strip()
-    date = match.group(1) if (match := _FOLDER_DATE.search(folder)) else ""
-    project = Project(folder, title, "\n".join(summary).strip(), "\n".join(notes).strip(), date, stories)
-    project.fresh = fresh
-    return project
-
-
-def state(value: Any, allowed: tuple[str, ...]) -> str:
-    said = " ".join(str(value or "").strip().lower().split())
-    said = _SAME.get(said, said)
-    if said in allowed:
-        return said
-    return allowed[0]
-
-
-def apply_status(project: Project, text: str | None) -> None:
-    """Add what Claude says in status.json. A project without one is new, or in progress if a story's moved."""
-    if text is not None:
-        try:
-            status = json.loads(text)
-            if not isinstance(status, dict):
-                raise ValueError("it isn't a JSON object")
-        except ValueError as exc:
-            project.problem = f"{STATUS} couldn't be read: {exc}"
-            status = {}
-        stories = status.get("stories") if isinstance(status.get("stories"), dict) else {}
-        listed = {str(k).upper() for k in stories}
-        project.started = bool(project.problem) or not project.fresh or any(i in listed for i in project.fresh)
-        for story in project.stories:
-            said = stories.get(story.id) or stories.get(story.id.lower())
-            if isinstance(said, dict):
-                story.status = state(said.get("status"), STATES)
-                story.note = str(said.get("note") or "").strip()
-            elif isinstance(said, str):
-                story.status = state(said, STATES)
-        project.updated = str(status.get("updated") or "")
-        project.progress = str(status.get("summary") or "").strip()
-        if status.get("status"):
-            project.status = state(status["status"], PROJECT_STATES)
-            if project.status == "new":  # status.json means Claude has started
-                project.status = "in progress"
-            if project.status == "done" and any(s.status != "done" for s in project.stories if s.id in project.fresh):
-                project.status = "in progress"  # more's been asked for since
-            return
-    moved = any(s.status != "to do" for s in project.stories)
-    if project.stories and all(s.status == "done" for s in project.stories):
-        project.status = "done"
-    elif any(s.status == "blocked" for s in project.stories):
-        project.status = "blocked"
-    else:
-        project.status = "in progress" if moved or text is not None else "new"
 
 
 # -- what Athena remembers between reads ---------------------------------------------------------------
@@ -394,25 +205,15 @@ class ClaudeProjects(Builtin):
             self.tz: Any = ZoneInfo(timezone)
         except Exception:  # unknown timezone name
             self.tz = ZoneInfo("UTC")
-        self.http = http or httpx.AsyncClient(
-            base_url=API,
-            timeout=cfg.timeout_seconds,
-            headers={
-                "Authorization": f"Bearer {cfg.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "pi-assistant (Athena)",
-            },
+        self.github = GitHubRepo(
+            cfg.repo, cfg.token, token_name="PROJECTS_GITHUB_TOKEN", timeout=cfg.timeout_seconds, http=http
         )
-        self._blobs: dict[str, str] = {}  # file contents, by their SHA, so only what's changed is read again
-        self._pushed: dict[str, float] = {}  # when each commit was made, by its SHA
-        self._private: bool | None = None
         self.checked = 0.0
         self.error: str | None = None
         self.projects: list[Project] = []
         if kept := store.board():
             self.checked, self.error = kept.get("checked", 0.0), kept.get("error")
-            self.projects = [_project(p) for p in kept.get("projects", [])]
+            self.projects = [project_from(p) for p in kept.get("projects", [])]
 
     @classmethod
     def wanted(cls, cfg: Config) -> bool:
@@ -436,8 +237,8 @@ class ClaudeProjects(Builtin):
             return
         repo, branch = built.cfg.repo, built.cfg.branch
         try:
-            about = await built._get(f"/repos/{repo}")
-            guide = await built._request("GET", f"/repos/{repo}/contents/{GUIDE}?ref={quote(branch)}")
+            about = await built.github.about()
+            guide = await built.github.file(GUIDE, branch)
         except ToolError as exc:
             report(FAIL, str(exc))
             return
@@ -449,84 +250,25 @@ class ClaudeProjects(Builtin):
             report(FAIL, f"the token can read {repo} but not write to it: give it Contents, read and write")
         else:
             report(OK, f"can read and write {repo}, which is private")
-        if guide.status_code != 200:
+        if guide is None:
             report(WARN, f"{repo} has no {GUIDE} on {branch}: copy deploy/zeus-solutions/CLAUDE.md there (README)")
 
     async def close(self) -> None:
-        await self.http.aclose()
+        await self.github.close()
         self.store.close()
-
-    # -- talking to GitHub --
-
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        try:
-            response = await self.http.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise ToolError(f"Couldn't reach GitHub ({type(exc).__name__}).") from exc
-        if response.status_code in (401, 403):
-            raise ToolError(
-                f"GitHub refused the token for {self.cfg.repo} ({response.status_code}): check PROJECTS_GITHUB_TOKEN "
-                "has Contents and Pull requests, read and write, on that repository."
-            )
-        if response.status_code == 404 and path == f"/repos/{self.cfg.repo}":
-            raise ToolError(f"GitHub has no repository {self.cfg.repo} that the token can see.")
-        return response
-
-    async def _call(self, method: str, path: str, **kwargs: Any) -> Any:
-        """A request that must work: its JSON, or ToolError saying what GitHub said."""
-        response = await self._request(method, path, **kwargs)
-        if response.status_code >= 400:
-            try:
-                said = response.json().get("message", "")
-            except ValueError:
-                said = ""
-            raise ToolError(
-                f"GitHub said {response.status_code} for {method} {path.split('?')[0]}: {said}".rstrip(": ")
-            )
-        return response.json() if response.content else {}
-
-    async def _get(self, path: str) -> Any:
-        return await self._call("GET", path)
-
-    async def _check_private(self) -> None:
-        if self._private is None:
-            self._private = bool((await self._get(f"/repos/{self.cfg.repo}")).get("private"))
-        if not self._private:
-            self._private = None  # look again next time: you may have made it private
-            raise ToolError(
-                f"{self.cfg.repo} is public. Make it private on GitHub first: requirements can be personal."
-            )
-
-    async def _blob(self, sha: str) -> str:
-        if sha not in self._blobs:
-            blob = await self._get(f"/repos/{self.cfg.repo}/git/blobs/{sha}")
-            self._blobs[sha] = base64.b64decode(blob.get("content") or "").decode("utf-8", errors="replace")
-        return self._blobs[sha]
-
-    async def _pushed_at(self, sha: str) -> float:
-        if sha not in self._pushed:
-            commit = await self._get(f"/repos/{self.cfg.repo}/commits/{sha}")
-            when = ((commit.get("commit") or {}).get("committer") or {}).get("date") or ""
-            self._pushed[sha] = _time(when)
-        return self._pushed[sha]
 
     async def _pulls(self) -> list[dict[str, Any]]:
         """Projects' pull requests, newest first. One closed without merging is a project called off: left out."""
-        pulls = await self._get(f"/repos/{self.cfg.repo}/pulls?state=all&per_page=100&sort=created&direction=desc")
         return [
             pr
-            for pr in pulls
+            for pr in await self.github.pulls()
             if str((pr.get("head") or {}).get("ref", "")).startswith(PREFIX)
             and (pr.get("state") == "open" or pr.get("merged_at"))
         ]
 
     async def _restart(self, number: int) -> None:
         """Start Claude again, by taking the label off the pull request and putting it back."""
-        label = quote(self.cfg.label, safe="")
-        response = await self._request("DELETE", f"/repos/{self.cfg.repo}/issues/{number}/labels/{label}")
-        if response.status_code not in (200, 404):  # 404: it wasn't on
-            raise ToolError(f"GitHub said {response.status_code} taking the label off pull request #{number}.")
-        await self._call("POST", f"/repos/{self.cfg.repo}/issues/{number}/labels", json={"labels": [self.cfg.label]})
+        await self.github.relabel(number, self.cfg.label)
 
     # -- the board --
 
@@ -541,7 +283,7 @@ class ClaudeProjects(Builtin):
                 current = next((pr for pr in prs if pr.get("state") == "open"), prs[0])
                 if found := await self._read(current, folder):
                     found[0].rounds = [
-                        _round(pr) for pr in sorted(prs, key=lambda pr: pr["number"]) if pr is not current
+                        pull_round(pr) for pr in sorted(prs, key=lambda pr: pr["number"]) if pr is not current
                     ]
                     read.append(found)
         except ToolError as exc:
@@ -569,22 +311,17 @@ class ClaudeProjects(Builtin):
     async def _read(self, pr: dict[str, Any], folder: str) -> tuple[Project, str] | None:
         """A pull request's project, and the branch's last commit. None if it isn't one of Athena's."""
         sha = pr["head"]["sha"]
-        response = await self._request("GET", f"/repos/{self.cfg.repo}/contents/{quote(folder)}?ref={sha}")
-        if response.status_code == 404:
+        files = await self.github.folder(folder, sha)
+        if files is None or REQUIREMENTS not in files:
             return None  # a branch called project/... that isn't one of Athena's
-        if response.status_code >= 400:
-            raise ToolError(f"GitHub said {response.status_code} reading {folder}.")
-        files = {item["name"]: item["sha"] for item in response.json() if item.get("type") == "file"}
-        if REQUIREMENTS not in files:
-            return None
-        project = parse(folder, await self._blob(files[REQUIREMENTS]))
-        apply_status(project, await self._blob(files[STATUS]) if STATUS in files else None)
+        project = parse(folder, await self.github.blob(files[REQUIREMENTS]))
+        apply_status(project, await self.github.blob(files[STATUS]) if STATUS in files else None)
         project.number, project.url = pr["number"], pr.get("html_url", "")
         project.pr = "merged" if pr.get("merged_at") else str(pr.get("state") or "open")
         project.branch, project.round = pr["head"]["ref"], folder_of(pr["head"]["ref"])[1]
         if SOLUTION in files:
             project.solution_url = f"https://github.com/{self.cfg.repo}/blob/{sha}/{quote(folder)}/{SOLUTION}"
-        project.last_push = await self._pushed_at(sha) if project.pr == "open" else 0.0
+        project.last_push = await self.github.pushed_at(sha) if project.pr == "open" else 0.0
         return project, sha
 
     async def _keep_going(self, project: Project, head: str, watch: Watch) -> list[str]:
@@ -691,53 +428,41 @@ class ClaudeProjects(Builtin):
             raise ToolError(f"Give the project a title, of up to {TITLE_CHARS} characters.")
         if not summary:
             raise ToolError("Say what the project is for, in the summary.")
-        _check_stories(stories)
+        check_stories(stories)
         today = datetime.now(self.tz).date().isoformat()
         return title, render(title, summary, stories, str(args.get("notes") or "")), f"{slug(title)}-{today}"
 
     async def _main(self) -> str:
         """The main branch's last commit. ToolError if there's no main branch yet."""
-        response = await self._request("GET", f"/repos/{self.cfg.repo}/git/ref/heads/{quote(self.cfg.branch)}")
-        if response.status_code in (404, 409):
+        main = await self.github.head(self.cfg.branch)
+        if main is None:
             raise ToolError(
                 f"{self.cfg.repo} has no {self.cfg.branch} branch yet. Put CLAUDE.md on it first: see the README, "
                 "“Projects for Claude”."
             )
-        if response.status_code >= 400:
-            raise ToolError(f"GitHub said {response.status_code} for the {self.cfg.branch} branch.")
-        return response.json()["object"]["sha"]
+        return main
 
     async def hand_over(self, args: dict[str, Any]) -> Project:
         title, text, folder = self._requirements(args)
-        await self._check_private()
+        await self.github.check_private()
         main = await self._main()
-        repo = self.cfg.repo
-        taken = {item["name"] for item in await self._get(f"/repos/{repo}/contents?ref={quote(self.cfg.branch)}")}
-        branches = await self._get(f"/repos/{repo}/git/matching-refs/heads/{PREFIX}")
-        taken |= {folder_of(ref["ref"].removeprefix("refs/heads/"))[0] for ref in branches}
+        taken = await self.github.names(self.cfg.branch)
+        taken |= {folder_of(branch)[0] for branch in await self.github.branches(PREFIX)}
         name, n = folder, 1
         while name in taken:
             n += 1
             name = f"{folder}-{n}"
         branch = f"{PREFIX}{name}"
-        await self._call("POST", f"/repos/{repo}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": main})
-        await self._call(
-            "PUT",
-            f"/repos/{repo}/contents/{quote(name)}/{REQUIREMENTS}",
-            json={
-                "message": f"Athena: requirements for {title}",
-                "content": base64.b64encode(text.encode()).decode(),
-                "branch": branch,
-            },
+        await self.github.make_branch(branch, main)
+        await self.github.put(
+            f"{quote(name)}/{REQUIREMENTS}", text, branch=branch, message=f"Athena: requirements for {title}"
         )
         body = (
             f"{str(args.get('summary') or '').strip()}\n\nRequirements: [`{name}/{REQUIREMENTS}`]"
             f"(../blob/{branch}/{name}/{REQUIREMENTS}). Claude: follow `{GUIDE}`, and push to `{branch}`."
         )
-        pr = await self._call(
-            "POST", f"/repos/{repo}/pulls", json={"title": title, "head": branch, "base": self.cfg.branch, "body": body}
-        )
-        await self._call("POST", f"/repos/{repo}/issues/{pr['number']}/labels", json={"labels": [self.cfg.label]})
+        pr = await self.github.open_pull(title=title, head=branch, base=self.cfg.branch, body=body)
+        await self.github.label(pr["number"], self.cfg.label)
         project = parse(name, text)
         project.number, project.url, project.branch = pr["number"], pr.get("html_url", ""), branch
         project.last_push = self.clock()
@@ -750,23 +475,16 @@ class ClaudeProjects(Builtin):
     async def answer(self, project: Project, text: str) -> None:
         """Add your answer to Answers.md on the project's branch, and start Claude again."""
         branch, path = project.branch or f"{PREFIX}{project.folder}", f"{quote(project.folder)}/{ANSWERS}"
-        response = await self._request("GET", f"/repos/{self.cfg.repo}/contents/{path}?ref={quote(branch)}")
-        before, sha = "", None
-        if response.status_code == 200:
-            existing = response.json()
-            before, sha = base64.b64decode(existing.get("content") or "").decode("utf-8", "replace"), existing["sha"]
-        elif response.status_code != 404:
-            raise ToolError(f"GitHub said {response.status_code} reading {ANSWERS}.")
+        before, sha = await self.github.file(path, branch) or ("", None)
         when = datetime.now(self.tz).strftime("%Y-%m-%d %H:%M")
         heading = before.rstrip() + "\n\n" if before.strip() else "# Answers\n\n"
-        body: dict[str, Any] = {
-            "message": f"Athena: an answer for {project.title}",
-            "content": base64.b64encode(f"{heading}## {when}\n\n{text.strip()}\n".encode()).decode(),
-            "branch": branch,
-        }
-        if sha:
-            body["sha"] = sha
-        await self._call("PUT", f"/repos/{self.cfg.repo}/contents/{path}", json=body)
+        await self.github.put(
+            path,
+            f"{heading}## {when}\n\n{text.strip()}\n",
+            branch=branch,
+            message=f"Athena: an answer for {project.title}",
+            sha=sha,
+        )
         await self.restart(project.folder)
 
     # -- more work on a project --
@@ -776,7 +494,7 @@ class ClaudeProjects(Builtin):
         summary, stories = str(args.get("summary") or "").strip(), args.get("stories")
         if not summary:
             raise ToolError("Say what's changing, and why, in the summary.")
-        _check_stories(stories, len(project.stories))
+        check_stories(stories, len(project.stories))
         first = max((int(s.id[1:]) for s in project.stories), default=0) + 1
         when = datetime.now(self.tz).date().isoformat()
         text = render_more(first, summary, stories, when, str(args.get("notes") or ""))
@@ -784,8 +502,7 @@ class ClaudeProjects(Builtin):
 
     async def _next_round(self, project: Project) -> tuple[int, str]:
         """The next round's number, and its branch, which isn't taken."""
-        branches = await self._get(f"/repos/{self.cfg.repo}/git/matching-refs/heads/{PREFIX}{project.folder}")
-        taken = {ref["ref"].removeprefix("refs/heads/") for ref in branches}
+        taken = set(await self.github.branches(f"{PREFIX}{project.folder}"))
         n = max([project.round, *(r.get("round", 1) for r in project.rounds)]) + 1
         while f"{PREFIX}{project.folder}--{n}" in taken:
             n += 1
@@ -795,34 +512,21 @@ class ClaudeProjects(Builtin):
         """Add stories to a project, and start Claude on them: on its branch while its pull request is open, or
         as a new round, with a pull request of its own, once it's merged."""
         more, ids = self._more(project, args)
-        await self._check_private()
-        repo, path = self.cfg.repo, f"{quote(project.folder)}/{REQUIREMENTS}"
+        await self.github.check_private()
+        path = f"{quote(project.folder)}/{REQUIREMENTS}"
         message = f"Athena: more for {project.title} ({', '.join(ids)})"
         if project.pr == "open":
             branch, new_round = project.branch, None
         else:
             new_round, branch = await self._next_round(project)
-            main = await self._main()
-            await self._call("POST", f"/repos/{repo}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": main})
-        response = await self._request("GET", f"/repos/{repo}/contents/{path}?ref={quote(branch)}")
-        if response.status_code == 404:
+            await self.github.make_branch(branch, await self._main())
+        found = await self.github.file(path, branch)
+        if found is None:
             where = "its branch" if new_round is None else self.cfg.branch
             raise ToolError(f"{project.folder}/{REQUIREMENTS} isn't on {where}, so there's nothing to add to.")
-        if response.status_code >= 400:
-            raise ToolError(f"GitHub said {response.status_code} reading {project.folder}/{REQUIREMENTS}.")
-        current = response.json()
-        before = base64.b64decode(current.get("content") or "").decode("utf-8", "replace")
+        before, sha = found
         text = before.rstrip() + "\n\n" + more
-        await self._call(
-            "PUT",
-            f"/repos/{repo}/contents/{path}",
-            json={
-                "message": message,
-                "content": base64.b64encode(text.encode()).decode(),
-                "branch": branch,
-                "sha": current["sha"],
-            },
-        )
+        await self.github.put(path, text, branch=branch, message=message, sha=sha)
         extended = parse(project.folder, text)
         for field_name in ("number", "url", "pr", "branch", "round", "rounds", "solution_url", "progress", "updated"):
             setattr(extended, field_name, getattr(project, field_name))
@@ -838,13 +542,9 @@ class ClaudeProjects(Builtin):
                 f"{project.folder}/{REQUIREMENTS}). Claude: follow `{GUIDE}`, and push to `{branch}`."
             )
             title = f"{project.title} ({new_round})"
-            pr = await self._call(
-                "POST",
-                f"/repos/{repo}/pulls",
-                json={"title": title, "head": branch, "base": self.cfg.branch, "body": body},
-            )
-            await self._call("POST", f"/repos/{repo}/issues/{pr['number']}/labels", json={"labels": [self.cfg.label]})
-            extended.rounds = [*project.rounds, _round_of(project)]
+            pr = await self.github.open_pull(title=title, head=branch, base=self.cfg.branch, body=body)
+            await self.github.label(pr["number"], self.cfg.label)
+            extended.rounds = [*project.rounds, project_round(project)]
             extended.number, extended.url, extended.pr = pr["number"], pr.get("html_url", ""), "open"
             extended.branch, extended.round, extended.solution_url = branch, new_round, ""
         self.projects = [extended if p.folder == project.folder else p for p in self.projects]
@@ -869,7 +569,7 @@ class ClaudeProjects(Builtin):
     def tools(self) -> list[Tool]:
         async def preview(args: dict[str, Any]) -> str:
             title, text, folder = self._requirements(dict(args))
-            await self._check_private()
+            await self.github.check_private()
             stories = text.count("\n### S")
             return (
                 f"This opens a pull request in {self.cfg.repo} on GitHub (private), from a new branch with "
@@ -890,7 +590,7 @@ class ClaudeProjects(Builtin):
             text = str(args.get("answer") or "").strip()
             if not text or len(text) > ANSWER_CHARS:
                 raise ToolError(f"Give the answer, in up to {ANSWER_CHARS:,} characters.")
-            await self._check_private()
+            await self.github.check_private()
             return (
                 f"This adds the answer below to {project.folder}/{ANSWERS} on its branch in {self.cfg.repo} (private), "
                 f"and starts Claude again on “{project.title}”."
@@ -904,7 +604,7 @@ class ClaudeProjects(Builtin):
         async def extend_preview(args: dict[str, Any]) -> str:
             project = self._find(str(args.get("project") or ""))
             more, ids = self._more(project, dict(args))
-            await self._check_private()
+            await self.github.check_private()
             what = f"{len(ids)} stor{'y' if len(ids) == 1 else 'ies'} ({ids[0]}{f'–{ids[-1]}' if len(ids) > 1 else ''})"
             if project.pr == "open":
                 return (
@@ -1029,50 +729,3 @@ class ClaudeProjects(Builtin):
         for s in p.stories:
             lines.append(f"- {s.id} {s.title}: {s.status}" + (f". {s.note}" if s.note else ""))
         return "\n".join(lines)
-
-
-def _check_stories(stories: Any, already: int = 0) -> None:
-    """ToolError, saying what's wrong, unless ``stories`` is a list of good ones, and with ``already`` not too many."""
-    if not isinstance(stories, list) or not stories or len(stories) > MAX_STORIES:
-        raise ToolError(f"Give between 1 and {MAX_STORIES} stories.")
-    if already + len(stories) > 2 * MAX_STORIES:
-        raise ToolError(
-            f"The project would have over {2 * MAX_STORIES} stories: hand the rest over as a project of its own."
-        )
-    for i, story in enumerate(stories, 1):
-        if (
-            not isinstance(story, dict)
-            or not str(story.get("title") or "").strip()
-            or not isinstance(story.get("done_when"), list)
-            or not [c for c in story["done_when"] if str(c).strip()]
-        ):
-            raise ToolError(f"Story {i} needs a title, and done_when: what must be true for it to be done.")
-        story["done_when"] = [c for c in story["done_when"] if str(c).strip()]
-
-
-def _round(pr: dict[str, Any]) -> dict[str, Any]:
-    """An earlier round's pull request, as the board links to it."""
-    state = "merged" if pr.get("merged_at") else str(pr.get("state") or "open")
-    return {
-        "number": pr["number"],
-        "url": pr.get("html_url", ""),
-        "pr": state,
-        "round": folder_of(pr["head"]["ref"])[1],
-    }
-
-
-def _round_of(project: Project) -> dict[str, Any]:
-    return {"number": project.number, "url": project.url, "pr": project.pr, "round": project.round}
-
-
-def _time(iso: str) -> float:
-    try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return 0.0
-
-
-def _project(kept: dict[str, Any]) -> Project:
-    stories = [Story(**s) for s in kept.pop("stories", [])]
-    known = {k: v for k, v in kept.items() if k in Project.__dataclass_fields__}
-    return Project(**known, stories=stories)

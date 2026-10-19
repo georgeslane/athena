@@ -53,8 +53,10 @@ import errno
 import gzip
 import hashlib
 import hmac
+import inspect
 import json
 import logging
+import re
 import secrets
 import time
 from collections import deque
@@ -84,7 +86,11 @@ ASSETS = Path(__file__).parent / "assets"
 FILES = {  # what the page is made of, by path
     "/": (WEB / "index.html", "text/html; charset=utf-8"),
     "/dashboard.css": (WEB / "dashboard.css", "text/css; charset=utf-8"),
-    "/dashboard.js": (WEB / "dashboard.js", "text/javascript; charset=utf-8"),
+    # The script, as modules: dashboard.js starts it, core.js has what the tabs share, and each tab has its own.
+    **{
+        f"/{name}.js": (WEB / f"{name}.js", "text/javascript; charset=utf-8")
+        for name in ("dashboard", "core", "status", "tasks", "memory", "skills", "board", "tools")
+    },
     "/manifest.webmanifest": (WEB / "manifest.webmanifest", "application/manifest+json"),
     "/athena.svg": (ASSETS / "athena.svg", "image/svg+xml"),
     "/icon-180.png": (WEB / "icon-180.png", "image/png"),
@@ -104,6 +110,33 @@ MIN_TOKEN_CHARS = 12
 SIGN_IN_TRIES = 10  # wrong passwords allowed in SIGN_IN_WINDOW, after which it waits
 SIGN_IN_WINDOW = 600.0
 MODEL_CHECK_SECONDS = 60.0
+
+
+# The API, as (method, path, handler): the first that matches a request answers it. A method of None
+# means the handler answers any, and a path's (?P<name>...) parts are passed to it by name.
+ROUTES = (
+    ("GET", r"/api/overview", "_get_overview"),
+    ("GET", r"/api/status", "_get_status"),
+    ("POST", r"/api/session", "_new_session"),
+    ("POST", r"/api/thinking", "_set_thinking"),
+    ("POST", r"/api/forget", "_forget"),
+    ("GET", r"/api/tools", "_get_tools"),
+    ("POST", r"/api/tools", "_add_server"),
+    ("POST", r"/api/reconnect", "_reconnect"),
+    ("POST", r"/api/tools/(?P<name>[^/]+)/approve", "_approve_tools"),
+    ("POST", r"/api/tools/(?P<name>[^/]+)", "_change_server"),
+    ("DELETE", r"/api/tools/(?P<name>[^/]+)", "_remove_server"),
+    ("GET", r"/api/memory", "_get_memory"),
+    ("POST", r"/api/memory/search", "_search_memory"),
+    ("POST", r"/api/memory/suggestions/(?P<which>.*)", "_decide_memory"),
+    ("POST", r"/api/privacy", "_set_private_words"),
+    ("POST", r"/api/privacy/check", "_check_privacy"),
+    (None, r"/api/projects(?:/(?P<action>refresh|restart|extend))?", "_projects"),
+    (None, r"/api/skills(?:/(?P<which>.*))?", "_skills"),
+    (None, r"/api/documents/(?P<action>.*)", "_documents"),
+    (None, r"/api/tasks(?:/(?P<task>.*))?", "_tasks"),
+)
+_ROUTES = [(method, re.compile(path), handler) for method, path, handler in ROUTES]
 
 
 class DashboardServer(Server):
@@ -211,87 +244,100 @@ class DashboardServer(Server):
         return await self._api(request, path, method)
 
     async def _api(self, request: Request, path: str, method: str) -> Response:
-        if path == "/api/overview" and method == "GET":
-            return _json(self.overview())
-        if path == "/api/status" and method == "GET":
-            await self.feed.wait(request.query.get("after"), wait_seconds(request))
-            return _json(self.status())
-        if path == "/api/session" and method == "POST":
-            session = self.s.new_session()
-            log.info("Dashboard: started session %d", session.id)
-            return _json(self.overview())
-        if path == "/api/thinking" and method == "POST":
-            mode = _body(request).get("mode")
-            try:
-                self.s.set_thinking(mode)
-            except (ValueError, SettingsError) as exc:
-                raise HTTPError(400, str(exc)) from exc
-            return _json(self.overview())
-        if path == "/api/forget" and method == "POST":
-            if _body(request).get("confirm") != "forget":
-                raise HTTPError(400, 'To delete every memory, send {"confirm": "forget"}.')
-            async with self._lock:
-                await self.s.forget_everything()
-            log.warning("Dashboard: deleted every memory and the conversation history")
-            return _json(self.overview())
-        if path == "/api/tools" and method == "GET":
-            return _json(self.tools())
-        if path == "/api/tools" and method == "POST":
-            body = _body(request)
-            return await self._change(lambda: self.settings.add_server(body)[1])
-        if path == "/api/reconnect" and method == "POST":
-            self._apply(None, reconnect=True)
-            return _json(self.tools())
-        if path == "/api/memory" and method == "GET":
-            return _json(self.memory())
-        if path == "/api/memory/search" and method == "POST":
-            return _json(await self.search(_body(request)))
-        if path.startswith("/api/memory/suggestions/") and method == "POST":
-            return _json(await self._memory_suggestion(path.removeprefix("/api/memory/suggestions/"), _body(request)))
-        if path == "/api/privacy" and method == "POST":
-            try:
-                self.s.privacy.set_terms(_body(request).get("terms"))
-            except ValueError as exc:
-                raise HTTPError(400, str(exc)) from None
-            return _json(self.privacy())
-        if path == "/api/privacy/check" and method == "POST":
-            text = _body(request).get("text")
-            if not isinstance(text, str) or len(text) > 20_000:
-                raise HTTPError(400, 'Send the text to check: {"text": "..."}, up to 20,000 characters.')
-            found = self.s.privacy.find([text])
-            return _json({"findings": [{"kind": f.kind, "text": "" if f.secret else f.text} for f in found]})
-        if path in ("/api/projects", "/api/projects/refresh", "/api/projects/restart", "/api/projects/extend"):
-            return await self._projects(request, path, method)
-        if path == "/api/skills" or path.startswith("/api/skills/"):
-            return self._skills(request, path.removeprefix("/api/skills").strip("/"), method)
-        if path.startswith("/api/documents/"):
-            return await self._documents(request, path.removeprefix("/api/documents/"), method)
-        if path == "/api/tasks" or path.startswith("/api/tasks/"):
-            return self._tasks(request, path.removeprefix("/api/tasks").strip("/"), method)
-        if path.startswith("/api/tools/") and path.endswith("/approve") and method == "POST":
-            name = path.removeprefix("/api/tools/").removesuffix("/approve")
-            tools = _body(request).get("tools")
-            if not isinstance(tools, dict) or not tools or not all(isinstance(v, str) for v in tools.values()):
-                raise HTTPError(400, 'Say which tools to approve: {"tools": {"name": "fingerprint"}}.')
-            try:
-                self.s.approve_tools(name, tools)
-            except ValueError as exc:
-                raise HTTPError(409, str(exc)) from None
-            return _json(self.tools())
-        if path.startswith("/api/tools/"):
-            name = path.removeprefix("/api/tools/")
-            if method == "POST":
-                body = _body(request)
-                offered = [t for st in self.s.mcp.status() if st.name == name for t, _ in st.offered]
-                return await self._change(lambda: self.settings.update(name, body, offered))
-            if method == "DELETE":
-                response = await self._change(lambda: self.settings.remove_server(name))
-                if self.s.mcp.approvals:
-                    self.s.mcp.approvals.forget(name)  # a server added later with this name starts afresh
-                return response
+        """Answer an API request with the first route in ROUTES that matches it (see there)."""
+        for wanted, pattern, handler in _ROUTES:
+            match = pattern.fullmatch(path)
+            if match and wanted in (None, method):
+                parts = {name: part.strip("/") for name, part in match.groupdict(default="").items()}
+                response = getattr(self, handler)(request, method, **parts)
+                return await response if inspect.isawaitable(response) else response
         raise HTTPError(404 if method == "GET" else 405, "There's nothing like that here.")
 
-    def _tasks(self, request: Request, task: str, method: str) -> Response:
+    # -- the API's routes, as ROUTES lists them: each is given the request, its method and the parts of its path
+
+    def _get_overview(self, request: Request, method: str) -> Response:
+        return _json(self.overview())
+
+    async def _get_status(self, request: Request, method: str) -> Response:
+        await self.feed.wait(request.query.get("after"), wait_seconds(request))
+        return _json(self.status())
+
+    def _new_session(self, request: Request, method: str) -> Response:
+        session = self.s.new_session()
+        log.info("Dashboard: started session %d", session.id)
+        return _json(self.overview())
+
+    def _set_thinking(self, request: Request, method: str) -> Response:
+        try:
+            self.s.set_thinking(_body(request).get("mode"))
+        except (ValueError, SettingsError) as exc:
+            raise HTTPError(400, str(exc)) from exc
+        return _json(self.overview())
+
+    async def _forget(self, request: Request, method: str) -> Response:
+        if _body(request).get("confirm") != "forget":
+            raise HTTPError(400, 'To delete every memory, send {"confirm": "forget"}.')
+        async with self._lock:
+            await self.s.forget_everything()
+        log.warning("Dashboard: deleted every memory and the conversation history")
+        return _json(self.overview())
+
+    def _get_tools(self, request: Request, method: str) -> Response:
+        return _json(self.tools())
+
+    async def _add_server(self, request: Request, method: str) -> Response:
+        body = _body(request)
+        return await self._change(lambda: self.settings.add_server(body)[1])
+
+    def _reconnect(self, request: Request, method: str) -> Response:
+        self._apply(None, reconnect=True)
+        return _json(self.tools())
+
+    def _approve_tools(self, request: Request, method: str, name: str) -> Response:
+        tools = _body(request).get("tools")
+        if not isinstance(tools, dict) or not tools or not all(isinstance(v, str) for v in tools.values()):
+            raise HTTPError(400, 'Say which tools to approve: {"tools": {"name": "fingerprint"}}.')
+        try:
+            self.s.approve_tools(name, tools)
+        except ValueError as exc:
+            raise HTTPError(409, str(exc)) from None
+        return _json(self.tools())
+
+    async def _change_server(self, request: Request, method: str, name: str) -> Response:
+        body = _body(request)
+        offered = [t for st in self.s.mcp.status() if st.name == name for t, _ in st.offered]
+        return await self._change(lambda: self.settings.update(name, body, offered))
+
+    async def _remove_server(self, request: Request, method: str, name: str) -> Response:
+        response = await self._change(lambda: self.settings.remove_server(name))
+        if self.s.mcp.approvals:
+            self.s.mcp.approvals.forget(name)  # a server added later with this name starts afresh
+        return response
+
+    def _get_memory(self, request: Request, method: str) -> Response:
+        return _json(self.memory())
+
+    async def _search_memory(self, request: Request, method: str) -> Response:
+        return _json(await self.search(_body(request)))
+
+    async def _decide_memory(self, request: Request, method: str, which: str) -> Response:
+        return _json(await self._memory_suggestion(which, _body(request)))
+
+    def _set_private_words(self, request: Request, method: str) -> Response:
+        try:
+            self.s.privacy.set_terms(_body(request).get("terms"))
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        return _json(self.privacy())
+
+    def _check_privacy(self, request: Request, method: str) -> Response:
+        text = _body(request).get("text")
+        if not isinstance(text, str) or len(text) > 20_000:
+            raise HTTPError(400, 'Send the text to check: {"text": "..."}, up to 20,000 characters.')
+        found = self.s.privacy.find([text])
+        return _json({"findings": [{"kind": f.kind, "text": "" if f.secret else f.text} for f in found]})
+
+    def _tasks(self, request: Request, method: str, task: str) -> Response:
         scheduler = self.s.tasks
         if scheduler is None:
             raise HTTPError(409, "Tasks are switched off ([tasks] enabled = false in config.toml).")
@@ -355,17 +401,17 @@ class DashboardServer(Server):
             raise HTTPError(400, 'Say what to do: {"action": "approve" | "discard"}.')
         return self.memory()
 
-    async def _projects(self, request: Request, path: str, method: str) -> Response:
+    async def _projects(self, request: Request, method: str, action: str) -> Response:
         projects = self.s.builtins.get("claude_projects")
         if projects is None:
             why = self.s.builtins.problems.get("claude_projects")
             off = f"Projects for Claude can't start: {why}." if why else "Projects for Claude are switched off."
             raise HTTPError(409, f"{off} Set them up on the Tools tab.")
-        if path == "/api/projects" and method == "GET":
+        if action == "" and method == "GET":
             return _json(projects.board())
-        if path == "/api/projects/refresh" and method == "POST":
+        if action == "refresh" and method == "POST":
             return _json(await self.s.check_projects() or projects.board())
-        if path == "/api/projects/extend" and method == "POST":
+        if action == "extend" and method == "POST":
             body = _body(request)
             folder = str(body.get("folder") or "")
             project = next((p for p in projects.projects if p.folder == folder and p.pr in ("open", "merged")), None)
@@ -382,7 +428,7 @@ class DashboardServer(Server):
             except ToolError as exc:
                 raise HTTPError(400, str(exc)) from None
             return _json(projects.board())
-        if path == "/api/projects/restart" and method == "POST":
+        if action == "restart" and method == "POST":
             try:
                 await projects.restart(str(_body(request).get("folder") or ""))
             except ToolError as exc:
@@ -390,7 +436,7 @@ class DashboardServer(Server):
             return _json(projects.board())
         raise HTTPError(405, "There's nothing like that here.")
 
-    def _skills(self, request: Request, which: str, method: str) -> Response:
+    def _skills(self, request: Request, method: str, which: str) -> Response:
         skills = self.s.skills
         try:
             if not which and method == "GET":
@@ -439,7 +485,7 @@ class DashboardServer(Server):
             raise HTTPError(400, str(exc)) from None
         raise HTTPError(405, "There's nothing like that here.")
 
-    async def _documents(self, request: Request, action: str, method: str) -> Response:
+    async def _documents(self, request: Request, method: str, action: str) -> Response:
         documents = self.s.documents
         try:
             if action == "browse" and method == "GET":
