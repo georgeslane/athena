@@ -457,7 +457,7 @@ Athena can work on things by itself, then message you what it found: a briefing 
 - **You come first.** A task doesn't start while you're chatting with Athena, or within `quiet_minutes` (5) of your last message. If you are, it looks again after a minute, then two, four and so on, up to 15. Once it's running, a message from you stops what it's doing at once, so the Mac is yours, and it takes that step again once you've finished. Your replies aren't slowed down by it.
 - **What it tells you.** When a task is done, you get its findings as a message in Telegram, which also goes into your chat, so you can reply "tell me more about the second one". If there's nothing new, it stays quiet. The dashboard shows what each task said last time.
 - **Longer work.** A task gets more steps than a reply (`max_tool_rounds`, 25), up to `max_minutes` (30) of work, not counting time it waits for you, and thinks before answering whatever `/think` is set to (`thinking`).
-- **When.** `now`, `in 2h`, `once 2026-10-16 09:00`, `daily 07:30`, `weekdays 07:30`, `weekly mon,thu 18:00`, or `every 6h`, in your time zone (`[agent] timezone`). A regular run that was missed by more than six hours, say while the Pi was off, is skipped to the next one.
+- **When.** `now`, `in 2h`, `once 2026-10-16 09:00`, `daily 07:30`, `weekdays 07:30`, `weekly mon,thu 18:00`, or `every 6h`, in your time zone (`[agent] timezone`). Or `on arrive-home`: each time that event comes in. See [Triggers](#triggers). A regular run that was missed by more than six hours, say while the Pi was off, is skipped to the next one.
 - **What it may do.**
   - A task Athena suggests needs your OK: scheduling one asks first, and the message shows what it'll do, when, and the tools it may use without asking.
   - Tasks you add on the dashboard are yours already.
@@ -465,6 +465,35 @@ Athena can work on things by itself, then message you what it found: a briefing 
   - Scheduling another task always asks, so a task can't start others by itself.
 - **If it fails**, say because the Mac's asleep, it tries again after 10 minutes, then 30, then tells you and waits for its next run.
 - **In Telegram**, `/tasks` lists them, with buttons to run, pause, resume, stop or delete each. On the dashboard, the **Tasks** tab does the same.
+
+### Triggers
+
+A task whose schedule is `on <event>`, such as `on arrive-home`, runs each time that event comes in, rather than at a time. Anything that can make an HTTP request on your tailnet can send one. For example, an iPhone Shortcuts automation could run when you arrive home, leave work, an alarm goes off or you tap an NFC tag.
+
+1. Make up a token of at least 16 characters, such as the output of `openssl rand -hex 24`, and set it as `TRIGGERS_TOKEN` in `.env`. Restart Athena. It's not the dashboard's password: all it can do is start tasks you've made.
+2. Give a task the schedule `on arrive-home`, on the Tasks tab or by asking Athena. The task shows the address to call.
+3. In the Shortcuts app, under Automation, make one such as "When I arrive home" and set it to run immediately. Its one action is **Get contents of URL**:
+   - **URL:** your dashboard's address, then `/hooks/arrive-home`
+   - **Method:** POST
+   - **Header:** `Authorization` = `Bearer ` and your token
+   - **Request body (optional):** JSON, with `text`, to pass on anything that helps
+
+The task runs as soon as Athena isn't answering you. What comes with an event is given to the task as information, never instructions, and is cut short at 4,000 characters.
+
+The same event coming in again within a minute doesn't run its tasks again. Over 30 events in an hour (`[triggers] max_per_hour`) are refused, and so are requests after 10 wrong tokens in 10 minutes. An event no task waits for gets a 404 saying so, which helps when you're setting up a Shortcut.
+
+### Watching
+
+Ask Athena to keep an eye on something, such as "let me know when Claude finishes the bank project" or "tell me if gold drops below 4,000". It puts that on its watch list. Every `heartbeat_minutes` (30), if anything's on the list and you're not chatting, it checks everything on it in one go:
+
+- **What it checks with:** its tools, such as Claude's board, Markets or your email.
+- **What it tells you:** only what needs your attention, as a message that starts 👀. It stays quiet otherwise.
+- **Between checks:** it keeps a short note on each thing, such as the last price it saw, or that it's told you already.
+- **When it's over:** it takes things off the list once they've happened or stopped mattering. Each is watched for 14 days unless you say otherwise, up to 90.
+
+The **Tasks** tab shows the list, with each note, when it last checked and what came of it. You can add something to watch, take things off, or check now.
+
+The list costs nothing while it's empty, since there's no check. Checking uses tools that don't ask first. Tools that ask still ask you in Telegram, unless they're in `heartbeat_tools`. Athena only adds to the list while answering you, so a web page it reads on a task can't put things on it. `heartbeat_minutes = 0` turns checking off.
 
 **Skills from habits:** one of the examples on the Tasks tab looks back over the week with `recent_work`, which lists what Athena did and the tools it used for each, in order. Where it did the same kind of thing the same way three or more times, it suggests a skill for it. See [Skills](#skills).
 

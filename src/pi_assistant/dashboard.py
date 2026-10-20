@@ -71,8 +71,11 @@ from pi_assistant.memory import KINDS
 from pi_assistant.settings import EnvFile, Running, Settings, SettingsError
 from pi_assistant.status import StatusFeed
 from pi_assistant.status_api import wait_seconds
-from pi_assistant.tasks import EXAMPLES, NEVER_UNASKED, SCHEDULES
+from pi_assistant.tasks import EXAMPLES, NEVER_UNASKED, SCHEDULES, Scheduler
 from pi_assistant.tools import ToolError
+from pi_assistant.triggers import PREFIX as HOOKS
+from pi_assistant.triggers import Hooks
+from pi_assistant.watching import DEFAULT_DAYS
 from pi_assistant.webserver import HTTPError, Request, Response, Server
 
 if TYPE_CHECKING:
@@ -135,6 +138,9 @@ ROUTES = (
     (None, r"/api/skills(?:/(?P<which>.*))?", "_skills"),
     (None, r"/api/documents/(?P<action>.*)", "_documents"),
     (None, r"/api/tasks(?:/(?P<task>.*))?", "_tasks"),
+    ("POST", r"/api/watches", "_add_watch"),
+    ("POST", r"/api/watches/check", "_check_watches"),
+    ("DELETE", r"/api/watches/(?P<which>\d+)", "_stop_watching"),
 )
 _ROUTES = [(method, re.compile(path), handler) for method, path, handler in ROUTES]
 
@@ -147,6 +153,7 @@ class DashboardServer(Server):
         self.cfg = cfg
         self.feed = StatusFeed(services.status)
         self.settings = Settings(services.config.path, services.config.env_path)
+        self.hooks = Hooks(services.config.triggers, services.tasks)  # /hooks/<event> (triggers.py)
         self._files: dict[str, tuple[bytes, bytes, str]] = {}  # path: (body, gzipped, etag)
         self._failures: deque[float] = deque()
         self._lock = asyncio.Lock()  # one change at a time
@@ -225,6 +232,8 @@ class DashboardServer(Server):
         path, method = request.path, request.method
         if path == "/health":
             return Response("ok")
+        if path.startswith(HOOKS):  # events that start tasks: their own token, not the dashboard's password
+            return self.hooks.handle(request)
         if path in FILES:
             if method != "GET":
                 raise HTTPError(405, "Use GET.")
@@ -374,6 +383,35 @@ class DashboardServer(Server):
         except ValueError as exc:
             raise HTTPError(400, str(exc)) from None
         raise HTTPError(405, "There's nothing like that here.")
+
+    def _scheduler(self) -> Scheduler:
+        if self.s.tasks is None:
+            raise HTTPError(409, "Tasks are switched off ([tasks] enabled = false in config.toml).")
+        return self.s.tasks
+
+    def _add_watch(self, request: Request, method: str) -> Response:
+        scheduler, body = self._scheduler(), _body(request)
+        assert scheduler.watches is not None
+        try:
+            days = float(body.get("days") or DEFAULT_DAYS)
+            scheduler.watches.add(str(body.get("what") or ""), days, by="you")
+        except (TypeError, ValueError) as exc:
+            raise HTTPError(400, str(exc) or "days must be a number.") from None
+        scheduler.wake()
+        return _json(self.tasks())
+
+    def _check_watches(self, request: Request, method: str) -> Response:
+        self._scheduler().check_now()
+        return _json(self.tasks())
+
+    def _stop_watching(self, request: Request, method: str, which: str) -> Response:
+        scheduler = self._scheduler()
+        assert scheduler.watches is not None
+        try:
+            scheduler.watches.remove(int(which))
+        except ValueError as exc:
+            raise HTTPError(404, str(exc)) from None
+        return _json(self.tasks())
 
     async def _memory_suggestion(self, which: str, body: dict[str, Any]) -> dict[str, Any]:
         memory = self.s.memory
@@ -650,6 +688,10 @@ class DashboardServer(Server):
             "schedules": SCHEDULES,
             "examples": EXAMPLES,
             "quiet_minutes": scheduler.cfg.quiet_minutes,
+            "watching": scheduler.watching(),
+            # Events that start tasks, at /hooks/<event> (triggers.py): which tasks wait for each, and whether
+            # the token that lets them in is set.
+            "triggers": {"on": self.hooks.on, "events": scheduler.waiting_for()},
         }
 
     def tools(self) -> dict[str, Any]:

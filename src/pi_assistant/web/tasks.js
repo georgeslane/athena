@@ -48,11 +48,12 @@ function renderTasks() {
         h("div.card-head", {}, h("h2", { text: "Tasks" }), h("span.aside", { text: "What Athena does by itself" }), h("div.actions", {}, h("button.button.small.primary", { type: "button", text: "New task", onclick: () => newTask() }))),
         intro,
         list
-      )
+      ),
+      watchingCard(t.watching)
     )
   );
-  // While one is running or due, follow how it's going.
-  if (t.tasks.some((task) => task.status === "running" || task.waiting_for_you)) {
+  // While one is running or due, or Athena's checking what it's watching, follow how it's going.
+  if (t.tasks.some((task) => task.status === "running" || task.waiting_for_you) || t.watching.checking || t.watching.asked) {
     tasks_.timer = setTimeout(() => location.hash === "#tasks" && loadTasks().catch(() => {}), 3000);
   }
 }
@@ -89,9 +90,136 @@ function taskCard(task) {
       ? h("div.task-tools", {}, h("span.hint", { text: "Uses without asking:" }), h("div.chips", {}, task.allowed_tools.map((name) => h("span.chip", { text: name }))))
       : null,
     task.created_by === "athena" ? h("p.hint", { text: "Suggested by Athena, and allowed by you." }) : null,
+    task.event ? trigger(task.event) : null,
     last,
     h("div.tool-actions", {}, actions)
   );
+}
+
+// How to start a task that runs on an event: the address to call, and with what.
+function trigger(event) {
+  const on = state.tasks.triggers.on;
+  return h(
+    "details.task-last",
+    {},
+    h("summary", { text: on ? `Started by POST ${location.origin}/hooks/${event}` : "Triggers are off: set TRIGGERS_TOKEN in .env on the Pi" }),
+    h("p.hint", {
+      text:
+        `In an iPhone Shortcuts automation, such as “When I arrive home”, add “Get contents of URL”: ${location.origin}/hooks/${event}, ` +
+        "method POST, with a header Authorization: Bearer and your TRIGGERS_TOKEN. Add a JSON body with “text” to pass on anything that helps. " +
+        "Set the automation to run immediately. See the README, “Triggers”.",
+    })
+  );
+}
+
+// Things Athena keeps an eye on for you, checked together now and then.
+function watchingCard(w) {
+  const day_ = (ts) => clock(ts, { weekday: "short", day: "numeric", month: "short" });
+  const time_ = (ts) => clock(ts, { hour: "2-digit", minute: "2-digit" });
+  let about;
+  if (!w.every_minutes) about = "Checking is off: [tasks] heartbeat_minutes is 0.";
+  else if (w.checking) about = "Checking now.";
+  else if (w.asked) about = "Athena will check as soon as it's free.";
+  else {
+    const parts = [`Athena checks on all of these every ${plural(w.every_minutes, "minute")} when you're not chatting, and messages you only when something needs your attention.`];
+    if (w.last) parts.push(`Last checked at ${time_(w.last.at)}: ${w.last.outcome}.`);
+    if (w.next) parts.push(`Next at about ${time_(Math.max(w.next, Date.now() / 1000))}.`);
+    about = parts.join(" ");
+  }
+  const items = w.items.length
+    ? h(
+        "div.task-list",
+        {},
+        w.items.map((item) =>
+          h(
+            "article.task",
+            { "data-status": "active" },
+            h("p.task-instructions", { text: item.what }),
+            h("p.hint", { text: `Since ${day_(item.created)}, until ${day_(item.until)} · asked for by ${item.by === "you" ? "you" : "Athena, when you asked"}` }),
+            item.note ? h("p.task-said", { text: `Athena's note: ${item.note}` }) : null,
+            h("div.tool-actions", {}, h("button.button.small.danger", { type: "button", text: "Stop watching", onclick: (e) => stopWatching(e, item) }))
+          )
+        )
+      )
+    : h("p.empty", { text: "Nothing yet. Ask Athena, such as “let me know when Claude finishes the bank project”, or add something here." });
+  return h(
+    "section.card",
+    {},
+    h(
+      "div.card-head",
+      {},
+      h("h2", { text: "Watching" }),
+      h("span.aside", { text: "What Athena keeps an eye on" }),
+      h(
+        "div.actions",
+        {},
+        h("button.button.small", { type: "button", text: "Check now", disabled: !w.items.length || w.checking || !w.every_minutes, onclick: checkNow }),
+        h("button.button.small.primary", { type: "button", text: "Watch for…", onclick: newWatch })
+      )
+    ),
+    h("p.note", {}, icon("info"), h("span", { text: about })),
+    items
+  );
+}
+
+async function checkNow(event) {
+  event.target.disabled = true;
+  try {
+    state.tasks = await call("POST", "/api/watches/check", {});
+    renderTasks();
+    toast("Athena will check as soon as it's free.");
+  } catch (e) {
+    toast(e.message, true);
+    event.target.disabled = false;
+  }
+}
+
+async function stopWatching(event, item) {
+  event.target.disabled = true;
+  try {
+    state.tasks = await call("DELETE", `/api/watches/${item.id}`);
+    renderTasks();
+    toast("Stopped watching it.");
+  } catch (e) {
+    toast(e.message, true);
+    event.target.disabled = false;
+  }
+}
+
+function newWatch() {
+  const what = h("textarea", { required: true, rows: 3, maxLength: 300, placeholder: "When the parcel from Amazon has been delivered" });
+  const days = h("input", { type: "number", min: 1, max: 90, value: 14, required: true });
+  const error = h("p.form-error", { role: "alert" });
+  const dialog = document.getElementById("dialog");
+  const save = h("button.button.primary", { type: "submit", text: "Watch" });
+  const form = h(
+    "form.task-form",
+    {
+      onsubmit: async (event) => {
+        event.preventDefault();
+        save.disabled = true;
+        error.textContent = "";
+        try {
+          state.tasks = await call("POST", "/api/watches", { what: what.value, days: Number(days.value) });
+          dialog.close();
+          renderTasks();
+          toast("Watching it.");
+        } catch (e) {
+          error.textContent = e.message;
+          save.disabled = false;
+        }
+      },
+    },
+    h("h2", { text: "Watch for something" }),
+    h("label.field", {}, h("span.field-label", { text: "What to watch for" }), h("span.field-help", { text: "And when to tell you. Athena checks with the tools it has, such as your email, Claude's board or market prices." }), what),
+    h("label.field", {}, h("span.field-label", { text: "For how many days" }), days),
+    error,
+    h("div.tool-actions", {}, h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }), save)
+  );
+  dialog.onclose = null;
+  dialog.replaceChildren(form);
+  if (!dialog.open) dialog.showModal();
+  what.focus();
 }
 
 async function taskAction(event, task, action) {

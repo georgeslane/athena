@@ -33,6 +33,7 @@ from pi_assistant.status_api import StatusServer
 from pi_assistant.tasks import Scheduler, TaskStore
 from pi_assistant.tool_approvals import ToolApprovals
 from pi_assistant.tools import Tool, ToolRegistry
+from pi_assistant.watching import WatchStore
 
 if TYPE_CHECKING:
     from pi_assistant.channel import Channel
@@ -112,6 +113,7 @@ class Services:
                 channel=lambda: self.channel,
                 tools=self.tools.all,
                 on_ran=self.rewarm.set,  # your chat has the report in it now
+                watches=WatchStore(self.config.db_path),  # what it keeps an eye on for you (watching.py)
             )
             for tool in self.tasks.tools():
                 self.tools.add(tool)
@@ -233,6 +235,8 @@ class Services:
         if self.tasks:
             await self.tasks.stop()
             self.tasks.store.close()
+            if self.tasks.watches:
+                self.tasks.watches.close()
         self.skills.store.close()
         self.privacy.close()
         if self.dashboard:

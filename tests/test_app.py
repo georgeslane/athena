@@ -45,7 +45,15 @@ async def services(tmp_path):
 async def test_reloading_applies_the_tools_settings_from_config_toml(services, monkeypatch):
     names = lambda: {t.name for t in services.tools.all()}  # noqa: E731
     memory_and_tasks = {"remember", "search_memory", "read_document", "forget_memory"}
-    tasks_and_skills = {"schedule_task", "list_tasks", "change_task", "read_skill", "save_skill", "recent_work"}
+    tasks_and_skills = {
+        "watch",
+        "schedule_task",
+        "list_tasks",
+        "change_task",
+        "read_skill",
+        "save_skill",
+        "recent_work",
+    }
     assert names() == memory_and_tasks | tasks_and_skills | {"find_mcp_servers"}
     path = services.config.path
     path.write_text(CONFIG + '\n[news.feeds]\n"BBC" = "https://feeds.bbci.co.uk/news/rss.xml"\n')

@@ -153,6 +153,17 @@ class TasksConfig(_Section):
     max_tool_rounds: int = 25
     thinking: Literal["on", "short", "off"] | None = "on"  # tasks aren't in a hurry: None follows [llm]
     confirm_minutes: float = 60.0  # how long a task waits for you to allow a tool that asks first
+    # How often Athena checks on what you've asked it to watch (watching.py), all in one go. 0: never.
+    heartbeat_minutes: float = Field(default=30.0, ge=0)
+    heartbeat_tools: list[str] = Field(default_factory=list)  # ones that ask first, which checking needn't
+
+
+class TriggersConfig(_Section):
+    # Events that start tasks, from iPhone Shortcuts or anything else on your tailnet that can make an HTTP
+    # request (see README, "Triggers"). POST /hooks/<event> on the dashboard's address, with this token,
+    # runs the tasks whose schedule is "on <event>". Off until the token's set.
+    token: str = ""  # TRIGGERS_TOKEN in .env: sent as "Authorization: Bearer <token>"
+    max_per_hour: int = Field(default=30, ge=1)  # events taken in an hour, of every kind; more are refused
 
 
 class AlertsConfig(_Section):
@@ -231,6 +242,7 @@ class _Config(_Section):
     siri: SiriConfig = Field(default_factory=SiriConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+    triggers: TriggersConfig = Field(default_factory=TriggersConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
