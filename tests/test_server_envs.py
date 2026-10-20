@@ -146,6 +146,32 @@ async def test_a_reviewed_lock_is_used_when_it_matches(envs):
     assert (envs.root / "fake" / "uv.lock").read_text() == (reviewed / "uv.lock").read_text()
 
 
+async def test_a_changed_reviewed_lock_reaches_a_server_already_installed(envs):
+    """As when a dependency's security fix updates mcp-locks/, with the server's own version the same."""
+    server = UvxServer("athena-fake-server==1.0", "athena-fake-server")
+    await envs.prepare("fake", server)  # locked on first use, before there was a reviewed lock
+    assert envs.lock_origin("fake") == "first use"
+    stamp = envs.root / "fake" / ".venv" / ".athena-lock"
+    installed = stamp.read_text()
+
+    reviewed = envs.reviewed / "fake"
+    reviewed.mkdir(parents=True)
+    (reviewed / "pyproject.toml").write_text(project_text("fake", server))
+    (reviewed / "uv.lock").write_text((envs.root / "fake" / "uv.lock").read_text() + "# reviewed\n")
+    command = await envs.prepare("fake", server)
+    assert envs.lock_origin("fake") == "reviewed"
+    assert (envs.root / "fake" / "uv.lock").read_text() == (reviewed / "uv.lock").read_text()
+    assert stamp.read_text() != installed  # installed again, from the reviewed lock
+    assert Path(command[0]).exists()
+
+    (reviewed / "uv.lock").write_text((reviewed / "uv.lock").read_text() + "# a security fix\n")
+    await envs.prepare("fake", server)
+    assert (envs.root / "fake" / "uv.lock").read_text().endswith("# a security fix\n")
+
+    envs.uv = "/nonexistent/uv"  # and when nothing's changed, nothing's done
+    await envs.prepare("fake", server)
+
+
 @pytest.mark.parametrize(
     ("server", "error"),
     [
