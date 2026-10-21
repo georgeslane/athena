@@ -284,7 +284,7 @@ async def test_tasks_from_the_dashboard(athena):
         assert listing["tasks"] == [] and listing["tools"] == ["forget_memory"]  # the tools that ask first
         examples = [e["title"] for e in listing["examples"]]
         assert examples == ["Morning briefing", "MCP servers worth adding", "Skills from habits", "Research"]
-        assert listing["quiet_minutes"] == 5 and "weekdays 07:30" in listing["schedules"]
+        assert listing["quiet_minutes"] == 5 and "30 7 * * 1-5" in listing["schedules"]
 
         bad = await http.post("/api/tasks", json={"title": "X", "instructions": "Y", "schedule": "sometime"})
         assert bad.status_code == 400 and "I don't understand the schedule" in bad.json()["error"]
@@ -306,7 +306,7 @@ async def test_tasks_from_the_dashboard(athena):
         [task] = (await http.get("/api/tasks")).json()["tasks"]
         assert (task["status"], task["last_outcome"], task["last_result"]) == ("done", "told you", "All done.")
 
-        regular = {"title": "Daily", "instructions": "Check.", "schedule": "daily 07:30", "tools": []}
+        regular = {"title": "Daily", "instructions": "Check.", "schedule": "30 7 * * *", "tools": []}
         listing = (await http.post("/api/tasks", json=regular)).json()
         daily = listing["tasks"][1]
         assert daily["status"] == "active" and daily["next_run"] > time.time()

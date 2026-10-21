@@ -473,7 +473,16 @@ Athena can work on things by itself, then message you what it found: a briefing 
 - **You come first.** A task doesn't start while you're chatting with Athena, or within `quiet_minutes` (5) of your last message. If you are, it looks again after a minute, then two, four and so on, up to 15. Once it's running, a message from you stops what it's doing at once, so the Mac is yours, and it takes that step again once you've finished. Your replies aren't slowed down by it.
 - **What it tells you.** When a task is done, you get its findings as a message in Telegram, which also goes into your chat, so you can reply "tell me more about the second one". If there's nothing new, it stays quiet. The dashboard shows what each task said last time.
 - **Longer work.** A task gets more steps than a reply (`max_tool_rounds`, 25), up to `max_minutes` (30) of work, not counting time it waits for you, and thinks before answering whatever `/think` is set to (`thinking`).
-- **When.** `now`, `in 2h`, `once 2026-10-16 09:00`, `daily 07:30`, `weekdays 07:30`, `weekly mon,thu 18:00`, or `every 6h`, in your time zone (`[agent] timezone`). Or `on arrive-home`: each time that event comes in. See [Triggers](#triggers). A regular run that was missed by more than six hours, say while the Pi was off, is skipped to the next one.
+- **When.** Once: `now`, `in 2h`, `once 09:00` (the next 09:00) or `once 2026-10-16 09:00`. Regularly: a Unix cron schedule, with five fields for the minute, hour, day of the month, month and day of the week:
+  - `30 7 * * 1-5`: 07:30 on weekdays
+  - `0 18 * * mon,thu`: 18:00 on Mondays and Thursdays
+  - `0 */6 * * *`: every six hours, on the hour
+  - `0 9 1 * *`: 09:00 on the 1st of each month
+  - `@daily`, `@weekly`, `@monthly` and the like work too.
+
+  Each field is `*`, a number, a range (`1-5`), a list (`1,15`) or a step (`*/15`). Months and days can be names. When both the day of the month and the day of the week are given, either will do, as in cron. A task runs at most every 15 minutes. Times are in your time zone (`[agent] timezone`): one skipped as the clocks go forward doesn't run, and one that happens twice as they go back runs once. Or `on arrive-home`: each time that event comes in. See [Triggers](#triggers). A regular run that was missed by more than six hours, say while the Pi was off, is skipped to the next one.
+
+  Tasks from before cron, with schedules like `daily 07:30` or `every 6h`, are given the cron schedule that does the same when Athena starts, keeping to when they were next due. One cron can't say, like `every 90m`, gets the nearest that runs no more often (every two hours), and Athena tells you in Telegram.
 - **What it may do.**
   - A task Athena suggests needs your OK: scheduling one asks first, and the message shows what it'll do, when, and the tools it may use without asking.
   - Tasks you add on the dashboard are yours already.
@@ -685,6 +694,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, as a table of routes, and the page itself: plain HTML, CSS and JavaScript modules, with no build step. `dashboard.js` starts it, `core.js` has what the tabs share, and each tab has a module of its own |
 | `src/pi_assistant/tasks.py`, `channel.py` | Tasks Athena does by itself, and how it reaches you about them |
+| `src/pi_assistant/cron.py` | Cron schedules: parsing them, when they're next due, and saying them in words |
 | `src/pi_assistant/claude_projects.py`, `deploy/zeus-solutions/` | Handing coding projects to Claude through GitHub, the board of them, and the guide for Claude's side |
 | `src/pi_assistant/project_files.py`, `github_repo.py` | A project's Requirements.md and status.json, and the client for its GitHub repository |
 | `src/pi_assistant/skills.py` | Skills: kept with every version, Athena's suggestions, and the tools to read and write them |

@@ -512,8 +512,8 @@ async def test_tasks_lists_them_with_buttons_to_run_pause_and_delete(config):
     await bot.cmd_tasks(update, ctx)
     assert replies[-1].text.startswith("I've no tasks.")
 
-    scheduler.add("Briefing", "Brief me.", "weekdays 07:30", [], created_by="you")
-    scheduler.add("Servers", "Find servers.", "weekly sun 10:00", [], created_by="athena")
+    scheduler.add("Briefing", "Brief me.", "30 7 * * 1-5", [], created_by="you")
+    scheduler.add("Servers", "Find servers.", "0 10 * * sun", [], created_by="athena")
     scheduler.pause(2)
     await bot.cmd_tasks(update, ctx)
     lines = replies[-1].text.split("\n")

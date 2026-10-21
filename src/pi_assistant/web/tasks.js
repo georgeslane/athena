@@ -250,7 +250,7 @@ function newTask(example) {
   const title = h("input", { type: "text", maxLength: 120, required: true, value: example ? example.title : "" });
   const instructions = h("textarea", { required: true, rows: 5, value: example ? example.instructions : "" });
   instructions.value = example ? example.instructions : "";
-  const schedule = h("input", { type: "text", required: true, value: example ? example.schedule : "", placeholder: "weekdays 07:30", autocapitalize: "none", spellcheck: false });
+  const schedule = h("input", { type: "text", required: true, value: example ? example.schedule : "", placeholder: "30 7 * * 1-5", autocapitalize: "none", spellcheck: false });
   const tools = t.tools.map((name) => h("label", {}, h("input", { type: "checkbox", value: name }), h("span", { text: name })));
   const error = h("p.form-error", { role: "alert" });
   const dialog = document.getElementById("dialog");
