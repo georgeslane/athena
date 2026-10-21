@@ -718,7 +718,7 @@ class TelegramBot:
         lines = [header]
         for f in found:
             text = f.text if len(f.text) < 300 else f.text[:300] + "..."
-            score = f" ({1 - f.distance:.2f})" if query else ""
+            score = f" ({1 - f.distance:.2f})" if query and f.distance is not None else ""
             # A document goes by its path: its passages come and go with it when you index, so /forget isn't for them.
             label = f"📄 {memory.show_path(f.path)}" if f.kind == "document" and f.path else f"#{f.id}"
             lines.append(f"{label}{score} {text}")

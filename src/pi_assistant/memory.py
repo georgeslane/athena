@@ -11,6 +11,11 @@ Documents and conversations are searched only when the model asks (``search_memo
 a document is too long to add to every message, and an old answer could be mistaken for a
 current one.
 
+Searches are by meaning and by words together (``find``): every entry is also in a full-text
+index (SQLite's FTS5), which finds exact names, numbers and references that meaning can miss,
+and the two rankings are merged. Words still find things when the embeddings server can't be
+reached. Facts recalled automatically are by meaning alone, as only close ones should be shown.
+
 Facts Athena wants to remember while it works by itself, on a task, are suggestions until you
 approve them on the dashboard: what it read could have put them there, and they'd be shown to
 it in every conversation after.
@@ -49,6 +54,10 @@ DOCUMENTS_HOME = "documents_home"  # memory_meta: the home folder on the Mac doc
 READ_CHARS = 5000  # how much of a document read_document returns at a time
 ICLOUD_PATH, ICLOUD_DRIVE = "~/Library/Mobile Documents/com~apple~CloudDocs", "iCloud Drive"
 TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".text", ".org", ".rst"}
+WORDS_TABLE = "memory_words"  # the full-text index of every entry's text
+# Words are matched without case, accents or endings (porter): "Café birthdays" finds "cafe birthday".
+WORDS_TOKENIZER = "porter unicode61 remove_diacritics 2"
+FUSION_K = 60  # reciprocal rank fusion's constant: how much a top rank counts for over a lower one
 
 
 class MemoryStoreError(Exception):
@@ -113,11 +122,12 @@ class Found:
     """Something a search found: a fact, a past conversation, or a document by its best passage."""
 
     kind: Kind
-    distance: float
+    distance: float | None  # None: found by its words while meaning couldn't be searched
     text: str
     id: int | None = None  # facts and conversations
     path: str | None = None  # documents
     saved: str = ""  # the date it was saved, or for a document, the date it last changed
+    words: bool = False  # it has the words searched for
 
 
 @dataclass
@@ -138,7 +148,7 @@ class MemoryHit:
     source: str | None
     text: str
     created_at: str
-    distance: float
+    distance: float | None  # None: found by its words, without the query's embedding to measure it by
 
 
 @dataclass
@@ -176,6 +186,7 @@ class MemoryStore:
         self._allow_model_change = allow_model_change
         self._conn = connect_db(db_path, vectors=True)
         self._lock = threading.Lock()
+        self.words = True  # the full-text index works: False if this SQLite was built without FTS5
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -216,6 +227,7 @@ class MemoryStore:
                     f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} "
                     f"USING vec0(embedding float[{self.dimensions}] distance_metric=cosine)"
                 )
+            self._init_words()
             # Documents used to share facts' index: move any that are still there into their own.
             for (memory_id,) in self._conn.execute("SELECT id FROM memories WHERE kind = 'document'").fetchall():
                 row = self._conn.execute(
@@ -243,6 +255,37 @@ class MemoryStore:
                     f"'{self.embedding_model}'. To switch, run "
                     f"`bash scripts/switch-embeddings.sh {self.embedding_model}`, which re-embeds everything."
                 )
+
+    def _init_words(self) -> None:
+        """The full-text index, kept in step with ``memories`` by triggers; built from it if it's new."""
+        new = not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (WORDS_TABLE,)).fetchone()
+        try:
+            self._conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {WORDS_TABLE} USING fts5(text, content='memories', "
+                f"content_rowid='id', tokenize='{WORDS_TOKENIZER}')"
+            )
+        except sqlite3.OperationalError as exc:  # no FTS5: search by meaning alone, and keep saving memories
+            log.warning("Searching memory by its words is off: this SQLite can't (%s)", exc)
+            self.words = False
+            for trigger in ("insert", "delete", "update"):
+                self._conn.execute(f"DROP TRIGGER IF EXISTS memories_words_{trigger}")
+            return
+        self._conn.executescript(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS memories_words_insert AFTER INSERT ON memories BEGIN
+                INSERT INTO {WORDS_TABLE} (rowid, text) VALUES (new.id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_words_delete AFTER DELETE ON memories BEGIN
+                INSERT INTO {WORDS_TABLE} ({WORDS_TABLE}, rowid, text) VALUES ('delete', old.id, old.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_words_update AFTER UPDATE OF text ON memories BEGIN
+                INSERT INTO {WORDS_TABLE} ({WORDS_TABLE}, rowid, text) VALUES ('delete', old.id, old.text);
+                INSERT INTO {WORDS_TABLE} (rowid, text) VALUES (new.id, new.text);
+            END;
+            """
+        )
+        if new:  # memories from before there was one
+            self._conn.execute(f"INSERT INTO {WORDS_TABLE} ({WORDS_TABLE}) VALUES ('rebuild')")
 
     def get_meta(self, key: str) -> str | None:
         with self._lock:
@@ -314,6 +357,33 @@ class MemoryStore:
             ]
         return sorted((h for h in hits if h.kind in kinds), key=lambda h: h.distance)[:k]
 
+    def search_words(
+        self, words: str, k: int, kinds: Sequence[Kind], embedding: Sequence[float] | None = None
+    ) -> list[MemoryHit]:
+        """The ``k`` entries of these kinds that best match ``words``, an FTS5 query (see ``words_query``), best
+        first. Each is measured against ``embedding`` too, if it's given, so it has a distance like any other."""
+        if not self.words:
+            return []
+        marks = ", ".join("?" * len(kinds))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT m.id, m.kind, m.source, m.text, m.created_at FROM {WORDS_TABLE} AS w "
+                f"JOIN memories AS m ON m.id = w.rowid WHERE {WORDS_TABLE} MATCH ? AND m.kind IN ({marks}) "
+                f"ORDER BY bm25({WORDS_TABLE}) LIMIT ?",
+                (words, *kinds, k),
+            ).fetchall()
+            hits = [MemoryHit(*row, distance=None) for row in rows]
+            if embedding is not None:
+                query = sqlite_vec.serialize_float32(list(embedding))
+                for hit in hits:
+                    row = self._conn.execute(
+                        f"SELECT vec_distance_cosine(embedding, ?) FROM {VECTOR_TABLES[hit.kind]} "  # type: ignore[index]
+                        "WHERE rowid = ?",
+                        (query, hit.id),
+                    ).fetchone()
+                    hit.distance = row[0] if row else None
+        return hits
+
     def get(self, memory_id: int) -> MemoryHit | None:
         with self._lock:
             row = self._conn.execute(
@@ -354,6 +424,10 @@ class MemoryStore:
                     """
                     PRAGMA secure_delete = ON;
                     BEGIN IMMEDIATE;
+                    DROP TRIGGER IF EXISTS memories_words_insert;
+                    DROP TRIGGER IF EXISTS memories_words_delete;
+                    DROP TRIGGER IF EXISTS memories_words_update;
+                    DROP TABLE IF EXISTS memory_words;
                     DROP TABLE IF EXISTS memory_vectors;
                     DROP TABLE IF EXISTS conversation_vectors;
                     DROP TABLE IF EXISTS document_vectors;
@@ -489,11 +563,65 @@ class MemoryStore:
         self._conn.close()
 
 
+# Words too common to tell anything apart, left out of a search by words.
+STOPWORDS = frozenset(
+    "a about all an and any are as at be been but by can could did do does for from had has have how i if in into "
+    "is it its me my no not of on or our so some than that the their them then there these they this to us was we "
+    "were what when where which who why will with would you your".split()
+)
+_TOKEN = re.compile(r"[^\W_]+")  # as the index's tokenizer splits text: letters and digits
+_POSSESSIVE = re.compile(r"['’]s\b")
+_PARTS = re.compile(r'"([^"]*)"|(\S+)')
+MAX_WORDS = 12
+
+
+def words_query(query: str) -> str | None:
+    """An FTS5 query for searching ``query`` by its words: any of them, ranked by how many an entry has and how
+    rare they are. Parts in double quotes are phrases an entry must have. None if there's nothing to search for.
+
+    Only letters and digits get through, each word quoted, so nothing in ``query`` is read as FTS5's own syntax.
+    """
+    phrases: list[list[str]] = []
+    words: list[list[str]] = []
+    for quoted, bare in _PARTS.findall(query):
+        if quoted:
+            if tokens := _TOKEN.findall(quoted.lower()):
+                phrases.append(tokens)
+            continue
+        tokens = _TOKEN.findall(_POSSESSIVE.sub("", bare).lower())
+        if len(tokens) > 1:  # such as AAPL_US_EQ or an email address: its parts together
+            words.append(tokens)
+        elif tokens and tokens[0] not in STOPWORDS and (len(tokens[0]) > 1 or tokens[0].isdigit()):
+            words.append(tokens)
+    chosen, join = (phrases, " AND ") if phrases else (list({" ".join(w): w for w in words}.values()), " OR ")
+    if not chosen:
+        return None
+    return join.join('"' + " ".join(tokens) + '"' for tokens in chosen[:MAX_WORDS])
+
+
+def fuse(*rankings: Sequence[MemoryHit]) -> list[MemoryHit]:
+    """Rankings of the same entries merged into one, by reciprocal rank fusion: an entry high in either, or fairly
+    high in both, comes first. Each entry is kept as the first ranking with it has it."""
+    scores: dict[int, float] = {}
+    hits: dict[int, MemoryHit] = {}
+    for ranking in rankings:
+        for rank, hit in enumerate(ranking):
+            scores[hit.id] = scores.get(hit.id, 0.0) + 1 / (FUSION_K + rank + 1)
+            hits.setdefault(hit.id, hit)
+    return sorted(hits.values(), key=lambda h: -scores[h.id])
+
+
 def _title(entry: MemoryHit) -> str:
     """The title an entry is embedded with (see EmbeddingsConfig.document_prefix)."""
     if entry.kind == "document" and entry.source:
         return Path(entry.source).stem
     return "conversation" if entry.kind == "conversation" else "none"
+
+
+def relevance(found: Found) -> float | None:
+    """How close in meaning something found is to what was searched for, from 1 down: None if it was found by its
+    words alone."""
+    return None if found.distance is None else round(1 - found.distance, 3)
 
 
 def conversation_text(exchange: Exchange, limit: int) -> str:
@@ -624,20 +752,34 @@ class MemoryService:
         return [h for h in hits if h.distance <= self.cfg.recall_max_distance]
 
     async def find(self, query: str, limit: int | None = None, kind: Kind | None = None) -> list[Found]:
-        """What a search finds, for the model and the dashboard: each document once, by its best passage."""
+        """What a search by meaning and by words finds, for the model and the dashboard: each document once, by its
+        best passage. If meaning can't be searched (the embeddings server is down), what has the words is found."""
         limit = limit or self.cfg.search_top_k
-        hits = await self.search(query, limit * 5, kind)  # a document's passages are folded into one below
+        candidates = limit * 5  # a document's passages are folded into one below
+        kinds = (kind,) if kind else KINDS
+        words = words_query(query) if self.store.words else None
+        try:
+            vector: list[float] | None = await self.embedder.embed_one(query, "query")
+        except Exception as exc:
+            if not words:
+                raise
+            log.warning("Searching memory by its words alone: couldn't by meaning (%s)", exc)
+            vector = None
+        by_meaning = self.store.search(vector, candidates, kinds) if vector is not None else []
+        by_words = self.store.search_words(words, candidates, kinds, vector) if words else []
+        matched = {hit.id for hit in by_words}
         indexed = self.store.documents()
         found: list[Found] = []
         files: set[str] = set()
-        for hit in hits:
+        for hit in fuse(by_meaning, by_words):
+            has = hit.id in matched
             if hit.kind != "document":
-                found.append(Found(hit.kind, hit.distance, hit.text, id=hit.id, saved=hit.created_at[:10]))
+                found.append(Found(hit.kind, hit.distance, hit.text, id=hit.id, saved=hit.created_at[:10], words=has))
             elif hit.source and hit.source not in files:
                 files.add(hit.source)
                 doc = indexed.get(hit.source)
                 changed = datetime.fromtimestamp(doc.modified).date().isoformat() if doc else hit.created_at[:10]
-                found.append(Found("document", hit.distance, hit.text, path=hit.source, saved=changed))
+                found.append(Found("document", hit.distance, hit.text, path=hit.source, saved=changed, words=has))
         return found[:limit]
 
     def show_path(self, path: str, home: str | None = None) -> str:
@@ -665,19 +807,15 @@ class MemoryService:
         raise ValueError(f"There's no document called {name} in memory. Use search_memory to find one.")
 
     def _describe(self, found: Found) -> dict[str, Any]:
-        relevance = round(1 - found.distance, 3)
+        # How close in meaning (None if that couldn't be searched), and whether it has the words searched for.
+        scores: dict[str, Any] = {"relevance": relevance(found), **({"has_the_words": True} if found.words else {})}
         if found.kind == "document":
             assert found.path
             passage = found.text if len(found.text) <= 600 else found.text[:599].rstrip() + "…"
-            return {
-                "kind": "document",
-                "file": self.show_path(found.path),
-                "changed": found.saved,
-                "relevance": relevance,
-                "passage": passage,
-            }
+            return {"kind": "document", "file": self.show_path(found.path), "changed": found.saved, **scores,
+                    "passage": passage}  # fmt: skip
         text = found.text if len(found.text) <= 800 else found.text[:799].rstrip() + "…"
-        return {"kind": found.kind, "id": found.id, "text": text, "saved": found.saved, "relevance": relevance}
+        return {"kind": found.kind, "id": found.id, "text": text, "saved": found.saved, **scores}
 
     def forget(self, memory_id: int) -> bool:
         return self.store.delete(memory_id)
@@ -804,9 +942,10 @@ class MemoryService:
             Tool(
                 name="search_memory",
                 description=(
-                    "Search long-term memory by meaning: facts the user has told you, your past conversations with "
-                    "them (dated when they were said), and their documents (files indexed from their Mac, each "
-                    "with its path and best passage)."
+                    "Search long-term memory by meaning and by words: facts the user has told you, your past "
+                    "conversations with them (dated when they were said), and their documents (files indexed from "
+                    "their Mac, each with its path and best passage). Put a name, number or phrase that must be "
+                    'there exactly in double quotes, like "Project Nimbus".'
                 ),
                 parameters={
                     "type": "object",
