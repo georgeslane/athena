@@ -25,6 +25,9 @@ enabled = false
 
 [dashboard]
 enabled = false
+
+[code]
+enabled = false  # it's there only on Linux: off, so these tests count the same tools everywhere
 """
 
 

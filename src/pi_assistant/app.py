@@ -23,6 +23,7 @@ from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.privacy import Privacy, TermStore
+from pi_assistant.run_code import clear_workspace
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.server_security import ServerSecurity
@@ -333,7 +334,8 @@ class Services:
         return session
 
     async def forget_everything(self) -> Session:
-        """Delete every memory and the conversation history, and start a new session. Usage statistics stay."""
+        """Delete every memory, the conversation history and the code's workspace, and start a new session. Usage
+        statistics stay."""
         if self.tasks:
             self.tasks.stop_running()  # it would save what it's doing after everything's deleted
             self.tasks.reviews.clear()  # they hold what was said
@@ -345,6 +347,7 @@ class Services:
             await self.documents.stop()
             await asyncio.to_thread(self.memory.store.clear)
             session = await asyncio.to_thread(self.history.clear)
+            await asyncio.to_thread(clear_workspace, self.config)  # what code made from what was said
         self.rewarm.set()
         return session
 

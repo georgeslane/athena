@@ -8,6 +8,15 @@ from pi_assistant.databases import Databases
 from pi_assistant.markets import Markets
 from pi_assistant.mcp_registry import MCPRegistry
 from pi_assistant.news import NewsReader
+from pi_assistant.run_code import CodeRunner
 from pi_assistant.trading212 import Trading212
 
-BUILTINS: tuple[type[Builtin], ...] = (NewsReader, Markets, Trading212, Databases, MCPRegistry, ClaudeProjects)
+BUILTINS: tuple[type[Builtin], ...] = (
+    NewsReader,
+    Markets,
+    Trading212,
+    Databases,
+    CodeRunner,
+    MCPRegistry,
+    ClaudeProjects,
+)

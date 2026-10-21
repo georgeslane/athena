@@ -40,6 +40,9 @@ enabled = false
 [dashboard]
 port = 0
 
+[code]
+enabled = false  # it's there only on Linux: off, so these tests count the same tools everywhere
+
 [news.feeds]
 "BBC News" = "https://feeds.bbci.co.uk/news/rss.xml"
 

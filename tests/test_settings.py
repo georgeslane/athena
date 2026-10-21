@@ -101,6 +101,7 @@ def test_everything_is_listed_without_secret_values(setup, monkeypatch):
         "markets",
         "trading212",
         "databases",
+        "code",
         "mcp_registry",
         "claude_projects",
         "time",
