@@ -16,7 +16,7 @@ dependencies = [
     "tomlkit>=0.13",
     "yfinance>=1.7,<2",
     "packaging>=24",
-    "pypdf>=6",
+    "pypdf>=6.21.1",
     "fpdf2>=2.8",
     "markdown-it-py>=3",
 ]
@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 # The read-only files server that runs on your Mac (scripts/mac/install.sh): reading PDFs.
 mac = [
-    "pypdf>=6",
+    "pypdf>=6.21.1",
 ]
 
 [project.scripts]
@@ -34,7 +34,7 @@ pi-assistant = "pi_assistant.cli:main"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "pypdf>=6",  # the Mac files server's tests read a real PDF
+    "pypdf>=6.21.1",  # the Mac files server's tests read a real PDF
     "ruff==0.17.1",  # exact, so a new release's rules can't fail CI by themselves
 ]
 

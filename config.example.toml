@@ -225,6 +225,8 @@ reply_timeout_seconds = 20             # Siri gives up after about 25s; slower a
 #                     off your network; set [] only for servers that can't)
 #   arguments = {...} arguments Athena gives the tools itself, which the model
 #                     isn't shown, such as which account to use
+#   about = "..."     what the server is, for the model, when its tools don't
+#                     say, such as whose account they use
 # Local servers run in a sandbox, without your home folder (README, "Sandbox"):
 #   network = false   no network access either (default: true)
 #   read_only_paths = [...]   files or folders it may read
@@ -264,6 +266,7 @@ command = "ssh"
 args = ["athena-mac", "apple"]
 include = ["calendars_list", "events_fetch", "events_create", "reminders_lists", "reminders_fetch", "reminders_create"]
 confirm = ["events_create", "reminders_create"]   # adding things asks first; deleting isn't possible
+about = "The user's own calendars and reminders, on their Mac."
 
 # GitHub, read-only, through GitHub's own hosted server. GITHUB_TOKEN in .env should be
 # a fine-grained token with only "Public repositories (read-only)" access. Lockdown
@@ -294,6 +297,7 @@ args = ["mcp-email-server==1.11.0", "stdio"]
 include = ["list_emails_metadata", "get_emails_content", "send_email"]
 confirm = ["send_email"]
 arguments = { account_name = "athena" }   # Athena names its account, so the model needn't
+about = "Your own inbox, not the user's: they forward you mail they want you to read or keep an eye on."
 
 [mcp_servers.email.env]
 MCP_EMAIL_SERVER_ACCOUNT_NAME = "athena"

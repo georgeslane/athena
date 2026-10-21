@@ -111,7 +111,7 @@ It needs a model that can see, such as Qwen 3.6 35B-A3B. Some MLX conversions of
 A web page for Athena, on your iPhone or Mac. It has six tabs:
 
 - **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory. Under Connections, **Thinking** switches the model's thinking on, short or off, as `/think` does.
-- **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, change, run, pause, resume or delete them, and read what each said last time. See [Tasks](#tasks).
+- **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, change, run, pause, resume or delete them, and see what each said and did last time. See [Tasks](#tasks).
 - **Memory:** what Athena wanted to remember while it worked by itself, to save, change or discard. Search what it remembers, your past conversations and your documents, by meaning and by words. Choose the folders on your Mac to index, and index them: see [Documents](#documents). List your private words, which tools can't send where nothing about you should go: see [Privacy](#privacy).
 - **Skills:** read, write, change and delete skills, see each one's history and go back to an earlier version, and approve, change or discard the skills and changes Athena suggests, shown line by line. See [Skills](#skills).
 - **Board:** the coding projects Athena has handed to Claude, each an epic with its stories in To do, In progress and Done, as Claude reports them. See [Projects for Claude](#projects-for-claude).
@@ -140,7 +140,7 @@ Athena keeps the conversation going from one message to the next, so each reply 
 
 **Context** on the dashboard is what Athena reads before your next message: the system prompt, the tools' descriptions and this session's conversation. Athena measures it after each reply, when it warms up the model server's cache. The limit comes from the model server. If yours doesn't say, set `llm.context_window` in `config.toml`.
 
-**Forget everything**, under Memory, deletes every memory: saved facts, the chunks of your notes, past exchanges and the conversation history, and empties the code's folder. It also starts a new session. Usage statistics stay, because they're only counts and timings.
+**Forget everything**, under Memory, deletes every memory: saved facts, the chunks of your notes, past exchanges and the conversation history, what tasks and checks last found and did, and Athena's notes on what it's watching, and empties the code's folder. The tasks, and what's watched, stay. It also starts a new session. Usage statistics stay, because they're only counts and timings.
 
 ## Status board
 
@@ -225,6 +225,7 @@ Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has eithe
 - `include`, `exclude` and `confirm` take glob patterns matched against the server's tool names.
 - `confirm` lists the tools that ask for your approval before they run. It defaults to `["*"]`, every tool, because any tool might send your data off your network. If you narrow it to some tools, use `include` too, so tools you haven't checked can't run without asking.
 - `arguments` are arguments Athena gives the server's tools itself, such as `{ account_name = "athena" }` for the email server. The model isn't shown them, so it can't get them wrong or choose others.
+- `about` is a line telling the model what the server is, when its tools don't say, such as that the email inbox is Athena's own, not yours. It goes at the end of the system prompt, beside the names of the server's tools.
 - `headers` adds HTTP headers, such as an auth token.
 - `env` passes extra environment variables to a local server. Local servers otherwise get only a minimal environment, so your Telegram token isn't exposed to them.
 - `enabled = false` keeps a server's settings without starting it.
@@ -521,7 +522,7 @@ EmbeddingGemma 2 can't run on the Pi itself yet: Ollama's builds of it need its 
 Athena can work on things by itself, then message you what it found: a briefing every weekday at 7:30, research into something while you get on with your day, or a weekly look through the [MCP Registry](https://registry.modelcontextprotocol.io) for servers that would help with what you've been asking about. Ask it in Telegram, such as "every Sunday, look for MCP servers I'd find useful", or add one on the dashboard's **Tasks** tab, which has examples to start from.
 
 - **You come first.** A task doesn't start while you're chatting with Athena, or within `quiet_minutes` (5) of your last message. If you are, it looks again after a minute, then two, four and so on, up to 15. Once it's running, a message from you stops what it's doing at once, so the Mac is yours, and it takes that step again once you've finished. Your replies aren't slowed down by it.
-- **What it tells you.** When a task is done, you get its findings as a message in Telegram, which also goes into your chat, so you can reply "tell me more about the second one". If there's nothing new, it stays quiet. The dashboard shows what each task said last time.
+- **What it tells you.** When a task is done, you get its findings as a message in Telegram, which also goes into your chat, so you can reply "tell me more about the second one". If there's nothing new, it stays quiet. The dashboard shows what each task said last time, and each tool it used: what it was given, what came back, and whether it failed or you declined it.
 - **Longer work.** A task gets more steps than a reply (`max_tool_rounds`, 25), up to `max_minutes` (30) of work, not counting time it waits for you, and thinks before answering whatever `/think` is set to (`thinking`).
 - **When.** Once: `now`, `in 2h`, `once 09:00` (the next 09:00) or `once 2026-10-16 09:00`. Regularly: a Unix cron schedule, with five fields for the minute, hour, day of the month, month and day of the week:
   - `30 7 * * 1-5`: 07:30 on weekdays
@@ -564,9 +565,9 @@ Ask Athena to keep an eye on something, such as "let me know when Claude finishe
 - **What it checks with:** its tools, such as Claude's board, Markets or your email.
 - **What it tells you:** only what needs your attention, as a message that starts 👀. It stays quiet otherwise.
 - **Between checks:** it keeps a short note on each thing, such as the last price it saw, or that it's told you already.
-- **When it's over:** it takes things off the list once they've happened or stopped mattering. Each is watched for 14 days unless you say otherwise, up to 90.
+- **When it's over:** it takes things off the list once they've happened or stopped mattering. Each is watched for 14 days unless you say otherwise, or with no end, such as "check my inbox every time".
 
-The **Tasks** tab shows the list, with each note, when it last checked and what came of it. You can add something to watch, take things off, or check now.
+The **Tasks** tab shows the list, with each note, when it last checked, what came of it and the tools it used. You can add something to watch, change it, take it off, or check now.
 
 The list costs nothing while it's empty, since there's no check. Checking uses tools that don't ask first. Tools that ask still ask you in Telegram, unless they're in `heartbeat_tools`. Athena only adds to the list while answering you, so a web page it reads on a task can't put things on it. `heartbeat_minutes = 0` turns checking off.
 

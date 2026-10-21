@@ -407,7 +407,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .danger-zone { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 .danger-zone p { flex: 1 1 200px; }
 
-.sign-out { display: block; margin: 24px auto 0; }
 
 /* -- buttons and fields --------------------------------------------------------------------------- */
 
@@ -444,7 +443,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .field { display: grid; gap: 5px; min-width: 0; }
 .field-label { font-size: 13px; font-weight: 600; }
 .field-help { font-size: 12.5px; color: var(--muted); }
-input[type="text"], input[type="password"], input[type="url"], select, textarea {
+input[type="text"], input[type="password"], input[type="url"], input[type="date"], select, textarea {
   width: 100%;
   min-height: 40px;
   padding: 8px 11px;
@@ -454,6 +453,7 @@ input[type="text"], input[type="password"], input[type="url"], select, textarea 
   font-size: 16px; /* 16px stops iOS zooming in when you tap a field */
 }
 textarea { min-height: 76px; resize: vertical; font-family: var(--font-mono); font-size: 14px; }
+.task-form textarea { font-family: var(--font); font-size: 16px; } /* what you ask Athena, in words: not code */
 input::placeholder, textarea::placeholder { color: var(--faint); }
 input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 0; border-color: var(--accent); }
 select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 32px; }
@@ -558,6 +558,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .server-tool.off .name { color: var(--muted); }
 
 .on-demand > .hint { margin-bottom: 10px; }
+.on-demand-list > summary { font-size: 13.5px; font-weight: 600; color: var(--accent); cursor: pointer; }
+.on-demand-list[open] > summary { margin-bottom: 10px; }
 .on-demand .actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 .on-demand-tool { display: grid; grid-template-columns: minmax(0, 1fr) 56px 44px 64px; gap: 10px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--border); }
 .on-demand-tool.head { border-top: 0; background: var(--surface-2); font-size: 11.5px; font-weight: 650; color: var(--muted); letter-spacing: 0.04em; }
@@ -630,7 +632,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .results { display: grid; gap: 10px; margin-top: 14px; }
 .privacy { display: grid; gap: 8px; margin-top: 12px; }
 .terms { overflow: auto; max-height: 50vh; }
-.search.try { grid-template-columns: minmax(0, 1fr) auto; margin-top: 14px; }
+.search.try { grid-template-columns: minmax(0, 1fr) auto; margin-top: 8px; }
 .search.try input[type="search"] { grid-column: auto; }
 .findings { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
 .findings strong { overflow-wrap: anywhere; }
@@ -674,8 +676,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 }
 
 /* Tasks: what Athena does by itself. */
-.task-list { display: grid; gap: 10px; margin-top: 12px; }
-.task { display: grid; gap: 7px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); min-width: 0; }
+.task-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-top: 12px; }
+.task { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); min-width: 0; }
 .task-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .task-head h3 { font-size: 15.5px; margin: 0; overflow-wrap: anywhere; }
 .task-state { margin-left: auto; font-size: 12px; font-weight: 650; padding: 1px 8px; border-radius: 7px; color: var(--muted); background: var(--surface); }
@@ -686,6 +688,26 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .task-instructions { font-size: 14px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .task-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .task-last summary { font-size: 13px; color: var(--muted); cursor: pointer; }
+.task > *, .task-last > *, .steps > *, .step-list > *, .step details > * { min-width: 0; } /* a long step mustn't widen the card */
+.check-last { margin-bottom: 4px; }
+.check-last .step summary, .check-last .step-io pre, .check-last .task-said { background: var(--surface-2); }
+.until { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.until input[type="date"] { width: auto; min-height: 40px; }
+.until input:disabled { opacity: 0.5; }
+
+/* What a task's run, or a check, did: the tools it used, each opening to what went in and came back. */
+.steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 10px; }
+.step-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.step summary { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 5px 8px; border-radius: 8px; background: var(--surface); font-size: 13px; cursor: pointer; list-style: none; }
+.step summary::-webkit-details-marker { display: none; }
+.step-mark { flex: none; width: 1em; text-align: center; font-weight: 700; color: var(--idle); }
+.step[data-outcome="failed"] .step-mark, .step[data-outcome="failed"] .step-outcome { color: var(--failed); }
+.step[data-outcome="declined"] .step-mark, .step[data-outcome="declined"] .step-outcome { color: var(--approval); }
+.step-tool { flex: none; font-weight: 600; }
+.step-outcome { flex: none; font-size: 12px; font-weight: 600; }
+.step-given { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
+.step-io { display: grid; gap: 3px; margin: 6px 0 4px 26px; }
+.step-io pre { margin: 0; padding: 7px 9px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); font: 12px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
 .task-said { font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--surface); }
 .task-form { display: grid; gap: 12px; min-width: 0; }
 .task-form fieldset { border: 0; padding: 0; margin: 0; }
@@ -756,3 +778,5 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 }
 .story-forms { display: grid; gap: 10px; }
 .story-form { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); min-width: 0; }
+
+.try-head { display: grid; gap: 2px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }

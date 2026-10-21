@@ -127,6 +127,44 @@ async def test_a_new_session_and_forgetting_everything(services):
     assert services.history.load("chat")[-1]["content"] == "OK."
 
 
+async def test_forgetting_everything_forgets_what_tasks_found_but_keeps_them(services):
+    task = services.tasks.add("Inbox", "Check my inbox.", "30 7 * * *", [], created_by="you")
+    task.last_result, task.last_steps = (
+        "The bank wrote.",
+        [{"tool": "look", "given": "", "outcome": "ran", "said": "x"}],
+    )
+    services.tasks.store.save(task)
+    services.tasks.check_result = {"at": 1.0, "outcome": "told you", "said": "The bank wrote.", "steps": []}
+    watch = services.tasks.watches.add("my inbox", None, by="you")
+    services.tasks.watches.note(watch.id, "Told them about the bank.")
+
+    await services.forget_everything()
+    kept = services.tasks.store.get(task.id)
+    assert (kept.title, kept.last_result, kept.last_steps) == ("Inbox", "", [])
+    assert services.tasks.check_result is None
+    assert [(w.what, w.note) for w in services.tasks.watches.all()] == [("my inbox", "")]
+
+
+async def test_the_prompt_says_what_mcp_servers_are_where_their_config_does(tmp_path):
+    import sys
+    from pathlib import Path
+
+    demo = Path(__file__).parent / "fixtures" / "demo_mcp_server.py"
+    server = f'[mcp_servers.demo]\ncommand = "{sys.executable}"\nargs = ["{demo}"]\ninclude = ["add"]\nconfirm = []\n'
+    (tmp_path / "config.toml").write_text(CONFIG + server + 'about = "Sums for the user, done properly."\n')
+    (tmp_path / ".env").write_text("")
+    services = build_services(load_config(tmp_path / "config.toml"))
+    services.memory.embedder = FakeEmbedder()
+    services.mcp.sandbox = None  # the demo server lives in the repo; the sandbox has tests of its own
+    await services.start()
+    try:
+        assert (
+            "## Where some of your tools come from\n- add: Sums for the user, done properly." in services.agent.prompt()
+        )
+    finally:
+        await services.close()
+
+
 async def test_thinking_is_changed_and_kept_in_config_toml(services):
     assert services.config.llm.thinking_now == "on"
     assert services.set_thinking("off") is True

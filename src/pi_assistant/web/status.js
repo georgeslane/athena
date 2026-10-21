@@ -138,8 +138,7 @@ export function renderOverview() {
     h("div.grid.two", {}, usageCard("session", o.session), usageCard("total", o.total))
   );
   panel.replaceChildren(
-    h("div.stack", {}, now_.el || now_.build(), usage, h("div.grid.two", {}, memoryCard(o), connectionsCard(o))),
-    h("button.button.quiet.small.sign-out", { type: "button", text: "Sign out", onclick: signOut })
+    h("div.stack", {}, now_.el || now_.build(), usage, h("div.grid.two", {}, memoryCard(o), connectionsCard(o)))
   );
 }
 
@@ -285,7 +284,8 @@ function connectionsCard(o) {
         h("span.what", { text: "Tools" }),
         h("span.is", { text: tools.applying ? "Applying changes…" : `${plural(tools.count, "tool")}, ${servers}` }),
         h("a.button.small.end", { href: "#tools", text: "Manage" })
-      )
+      ),
+      h("li", {}, h("span.what", { text: "Dashboard" }), h("span.is", { text: "Signed in" }), h("button.button.small.end", { type: "button", text: "Sign out", onclick: signOut }))
     )
   );
 }

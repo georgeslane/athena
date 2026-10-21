@@ -279,6 +279,37 @@ async def test_a_task_reports_what_it_found_in_your_chat(athena):
     assert a["ran"] == [1]  # so the model server reads your chat again, with the report in it
 
 
+async def test_a_run_keeps_the_steps_it_took_for_the_dashboard(athena):
+    a = athena([completion(None, [("look", {"where": "x" * 1000}), ("publish", {})]), completion("Done.")],
+               FakeChannel(allow=False))  # fmt: skip
+    task = a["scheduler"].add("Weather", "Check the weather.", "30 7 * * *", [], created_by="you")
+    await a["scheduler"].run(task)
+    look, publish = a["scheduler"].describe(a["scheduler"].store.get(task.id))["last_steps"]
+    assert (look["tool"], look["outcome"], look["said"]) == ("look", "ran", "Seen.")
+    assert len(look["given"]) == 400 and look["given"].endswith("…")  # cut short
+    assert (publish["tool"], publish["outcome"]) == ("publish", "declined")
+
+
+def test_tasks_kept_from_before_steps_were_kept_still_load(tmp_path):
+    import sqlite3
+
+    db = sqlite3.connect(tmp_path / "tasks.db")
+    db.execute(
+        "CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, instructions TEXT NOT NULL, "
+        "schedule TEXT NOT NULL, allowed_tools TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'active', "
+        "created_by TEXT NOT NULL, created_at REAL NOT NULL, next_run REAL, last_run REAL, last_outcome TEXT NOT NULL "
+        "DEFAULT '', last_result TEXT NOT NULL DEFAULT '', runs INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL "
+        "DEFAULT 0)"
+    )
+    db.execute(
+        "INSERT INTO tasks (title, instructions, schedule, created_by, created_at) VALUES ('B', 'b', 'now', 'you', 1)"
+    )
+    db.commit()
+    db.close()
+    [task] = TaskStore(tmp_path / "tasks.db").all()
+    assert (task.title, task.last_steps) == ("B", [])
+
+
 async def test_a_tasks_message_with_nowhere_to_go_isnt_logged_either(athena, caplog):
     caplog.set_level(logging.INFO)
     scheduler = athena([])["scheduler"]

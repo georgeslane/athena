@@ -94,6 +94,7 @@ CATALOG: tuple[Integration, ...] = (
                 "reminders_create",
             ],
             "confirm": ["events_create", "reminders_create"],
+            "about": "The user's own calendars and reminders, on their Mac.",
         },
         setup=_MAC_SETUP,
         asks="Adding events and reminders asks first.",
@@ -194,6 +195,7 @@ CATALOG: tuple[Integration, ...] = (
             "include": ["list_emails_metadata", "get_emails_content", "send_email"],
             "confirm": ["send_email"],
             "arguments": {"account_name": "athena"},
+            "about": "Your own inbox, not the user's: they forward you mail they want you to read or keep an eye on.",
             "env": {
                 "MCP_EMAIL_SERVER_ACCOUNT_NAME": "athena",
                 "MCP_EMAIL_SERVER_FULL_NAME": "Athena",
@@ -215,7 +217,7 @@ CATALOG: tuple[Integration, ...] = (
 )
 BY_ID = {i.id: i for i in CATALOG}
 # Settings of recommended servers that came after some had been set up, which those are given (add_later_settings).
-ADDED_LATER = ("arguments",)
+ADDED_LATER = ("arguments", "about")
 BUILTIN_SECTIONS = {i.section: i for i in CATALOG if i.builtin}
 
 # The settings of an MCP server that isn't in the catalog.
@@ -223,6 +225,7 @@ CUSTOM_FIELDS = (
     Field("command", "Command", help="The program that runs it, such as uvx, npx or ssh."),
     Field("args", "Arguments", "lines", "One per line."),
     Field("url", "URL", help="For a server on the internet, instead of a command."),
+    Field("about", "What it's for", help="A line for Athena, if its tools don't say, such as whose account it uses."),
     Field("env", "Environment", "map", "Settings the server reads, like an API key.", item="a variable"),
     Field(
         "headers",
@@ -759,6 +762,8 @@ class Settings:
         for where in ("env", "headers"):
             if values := _keep_secrets(spec.get(where) or {}, where, name, {}, env_changes):
                 table[where] = values
+        if about := " ".join(str(spec.get("about") or "").split()):
+            table["about"] = about[:300]
         _check_refs([str(v) for v in table.get("args", [])] + [url], "The server")
         _add_server_table(doc, name, table, "Added from the dashboard.")
         return name, self._save(doc, env_changes)
@@ -805,8 +810,10 @@ class Settings:
                 continue
             section = _section(doc, integ.section)
             for key in missing:
-                value = tomlkit.inline_table()
-                value.update(copy.deepcopy(integ.defaults[key]))
+                value = copy.deepcopy(integ.defaults[key])
+                if isinstance(value, dict):
+                    value, plain = tomlkit.inline_table(), value
+                    value.update(plain)
                 _set(section, key, value)
             changed.append(integ.id)
         if changed:

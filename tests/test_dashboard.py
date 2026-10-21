@@ -5,7 +5,9 @@ import gzip
 import json
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -895,11 +897,19 @@ async def test_watching_from_the_tasks_tab(athena):
         assert tasks["watching"]["items"] == [] and tasks["watching"]["every_minutes"] == 30
         assert tasks["triggers"] == {"on": False, "events": {}}  # no TRIGGERS_TOKEN here
 
-        added = (await http.post("/api/watches", json={"what": "the parcel from Amazon", "days": 3})).json()
+        soon = (datetime.now(ZoneInfo("Europe/London")) + timedelta(days=3)).date().isoformat()
+        added = (await http.post("/api/watches", json={"what": "the parcel from Amazon", "until": soon})).json()
         (item,) = added["watching"]["items"]
         assert (item["what"], item["by"]) == ("the parcel from Amazon", "you")
-        assert (await http.post("/api/watches", json={"what": "", "days": 3})).status_code == 400
-        assert (await http.post("/api/watches", json={"what": "x", "days": "lots"})).status_code == 400
+        assert datetime.fromtimestamp(item["until"], ZoneInfo("Europe/London")).date().isoformat() == soon
+        for bad in ({"what": "", "until": soon}, {"what": "x", "until": "lots"}, {"what": "x", "until": "2020-01-01"}):
+            assert (await http.post("/api/watches", json=bad)).status_code == 400
+
+        # Changing it: to check my inbox with no end.
+        changed = (await http.post(f"/api/watches/{item['id']}", json={"what": "my inbox", "until": None})).json()
+        assert [(i["what"], i["until"]) for i in changed["watching"]["items"]] == [("my inbox", None)]
+        assert (await http.post(f"/api/watches/{item['id']}", json={"what": ""})).status_code == 400
+        assert (await http.post("/api/watches/99", json={"what": "x", "until": None})).status_code == 404
 
         await http.post("/api/watches/check", json={})  # the scheduler checks as soon as it's free
         await until(lambda: athena.tasks.check_result is not None)

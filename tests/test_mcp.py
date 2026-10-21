@@ -73,6 +73,18 @@ async def test_arguments_athena_gives_are_hidden_from_the_model_and_cant_be_chan
         await manager.stop()
 
 
+async def test_the_model_is_told_what_a_server_is_only_where_its_config_says():
+    manager = MCPManager(
+        {"one": demo_stdio(include=["add", "get_env"], about=" Sums. "), "two": demo_stdio(include=["add"])}
+    )
+    await manager.start()
+    try:
+        assert manager.about() == "## Where some of your tools come from\n- add, get_env: Sums."
+    finally:
+        await manager.stop()
+    assert manager.about() == ""  # nothing to say about servers it hasn't got
+
+
 async def test_local_servers_dont_see_our_secrets(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:secret")
     monkeypatch.setenv("LLM_API_KEY", "sk-secret")

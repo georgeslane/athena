@@ -24,6 +24,9 @@ The page talks to Athena with JSON:
   POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools"}
   POST   /api/tasks/<id>        change one: {"title", "instructions", "schedule", "tools"}, or
                                 {"action": "run" | "pause" | "resume" | "stop"}
+  POST   /api/watches           watch for something: {"what", "until": "YYYY-MM-DD" or null for no end}
+  POST   /api/watches/<id>      change it, the same way; /api/watches/check checks on everything now
+  DELETE /api/watches/<id>      stop watching it
   DELETE /api/tasks/<id>        delete one
   GET    /api/memory            what's in memory, the documents indexed from your Mac, and suggested memories
   POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning and by words
@@ -78,7 +81,7 @@ from pi_assistant.tool_search import NAMES as META_TOOLS
 from pi_assistant.tools import ToolError, matches_any
 from pi_assistant.triggers import PREFIX as HOOKS
 from pi_assistant.triggers import Hooks
-from pi_assistant.watching import DEFAULT_DAYS
+from pi_assistant.watching import end_of
 from pi_assistant.webserver import HTTPError, Request, Response, Server
 
 if TYPE_CHECKING:
@@ -146,6 +149,7 @@ ROUTES = (
     (None, r"/api/tasks(?:/(?P<task>.*))?", "_tasks"),
     ("POST", r"/api/watches", "_add_watch"),
     ("POST", r"/api/watches/check", "_check_watches"),
+    ("POST", r"/api/watches/(?P<which>\d+)", "_change_watch"),
     ("DELETE", r"/api/watches/(?P<which>\d+)", "_stop_watching"),
 )
 _ROUTES = [(method, re.compile(path), handler) for method, path, handler in ROUTES]
@@ -406,12 +410,31 @@ class DashboardServer(Server):
         scheduler, body = self._scheduler(), _body(request)
         assert scheduler.watches is not None
         try:
-            days = float(body.get("days") or DEFAULT_DAYS)
-            scheduler.watches.add(str(body.get("what") or ""), days, by="you")
-        except (TypeError, ValueError) as exc:
-            raise HTTPError(400, str(exc) or "days must be a number.") from None
+            scheduler.watches.add(str(body.get("what") or ""), self._until(body), by="you")
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
         scheduler.wake()
         return _json(self.tasks())
+
+    def _change_watch(self, request: Request, method: str, which: str) -> Response:
+        scheduler, body = self._scheduler(), _body(request)
+        assert scheduler.watches is not None
+        if scheduler.watches.get(int(which)) is None:
+            raise HTTPError(404, f"Nothing's watched as #{which}.")
+        try:
+            scheduler.watches.change(int(which), str(body.get("what") or ""), self._until(body))
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        return _json(self.tasks())
+
+    def _until(self, body: dict[str, Any]) -> float | None:
+        """When something's watched until, from {"until": "YYYY-MM-DD"}, the end of that day; null for no end."""
+        until = body.get("until")
+        if until is None:
+            return None
+        if not isinstance(until, str):
+            raise ValueError("Give the day as YYYY-MM-DD, or null for no end.")
+        return end_of(until, self._scheduler().tz)
 
     def _check_watches(self, request: Request, method: str) -> Response:
         self._scheduler().check_now()

@@ -318,6 +318,16 @@ class MCPManager:
             self.approvals.approve(conn.name, {t.name: _version(t) for t in remote_tools})
         conn.status.offered = [(t.name, (t.description or t.title or "").strip()) for t in remote_tools]
 
+    def about(self) -> str:
+        """For the end of the system prompt: what each server whose tools the model has is, where its config says
+        (``about``), with the names of its tools. Empty if none says."""
+        lines = []
+        for conn in self._connections.values():
+            names = [t.name for t in self._tools if t.source == f"mcp:{conn.name}"]
+            if conn.cfg.about.strip() and names:
+                lines.append(f"- {', '.join(names)}: {conn.cfg.about.strip()}")
+        return "## Where some of your tools come from\n" + "\n".join(lines) if lines else ""
+
     def _rebuild_tools(self) -> None:
         """The tools the model sees, in config order. A name another server already has gets the server's name too."""
         tools: list[Tool] = []
