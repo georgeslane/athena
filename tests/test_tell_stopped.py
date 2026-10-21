@@ -230,6 +230,7 @@ def systemd_athena(outside_tmp, telegram):
             sudo("mkdir", "-p", str(units / folder))
             subprocess.run(["sudo", "-n", "tee", str(units / folder / "test.conf")], input=text, text=True, check=True)
         sudo("systemctl", "daemon-reload")
+        sudo("systemctl", "reset-failed", "pi-assistant", "pi-assistant-stopped")  # restarts the test before made
         sudo("systemctl", "start", "pi-assistant")
         return repo
 

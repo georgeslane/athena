@@ -10,6 +10,11 @@ can reach anything Athena can, including services on the Pi itself.
 
 bubblewrap is Linux-only. Elsewhere, such as a Mac used for development, servers run without a
 sandbox and doctor says so. On Linux, a server that should be sandboxed and can't be isn't started.
+
+Code the model writes gets a stricter one (``wrap_code``, for run_code.py): rather than the whole system
+less what's hidden, it sees only what programs need to run (/usr, /etc and the links into /usr) and
+Athena's own Python, read-only; a workspace folder it can write to; a small /tmp and home of its own;
+no network; and no environment but what's given. Nothing else on the Pi is there at all.
 """
 
 from __future__ import annotations
@@ -27,6 +32,9 @@ log = logging.getLogger(__name__)
 HIDDEN = ("/tmp", "/home", "/root", "/run/user", "/var/tmp")  # emptied in the sandbox, along with your home folder
 INSTALL_HINT = "Install bubblewrap (sudo apt install bubblewrap), or set sandbox = false for the server."
 SSH_INCLUDES = Path("/etc/ssh/ssh_config.d")  # settings files the system's settings for ssh include
+SYSTEM = ("/usr", "/etc", "/bin", "/sbin", "/lib", "/lib32", "/lib64")  # what code sees of the system, read-only
+WORKSPACE = "/workspace"  # where code's workspace folder is, in its sandbox
+SCRATCH_BYTES = 64 * 1024 * 1024  # the most code's own /tmp and home can hold, where bubblewrap can say so
 
 
 class SandboxError(Exception):
@@ -39,6 +47,7 @@ class Sandbox:
     home: Path
     _works: bool | None = None  # whether bwrap can make a sandbox here, once it's been tried
     _problem: str = ""
+    _sizes: bool = False  # whether this bwrap can limit a tmpfs's size (--size), once it's been tried
 
     @classmethod
     def detect(cls) -> Sandbox:
@@ -59,6 +68,7 @@ class Sandbox:
                 code, output = await _run([self.bwrap, "--ro-bind", "/", "/", "--unshare-all", "--", "true"])
                 self._works = code == 0
                 self._problem = f"bubblewrap can't make a sandbox here: {output.strip() or f'exit {code}'}."
+                self._sizes = "--size" in (await _run([self.bwrap, "--help"]))[1]
         if not self._works:
             raise SandboxError(f"Couldn't start it in a sandbox: {self._problem} {INSTALL_HINT}")
 
@@ -89,6 +99,27 @@ class Sandbox:
         args += ["--die-with-parent", "--new-session", "--chdir", str(cwd or self.home), "--", *command]
         return args
 
+    def wrap_code(self, command: list[str], workspace: Path, env: dict[str, str]) -> list[str]:
+        """The command line that runs ``command``, code the model wrote, in the strict sandbox (see above), with
+        ``workspace`` at /workspace. Call check() first."""
+        assert self.bwrap and self._works
+        args = [self.bwrap]
+        for path in SYSTEM:
+            if Path(path).is_symlink():  # /bin and the like, which are links into /usr on most systems now
+                args += ["--symlink", os.readlink(path), path]
+            elif Path(path).is_dir():
+                args += ["--ro-bind", path, path]
+        args += ["--proc", "/proc", "--dev", "/dev"]
+        size = ["--size", str(SCRATCH_BYTES)] if self._sizes else []
+        args += [*size, "--tmpfs", "/tmp", *size, "--tmpfs", str(self.home)]
+        for path in self._outermost(self.needed(command)):
+            args += ["--ro-bind-try", str(path), str(path)]
+        args += ["--bind", str(workspace), WORKSPACE, "--clearenv"]
+        for name, value in {**env, "HOME": str(self.home)}.items():
+            args += ["--setenv", name, value]
+        args += ["--unshare-all", "--die-with-parent", "--new-session", "--chdir", WORKSPACE, "--", *command]
+        return args
+
     def needed(self, command: list[str]) -> list[Path]:
         """What a command needs to run at all."""
         paths = [self.home / ".local" / "share" / "uv" / "python"]  # where uv puts the Pythons it installs
@@ -115,7 +146,13 @@ class Sandbox:
         mounted on top of a link that's already showing, which bubblewrap refuses to do from 0.12. uv's
         folder of Pythons has one: cpython-3.14-…, to the newest 3.14, which environments find theirs through."""
         hidden = [p for p in _unique(paths) if any(_within(p, folder) for folder in self._hidden())]
-        return [p for p in hidden if not any(folder in p.parents for folder in hidden)]
+        return self._outermost(hidden)
+
+    @staticmethod
+    def _outermost(paths: list[Path]) -> list[Path]:
+        """Of these, those not inside another of them."""
+        paths = _unique(paths)
+        return [p for p in paths if not any(folder in p.parents for folder in paths)]
 
     async def self_test(self) -> list[tuple[bool, str]]:
         """Checks, for doctor, that a sandboxed process can't see a file in your home folder, or reach the network,

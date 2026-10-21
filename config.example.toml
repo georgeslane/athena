@@ -123,6 +123,16 @@ environment = "live"                   # or "demo" for the practice account, whi
 # these files are ever opened. Name them however you like:
 # "budget" = "/home/you/budget.db"
 
+[code]
+# run_python: Python that Athena writes, for sums, data and files, run in a sandbox with no network that
+# sees nothing of yours but its own folder, data/workspace (README, "Running code"). Linux only.
+enabled = true
+timeout_seconds = 30                   # it's stopped after this long
+memory_mb = 1024
+max_output_chars = 10000               # of what it prints, given back to the model
+max_file_mb = 50                       # the largest file it can write
+workspace_mb = 500                     # past this, it can only delete files until there's room
+
 [tools]
 # Tools found when the model needs them, rather than described in every message, which keeps messages
 # quicker to read: names or patterns of names (README, "Tools found when needed"). The dashboard's

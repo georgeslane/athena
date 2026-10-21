@@ -140,7 +140,7 @@ Athena keeps the conversation going from one message to the next, so each reply 
 
 **Context** on the dashboard is what Athena reads before your next message: the system prompt, the tools' descriptions and this session's conversation. Athena measures it after each reply, when it warms up the model server's cache. The limit comes from the model server. If yours doesn't say, set `llm.context_window` in `config.toml`.
 
-**Forget everything**, under Memory, deletes every memory: saved facts, the chunks of your notes, past exchanges and the conversation history. It also starts a new session. Usage statistics stay, because they're only counts and timings.
+**Forget everything**, under Memory, deletes every memory: saved facts, the chunks of your notes, past exchanges and the conversation history, and empties the code's folder. It also starts a new session. Usage statistics stay, because they're only counts and timings.
 
 ## Status board
 
@@ -393,6 +393,19 @@ Orders are for a number of shares, which can be a fraction: Trading 212's API do
 `database_tables` and `database_query` read the SQLite databases listed under `[sqlite.databases]` in `config.toml`, by the names you give them, and no other files. The files must be on the Pi. A path can be absolute, or relative to the config's folder.
 
 They can only read, and SQLite itself enforces that. Each file is opened read-only, and an authorizer refuses everything but reading before a statement runs. Both are needed: a read-only connection alone would still let `VACUUM INTO` copy the database anywhere, and `ATTACH` create files. Statements that don't start with SELECT, WITH or VALUES aren't tried at all, a query is stopped after 10 seconds, and at most 100 rows come back. So they don't ask first, and they're safe to use on a database another program is writing to.
+
+### Running code
+
+`run_python` runs Python that Athena writes, and gives it what the code printed. It's for what a model is bad at by itself: sums, statistics, dates and times, and reading or making files such as CSVs. numpy and pandas are there, as Athena already has them. It's on by default, on Linux; switch it off under **Running code** on the Tools tab, or with `enabled = false` under `[code]`.
+
+The code runs in a sandbox of its own, stricter than the MCP servers' (see [Sandbox](#sandbox)), so it doesn't ask first:
+- **What it sees.** Only what Python needs to run, read-only: the system's programs and libraries (`/usr` and `/etc`) and Athena's Python with its packages. Your home folder, Athena's code, settings, secrets, memory and logs, and anything else on the Pi, such as drives and `/var/log`, aren't there at all.
+- **Where it writes.** Its own folder, `data/workspace`, which is where it runs and which keeps files from one run to the next. Also a small `/tmp` and home of its own, which are gone when it finishes. Links it makes in its folder are never followed by Athena.
+- **No network,** no environment variables but a few harmless ones, and only its own processes.
+- **Limits.** Before the code runs, its limits are lowered, and it can't raise them again: memory (`memory_mb`, 1 GB), CPU time, the largest file it can write (`max_file_mb`, 50 MB) and open files. It's stopped after `timeout_seconds` (30), and the model gets at most `max_output_chars` (10,000) of what it printed. Runs happen one at a time.
+- **A full folder.** Once its folder holds more than `workspace_mb` (500 MB), code can still run but can't write anything, only delete, until there's room.
+
+There's no code tool without bubblewrap, such as on a Mac used for development: code never runs outside the sandbox. **Forget everything** empties its folder too, since what's there came from what was said. `doctor` checks code can run, can't connect out, and can't see Athena's files.
 
 ### Company filings
 
@@ -710,7 +723,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/documents.py` | Indexing your documents from your Mac, when you ask |
 | `src/pi_assistant/mac_documents.py` | The read-only documents server that runs on your Mac |
 | `src/pi_assistant/builtin.py`, `integrations.py` | What a built-in integration is, and the list of them |
-| `src/pi_assistant/news.py`, `markets.py`, `trading212.py`, `databases.py` | The built-in integrations: news feeds, market data from Yahoo Finance, Trading 212, and SQLite databases |
+| `src/pi_assistant/news.py`, `markets.py`, `trading212.py`, `databases.py`, `run_code.py` | The built-in integrations: news feeds, market data from Yahoo Finance, Trading 212, SQLite databases, and running code |
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, as a table of routes, and the page itself: plain HTML, CSS and JavaScript modules, with no build step. `dashboard.js` starts it, `core.js` has what the tabs share, and each tab has a module of its own |
 | `src/pi_assistant/tasks.py`, `channel.py` | Tasks Athena does by itself, and how it reaches you about them |
