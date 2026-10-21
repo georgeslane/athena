@@ -149,6 +149,14 @@ max_minutes = 30                       # the most a run works for, not counting 
 max_tool_rounds = 25
 thinking = "on"                        # tasks aren't in a hurry
 confirm_minutes = 60                   # how long a task waits for you to allow a tool that asks
+heartbeat_minutes = 30                 # how often it checks what it's watching for you; 0: never
+heartbeat_tools = []                   # tools that ask first which checking may use without asking
+
+[triggers]
+# Events that start tasks whose schedule is "on <event>": POST /hooks/<event> on the dashboard's
+# address, from an iPhone Shortcut or anything on your tailnet (see README, "Triggers"). Off until
+# TRIGGERS_TOKEN is set in .env.
+max_per_hour = 30                      # events taken in an hour, of every kind; more are refused
 
 [alerts]
 # Athena messages you in Telegram when something it needs stops working, and when it's back

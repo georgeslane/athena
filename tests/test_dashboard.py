@@ -220,8 +220,8 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
         "error": None,
         "checked": 0,
     }
-    # With the tools for tasks, and the MCP Registry's.
-    assert overview["tools"] == {"count": 14, "servers": 1, "connected": 1, "applying": False}
+    # With the tools for tasks and watching, and the MCP Registry's.
+    assert overview["tools"] == {"count": 15, "servers": 1, "connected": 1, "applying": False}
     assert overview["status"]["state"] == "idle" and overview["status"]["last_task"] == "Thanks"
 
 
@@ -868,3 +868,27 @@ async def test_paths_it_doesnt_know_are_refused(athena):
         assert (await http.get("/api/tools/demo")).status_code == 404  # a server is changed or removed, not read
         assert (await http.post("/api/overview", json={})).status_code == 405
         assert (await http.get("/api/skills/")).status_code == 200  # a trailing slash is fine
+
+
+# -- watching, on the Tasks tab ---------------------------------------------------------------------
+
+
+async def test_watching_from_the_tasks_tab(athena):
+    async with client(athena) as http:
+        tasks = (await http.get("/api/tasks")).json()
+        assert tasks["watching"]["items"] == [] and tasks["watching"]["every_minutes"] == 30
+        assert tasks["triggers"] == {"on": False, "events": {}}  # no TRIGGERS_TOKEN here
+
+        added = (await http.post("/api/watches", json={"what": "the parcel from Amazon", "days": 3})).json()
+        (item,) = added["watching"]["items"]
+        assert (item["what"], item["by"]) == ("the parcel from Amazon", "you")
+        assert (await http.post("/api/watches", json={"what": "", "days": 3})).status_code == 400
+        assert (await http.post("/api/watches", json={"what": "x", "days": "lots"})).status_code == 400
+
+        await http.post("/api/watches/check", json={})  # the scheduler checks as soon as it's free
+        await until(lambda: athena.tasks.check_result is not None)
+        assert (await http.get("/api/tasks")).json()["watching"]["last"]["outcome"] in ("told you", "nothing new")
+
+        gone = (await http.delete(f"/api/watches/{item['id']}")).json()
+        assert gone["watching"]["items"] == []
+        assert (await http.delete(f"/api/watches/{item['id']}")).status_code == 404

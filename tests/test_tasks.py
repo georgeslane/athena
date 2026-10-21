@@ -17,6 +17,7 @@ from pi_assistant.llm import LLMReply
 from pi_assistant.status import StatusTracker
 from pi_assistant.tasks import NOTHING, Schedule, ScheduleError, Scheduler, TaskStore
 from pi_assistant.tools import Tool, ToolError, ToolRegistry
+from pi_assistant.watching import WatchStore
 
 LONDON = ZoneInfo("Europe/London")
 THURSDAY = datetime(2026, 10, 15, 12, 0, tzinfo=LONDON)  # a Thursday, at noon
@@ -152,6 +153,7 @@ def athena(config, memory, tmp_path):
             tools=tools.all,
             on_ran=lambda: ran.append(1),
             poll_seconds=0.01,
+            watches=WatchStore(config.db_path),
         )
         for tool in scheduler.tools():
             tools.add(tool)
