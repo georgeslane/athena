@@ -12,14 +12,15 @@ import pytest
 from test_sandbox import REAL, needs_bwrap
 
 from pi_assistant.builtin import Unavailable
-from pi_assistant.run_code import CodeConfig, CodeRunner, Ran, clear_workspace, workspace_of
+from pi_assistant.run_code import CodeConfig, CodeRunner, Ran, SandboxedPython
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.tools import ToolError
+from pi_assistant.workspace import clear_workspace, workspace_of
 
 
 def runner(tmp_path, **settings) -> CodeRunner:
     cfg = CodeConfig.model_construct(**{**CodeConfig().model_dump(), **settings})  # limits below the usual minimums
-    return CodeRunner(cfg, REAL, tmp_path / "workspace")
+    return CodeRunner(SandboxedPython(cfg, REAL, tmp_path / "workspace"))
 
 
 async def ran(tmp_path, code, **settings) -> Ran:
@@ -91,6 +92,29 @@ print(len([p for p in os.listdir('/proc') if p.isdigit()]) < 5)
     assert lines[2] == "False ['HOME', 'LANG', 'MPLBACKEND', 'PATH', 'PWD', 'PYTHONDONTWRITEBYTECODE']"  # PWD: bwrap's
     assert lines[3] == "[]"  # the system's logs, drives and the like aren't there at all
     assert lines[4] == "True"  # only its own processes
+
+
+@needs_bwrap
+async def test_only_athenas_python_is_there_not_whats_beside_it(tmp_path):
+    """On the Pi, Athena's Python is in ~/athena/.venv, beside config.toml and .env: the folder's path is in the
+    sandbox, as the way to .venv, but nothing else in it is."""
+    beside = Path(sys.prefix).parent / f".athena-beside-check-{os.getpid()}"  # where config.toml would be
+    beside.write_text("secret")
+    try:
+        code = f"import os\nprint(os.path.exists({str(beside)!r}), sorted(os.listdir({str(beside.parent)!r})))"
+        said = (await ran(tmp_path, code)).output.strip()
+    finally:
+        beside.unlink()
+    assert said == f"False [{Path(sys.prefix).name!r}]"
+
+
+@needs_bwrap
+async def test_doctor_checks_athenas_own_files_arent_there(config):
+    """Even where its folder is the way to its Python, as on the Pi."""
+    config.base_dir = Path(sys.prefix).parent
+    reported = []
+    await CodeRunner.check(config, lambda mark, msg: reported.append(msg))
+    assert "Code can't see Athena's files" in reported, reported
 
 
 @needs_bwrap
@@ -180,17 +204,19 @@ def test_without_a_sandbox_there_is_no_code_tool(config, monkeypatch):
 
 
 async def test_empty_or_huge_code_isnt_run(tmp_path):
-    code_runner = CodeRunner(CodeConfig(), Sandbox(None, Path.home()), tmp_path)
+    code_runner = CodeRunner(SandboxedPython(CodeConfig(), Sandbox(None, Path.home()), tmp_path))
     for code, why in (("  ", "Give the code"), ("x" * 50_001, "more than 50,000 characters")):
         with pytest.raises(ToolError, match=why):
             await code_runner.run(code)
 
 
 def test_the_limits_are_set_before_the_code_runs(tmp_path):
-    launcher = CodeRunner(CodeConfig(memory_mb=300, max_file_mb=2), Sandbox(None, Path.home()), tmp_path)._launcher()
+    launcher = SandboxedPython(
+        CodeConfig(memory_mb=300, max_file_mb=2), Sandbox(None, Path.home()), tmp_path
+    )._launcher()
     assert "(resource.RLIMIT_AS, 314572800)" in launcher and "(resource.RLIMIT_FSIZE, 2097152)" in launcher
     assert launcher.index("setrlimit") < launcher.index("exec(")
-    assert "(resource.RLIMIT_FSIZE, 0)" in CodeRunner(CodeConfig(), None, tmp_path)._launcher(writes=False)
+    assert "(resource.RLIMIT_FSIZE, 0)" in SandboxedPython(CodeConfig(), None, tmp_path)._launcher(writes=False)
 
 
 def test_how_a_run_is_described():

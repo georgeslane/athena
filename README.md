@@ -70,7 +70,7 @@ Then:
 
 ## Using it
 
-**Telegram**: send any message, or a photo (see [Photos](#photos)). Commands:
+**Telegram**: send any message, a photo (see [Photos](#photos)), or a PDF or text file (see [Files](#files)). Commands:
 
 | Command | What it does |
 |---|---|
@@ -407,6 +407,23 @@ The code runs in a sandbox of its own, stricter than the MCP servers' (see [Sand
 
 There's no code tool without bubblewrap, such as on a Mac used for development: code never runs outside the sandbox. **Forget everything** empties its folder too, since what's there came from what was said. `doctor` checks code can run, can't connect out, and can't see Athena's files.
 
+### Files
+
+Athena has a folder of its own, `data/workspace`, shared with the code it runs, and three tools for the files in it:
+- `read_file` reads a file's text, 5,000 characters at a time, and a PDF's page by page. Given a folder, or nothing, it lists what's there.
+- `write_file` writes Markdown, text, CSV and the like as they are. For a `.pdf`, it lays out the Markdown it's given, with headings, lists, tables and code, on A4.
+- `send_file` sends one to you in Telegram, after its answer. A task can send files with what it found, too.
+
+**Sending Athena a file.** Send a PDF, or a text file such as Markdown, CSV or JSON, up to 20 MB, with what you want to know as its caption, such as "what's due on this bill?". It's kept in the folder's `inbox/`, under its own name, numbered if there's one already, and Athena reads it from there. Images go to the model as photos (see [Photos](#photos)).
+
+**Safety.**
+- **Links and planted files.** The code Athena runs can put anything in the folder, including a link to a file elsewhere, such as Athena's `.env`. So Athena opens what's there one folder at a time without following links, and only opens ordinary files. Nothing in the folder can lead it outside, and a named pipe can't make it wait forever.
+- **PDFs are handled in the sandbox.** Reading and making PDFs happens in the code's sandbox (see [Running code](#running-code)), with its limits, since a PDF made to trouble a PDF reader can then do no harm. Without bubblewrap, other files still work but PDFs don't.
+- **Size.** Once the folder holds more than `[code] workspace_mb`, nothing more is written until there's room.
+- **Forgetting.** **Forget everything** empties the folder, files you sent included.
+
+PDFs use the DejaVu fonts if the Pi has them (`sudo apt install fonts-dejavu-core`), for most of the world's letters. Otherwise they use the PDF standard's fonts, with characters those lack replaced. `doctor` makes and reads a PDF to check, and says if the fonts are missing. Switch the tools off under **Files** on the Tools tab, or with `enabled = false` under `[workspace]`.
+
 ### Company filings
 
 [EdgarTools](https://github.com/dgunning/edgartools) searches and reads filings to the US Securities and Exchange Commission: annual and quarterly reports, financial statements, insider trades and fund holdings. The SEC asks callers to say who they are, so give your name and email, like `Jane Doe jane@example.com`: on the dashboard, or as `EDGAR_IDENTITY` in `.env`.
@@ -723,6 +740,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/documents.py` | Indexing your documents from your Mac, when you ask |
 | `src/pi_assistant/mac_documents.py` | The read-only documents server that runs on your Mac |
 | `src/pi_assistant/builtin.py`, `integrations.py` | What a built-in integration is, and the list of them |
+| `src/pi_assistant/workspace.py`, `files.py`, `pdfs.py` | Athena's folder, opened without following links; the file tools; PDFs read and made in the sandbox |
 | `src/pi_assistant/news.py`, `markets.py`, `trading212.py`, `databases.py`, `run_code.py` | The built-in integrations: news feeds, market data from Yahoo Finance, Trading 212, SQLite databases, and running code |
 | `src/pi_assistant/status.py`, `status_api.py` | What the assistant is doing, and the API the status board reads it from |
 | `src/pi_assistant/dashboard.py`, `web/` | The dashboard: its API, as a table of routes, and the page itself: plain HTML, CSS and JavaScript modules, with no build step. `dashboard.js` starts it, `core.js` has what the tabs share, and each tab has a module of its own |

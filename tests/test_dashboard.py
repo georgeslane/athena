@@ -223,8 +223,8 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
         "error": None,
         "checked": 0,
     }
-    # With the tools for tasks and watching, and the MCP Registry's.
-    assert overview["tools"] == {"count": 15, "servers": 1, "connected": 1, "applying": False}
+    # With the tools for tasks and watching, files, and the MCP Registry's.
+    assert overview["tools"] == {"count": 18, "servers": 1, "connected": 1, "applying": False}
     assert overview["status"]["state"] == "idle" and overview["status"]["last_task"] == "Thanks"
 
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from pi_assistant.builtin import FAIL, OK, Builtin, Report, Section, Unavailable
 from pi_assistant.catalog import Integration
 from pi_assistant.sandbox import INSTALL_HINT, Sandbox, SandboxError
 from pi_assistant.tools import Tool, ToolError
+from pi_assistant.workspace import changes, files, workspace_of
 
 if TYPE_CHECKING:
     from pi_assistant.config import Config
@@ -58,11 +58,6 @@ class CodeConfig(Section):
     workspace_mb: int = Field(default=500, ge=10)  # it won't run while its folder holds more than this
 
 
-def workspace_of(cfg: Config) -> Path:
-    """Where the code's files are kept: data/workspace."""
-    return cfg.resolve(cfg.data_dir) / "workspace"
-
-
 class CodeRunner(Builtin):
     section = "code"
     Settings = CodeConfig
@@ -86,7 +81,7 @@ class CodeRunner(Builtin):
         sandbox = Sandbox.detect()
         if not sandbox.bwrap:
             raise Unavailable(f"It needs a sandbox, which needs Linux and bubblewrap. {INSTALL_HINT.split(',')[0]}.")
-        return cls(cfg.code, sandbox, workspace_of(cfg))
+        return cls(SandboxedPython(cfg.code, sandbox, workspace_of(cfg)))
 
     @classmethod
     async def check(cls, cfg: Config, report: Report) -> None:
@@ -95,6 +90,7 @@ class CodeRunner(Builtin):
         except Unavailable as exc:
             report(FAIL, str(exc))
             return
+        athenas = [str(p) for p in (cfg.path or cfg.base_dir / "config.toml", cfg.env_path, cfg.db_path)]
         checks = {
             "runs Python": ("print(6 * 7)", "42"),
             "can't connect out": (
@@ -102,7 +98,8 @@ class CodeRunner(Builtin):
                 "except OSError:\n    print('no network')",
                 "no network",
             ),
-            "can't see Athena's files": (f"import os\nprint(os.path.exists({str(cfg.base_dir)!r}))", "False"),
+            # Its files, not its folder: the path down to Athena's Python, in .venv there, is in the sandbox too.
+            "can't see Athena's files": (f"import os\nprint(any(map(os.path.exists, {athenas!r})))", "False"),
         }
         for what, (code, expected) in checks.items():
             try:
@@ -112,11 +109,12 @@ class CodeRunner(Builtin):
                 continue
             report(OK if said == expected else FAIL, f"Code {what}" + ("" if said == expected else f": {said[:200]}"))
 
-    def __init__(self, cfg: CodeConfig, sandbox: Sandbox, workspace: Path):
-        self.cfg = cfg
-        self.sandbox = sandbox
-        self.workspace = workspace
-        self._lock = asyncio.Lock()  # one run at a time: the Pi is small
+    def __init__(self, python: SandboxedPython):
+        self.python = python
+        self.cfg = python.cfg
+
+    async def run(self, code: str) -> Ran:
+        return await self.python.run(code)
 
     def tools(self) -> list[Tool]:
         async def run_python(args: dict[str, Any]) -> str:
@@ -141,16 +139,29 @@ class CodeRunner(Builtin):
             )
         ]
 
-    async def run(self, code: str) -> Ran:
-        """Run ``code`` in the sandbox, in the workspace, within the limits."""
+
+class SandboxedPython:
+    """Runs Python in the strict sandbox, in the workspace, within [code]'s limits, one run at a time: for the
+    model's code, and for reading and making PDFs (files.py), as parsing what's in a file is best done where
+    it can't do harm."""
+
+    def __init__(self, cfg: CodeConfig, sandbox: Sandbox, workspace: Path):
+        self.cfg = cfg
+        self.sandbox = sandbox
+        self.workspace = workspace
+        self._lock = asyncio.Lock()  # one run at a time: the Pi is small
+
+    async def run(self, code: str, max_output: int | None = None, max_code: int = MAX_CODE_CHARS) -> Ran:
+        """Run ``code`` in the sandbox, in the workspace, within the limits. ``max_output``: how many characters
+        of what it prints to keep, rather than [code] max_output_chars. ``max_code``: how long the code can be."""
         if not code.strip():
             raise ToolError("Give the code to run.")
-        if len(code) > MAX_CODE_CHARS:
-            raise ToolError(f"That's more than {MAX_CODE_CHARS:,} characters of code: write it in parts.")
+        if len(code) > max_code:
+            raise ToolError(f"That's more than {max_code:,} characters of code: write it in parts.")
         await self.sandbox.check()
         async with self._lock:
             self.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
-            before = _files(self.workspace)
+            before = files(self.workspace)
             full = sum(size for size, _ in before.values()) > self.cfg.workspace_mb * 1024 * 1024
             started = time.monotonic()
             code_bytes = code.encode()
@@ -163,7 +174,7 @@ class CodeRunner(Builtin):
                 stderr=asyncio.subprocess.STDOUT,
                 env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
             )
-            output, cut = b"", False
+            output, cut, keep = b"", False, max_output or self.cfg.max_output_chars
             try:
                 async with asyncio.timeout(self.cfg.timeout_seconds):
                     assert proc.stdin and proc.stdout
@@ -171,7 +182,7 @@ class CodeRunner(Builtin):
                     with contextlib.suppress(ConnectionError):
                         await proc.stdin.drain()
                     proc.stdin.close()
-                    limit = self.cfg.max_output_chars * 4  # bytes: enough for that many characters of any kind
+                    limit = keep * 4  # bytes: enough for that many characters of any kind
                     while chunk := await proc.stdout.read(65536):
                         if len(output) < limit:
                             output += chunk
@@ -186,10 +197,10 @@ class CodeRunner(Builtin):
                 await proc.wait()
             seconds = time.monotonic() - started
         text = output.decode(errors="replace")
-        if len(text) > self.cfg.max_output_chars:
-            text, cut = text[: self.cfg.max_output_chars], True
-        changed = _changes(before, _files(self.workspace))
-        return Ran(text, proc.returncode, timed_out, cut, seconds, changed, full, self.cfg)
+        if len(text) > keep:
+            text, cut = text[:keep], True
+        changed = changes(before, files(self.workspace))
+        return Ran(text, proc.returncode, timed_out, cut, seconds, changed, full, self.cfg, keep)
 
     def _launcher(self, writes: bool = True) -> str:
         """The launcher, with the limits filled in. ``writes``: False to let it write nothing at all."""
@@ -216,6 +227,7 @@ class Ran:
     changed: list[str]  # files in the workspace, and how
     full: bool  # the workspace was over its limit, so it could write nothing
     cfg: CodeConfig
+    kept: int = 0  # characters of what it printed that are kept
 
     def describe(self) -> str:
         """What the model's told."""
@@ -234,39 +246,7 @@ class Ran:
                 "that aren't needed, with os.remove]"
             )
         if self.cut:
-            parts.append(f"[cut short: only the first {self.cfg.max_output_chars:,} characters are shown]")
+            parts.append(f"[cut short: only the first {self.kept or self.cfg.max_output_chars:,} characters are shown]")
         if self.changed:
             parts.append("Files in its folder that changed: " + ", ".join(self.changed))
         return "\n".join(parts)
-
-
-def _files(folder: Path) -> dict[str, tuple[int, int]]:
-    """The files in ``folder``, by path within it: (size, when changed). Links are listed, never followed."""
-    found = {}
-    for root, dirs, names in os.walk(folder):  # os.walk doesn't follow links into folders
-        for name in names:
-            path = Path(root) / name
-            with contextlib.suppress(OSError):
-                info = path.lstat()
-                found[str(path.relative_to(folder))] = (info.st_size, info.st_mtime_ns)
-        dirs.sort()
-    return found
-
-
-def _changes(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
-    changed = [f"{name} ({_show_size(after[name][0])}{', new' if name not in before else ''})"
-               for name in sorted(after) if before.get(name) != after[name]]  # fmt: skip
-    changed += [f"{name} (deleted)" for name in sorted(set(before) - set(after))]
-    return changed
-
-
-def _show_size(size: int) -> str:
-    for unit, scale in (("MB", 1024 * 1024), ("KB", 1024)):
-        if size >= scale:
-            return f"{size / scale:.1f} {unit}"
-    return f"{size} bytes"
-
-
-def clear_workspace(cfg: Config) -> None:
-    """Delete the workspace's files, as forgetting everything does."""
-    shutil.rmtree(workspace_of(cfg), ignore_errors=True)

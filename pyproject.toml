@@ -16,6 +16,9 @@ dependencies = [
     "tomlkit>=0.13",
     "yfinance>=1.7,<2",
     "packaging>=24",
+    "pypdf>=6",
+    "fpdf2>=2.8",
+    "markdown-it-py>=3",
 ]
 
 [project.optional-dependencies]

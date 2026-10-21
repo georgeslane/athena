@@ -10,6 +10,7 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import openai
@@ -18,6 +19,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     LinkPreviewOptions,
     ReplyParameters,
     Update,
@@ -34,15 +36,17 @@ from telegram.ext import (
     filters,
 )
 
+from pi_assistant import workspace
 from pi_assistant.app import Services
 from pi_assistant.config import THINKING, ConfigError
+from pi_assistant.files import SENT, TEXT
 from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
 from pi_assistant.memory import Found
 from pi_assistant.photos import MAX_BYTES, MAX_PER_MESSAGE, Photo, label, mime_of
 from pi_assistant.siri import VOICE_NOTE, SiriServer
 from pi_assistant.status import State, describe_error
 from pi_assistant.tool_approvals import ToolChange
-from pi_assistant.tools import flags
+from pi_assistant.tools import ToolError, flags
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -51,6 +55,14 @@ THINKING_SAYS = {
     "short": "I think briefly before answering, for up to {tokens} tokens.",
     "off": "I answer straight away, without thinking first.",
 }
+
+
+@dataclass
+class _Answer:
+    """What Athena said, and the files it's sending with it (send_file, in files.py)."""
+
+    text: str
+    files: list[str] = field(default_factory=list)  # as send_file noted them
 
 
 @dataclass
@@ -78,6 +90,7 @@ class _NotAPhoto(Exception):
 
 ALBUM_SECONDS = 1.5  # after an album's last photo arrives, how long to wait for more
 MAX_SIDE = 2048  # of the copies Telegram keeps of a photo, the largest up to this many pixels is used
+DOWNLOAD_MB = 20  # the largest file a Telegram bot can download
 
 
 COMMANDS = [
@@ -143,6 +156,7 @@ class TelegramBot:
             app.add_handler(CommandHandler("status", self.cmd_status, filters=me))
             app.add_handler(MessageHandler(me & filters.TEXT & ~filters.COMMAND, self.on_text))
             app.add_handler(MessageHandler(me & (filters.PHOTO | filters.Document.IMAGE), self.on_photo))
+            app.add_handler(MessageHandler(me & filters.Document.ALL & ~filters.Document.IMAGE, self.on_file))
             app.add_handler(CallbackQueryHandler(self.on_button, pattern=r"^confirm:"))
             app.add_handler(CallbackQueryHandler(self.on_think_button, pattern=r"^think:"))
             app.add_handler(CallbackQueryHandler(self.on_task_button, pattern=r"^task:"))
@@ -340,9 +354,7 @@ class TelegramBot:
     async def on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         assert update.effective_chat and update.message and update.message.text
         chat_id = update.effective_chat.id
-        reply = await self._reply(ctx.bot, chat_id, update.message.text)
-        if reply is not None:
-            await self._send(ctx.bot, chat_id, reply)
+        await self._deliver(ctx.bot, chat_id, await self._reply(ctx.bot, chat_id, update.message.text))
 
     async def on_photo(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """A photo, or an image sent as a file, with its caption as what you're asking. Photos sent together
@@ -367,6 +379,34 @@ class TelegramBot:
         self._replying.add(album.timer)
         album.timer.add_done_callback(self._replying.discard)
 
+    async def on_file(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A file, such as a PDF or a Markdown note: kept in the workspace's inbox/, and the message says where,
+        with its caption as what you're asking."""
+        assert update.effective_chat and update.message and update.message.document
+        msg, chat_id, doc = update.message, update.effective_chat.id, update.message.document
+        name = workspace.safe_name(doc.file_name or "file")
+        suffix = PurePosixPath(name).suffix.lower()
+        limit = min(self.s.config.workspace.max_read_mb, DOWNLOAD_MB) * 1024 * 1024
+        if not self.s.config.workspace.enabled:
+            problem = "Files are switched off, so I can't read that: switch them on in the dashboard's Tools tab."
+        elif suffix != ".pdf" and suffix not in TEXT:
+            problem = "I can read PDFs and text files, such as Markdown, CSV and JSON, but not that kind of file."
+        elif (doc.file_size or 0) > limit:
+            problem = f"That's over {limit // 1024 // 1024} MB, more than I can take."
+        else:
+            problem = None
+        if problem:
+            await self._send(ctx.bot, chat_id, problem)
+            return
+        data = bytes(await (await ctx.bot.get_file(doc.file_id)).download_as_bytearray())
+        try:
+            kept = workspace.save_new(self._workspace, workspace.INBOX, name, data)
+        except ToolError as exc:
+            await self._send(ctx.bot, chat_id, f"I couldn't keep that file: {exc}")
+            return
+        text = f"[File: {kept}] {(msg.caption or '').strip()}".strip()  # read_file reads it
+        await self._deliver(ctx.bot, chat_id, await self._reply(ctx.bot, chat_id, text))
+
     async def _album_done(self, bot: Bot, group: str) -> None:
         await asyncio.sleep(ALBUM_SECONDS)
         album = self._albums.pop(group)  # a photo arriving after this starts another
@@ -376,9 +416,7 @@ class TelegramBot:
         await self._answer_photos(bot, album.chat_id, album.caption, photos)
 
     async def _answer_photos(self, bot: Bot, chat_id: int, caption: str, photos: list[Photo]) -> None:
-        reply = await self._reply(bot, chat_id, caption, photos=photos)
-        if reply is not None:
-            await self._send(bot, chat_id, reply)
+        await self._deliver(bot, chat_id, await self._reply(bot, chat_id, caption, photos=photos))
 
     async def _download(self, bot: Bot, msg: Any) -> Photo:
         """A message's photo or image, as Telegram has it. _NotAPhoto if it's one Athena can't take."""
@@ -410,14 +448,14 @@ class TelegramBot:
             question = msg.message_id
         except TelegramError as exc:
             log.warning("Couldn't post the question from Siri to Telegram: %s", exc)
-        reply = await self._reply(bot, chat_id, prompt, note=VOICE_NOTE, channel="Siri")
-        if reply is None:
+        answer = await self._reply(bot, chat_id, prompt, note=VOICE_NOTE, channel="Siri")
+        if answer is None:
             return "You stopped that in Telegram."
         try:
-            await self._send(bot, chat_id, reply, reply_to=question)
+            await self._deliver(bot, chat_id, answer, reply_to=question)
         except TelegramError as exc:  # Siri still gets the answer
             log.warning("Couldn't post the answer for Siri to Telegram: %s", exc)
-        return markdown_to_speech(reply)
+        return markdown_to_speech(answer.text)
 
     def _still_working(self) -> str:
         """What Siri says when the answer isn't ready in time."""
@@ -433,12 +471,13 @@ class TelegramBot:
         note: str | None = None,
         channel: str = "Telegram",
         photos: list[Photo] | None = None,
-    ) -> str | None:
+    ) -> _Answer | None:
         """The agent's reply to ``text``, and ``photos`` with it, showing "typing..." and asking for approvals in
-        the chat meanwhile.
+        the chat meanwhile, with any files it's sending.
 
         None if /stop stopped it.
         """
+        files: list[str] = []
         typing = asyncio.create_task(self._keep_typing(bot, chat_id))
         asked = self._last[chat_id] = _Asked(text, photos=list(photos or []))
 
@@ -456,7 +495,7 @@ class TelegramBot:
                 return None
             result = answering.result()
             asked.answered = result.saved
-            reply = result.text
+            reply, files = result.text, result.notes.get(SENT, [])
             log.info(
                 "Replied in %.1fs (%d model calls, tools: %s)",
                 result.elapsed,
@@ -480,7 +519,35 @@ class TelegramBot:
             typing.cancel()
             self._answering[chat_id].discard(answering)
             answering.cancel()  # if this was cancelled itself, say as Athena shuts down
-        return reply
+        return _Answer(reply, files)
+
+    async def _deliver(self, bot: Bot, chat_id: int, answer: _Answer | None, reply_to: int | None = None) -> None:
+        """Send an answer, and then the files it came with."""
+        if answer is None:
+            return
+        await self._send(bot, chat_id, answer.text, reply_to=reply_to)
+        for noted in answer.files:
+            await self._send_file(bot, chat_id, noted)
+
+    async def _send_file(self, bot: Bot, chat_id: int, noted: str) -> None:
+        """Send a file send_file noted, from the workspace, never through a link (workspace.py)."""
+        file = json.loads(noted)
+        name = PurePosixPath(file["path"]).name
+        try:
+            data = workspace.read(self._workspace, file["path"], self.s.config.workspace.max_send_mb * 1024 * 1024)
+            await bot.send_document(chat_id, InputFile(data, filename=name), caption=file.get("caption") or None)
+        except (ToolError, TelegramError) as exc:
+            log.warning("Couldn't send a file: %s", exc)
+            await self._send(bot, chat_id, f"I couldn't send you {name}: {exc}")
+
+    async def send_file(self, noted: str) -> None:
+        """Send you a file a task's sending (Channel)."""
+        assert self._bot is not None
+        await self._send_file(self._bot, self.cfg.allowed_user_ids[0], noted)
+
+    @property
+    def _workspace(self) -> Path:
+        return workspace.workspace_of(self.s.config)
 
     async def on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -573,9 +640,7 @@ class TelegramBot:
         if photos and not shown.startswith(label(len(photos))):
             shown = f"{label(len(photos))} {shown}".rstrip()
         await ctx.bot.send_message(chat_id, f"🔁 Trying again: {shown}", link_preview_options=NO_PREVIEW)
-        reply = await self._reply(ctx.bot, chat_id, text, photos=photos)
-        if reply is not None:
-            await self._send(ctx.bot, chat_id, reply)
+        await self._deliver(ctx.bot, chat_id, await self._reply(ctx.bot, chat_id, text, photos=photos))
 
     def _kept_photos(self, names: tuple[str, ...]) -> list[Photo]:
         return [photo for name in names if (photo := self.s.history.photos.load(name))]

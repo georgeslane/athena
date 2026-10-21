@@ -65,7 +65,7 @@ def test_handlers_depend_on_allowlist(config):
     app = make_bot(config, None).build()
     handlers = app.handlers[0]
     assert any(isinstance(h, CallbackQueryHandler) for h in handlers)
-    assert sum(isinstance(h, MessageHandler) for h in handlers) == 3  # your text, your photos, and strangers
+    assert sum(isinstance(h, MessageHandler) for h in handlers) == 4  # your text, photos and files, and strangers
 
     setup_app = make_bot(config, None, allowed=()).build()
     assert [type(h) for h in setup_app.handlers[0]] == [MessageHandler]
@@ -616,8 +616,8 @@ def asking(answer="It's a cat."):
 def test_photos_are_handled_only_from_you(config):
     app = make_bot(config, None).build()
     handlers = [h for h in app.handlers[0] if isinstance(h, MessageHandler)]
-    assert len(handlers) == 3  # your text, your photos, and strangers
-    assert handlers[1].callback.__name__ == "on_photo"
+    assert len(handlers) == 4  # your text, photos and files, and strangers
+    assert [h.callback.__name__ for h in handlers] == ["on_text", "on_photo", "on_file", "on_stranger"]
 
 
 async def test_a_photo_and_its_caption_go_to_the_model(config):
