@@ -84,11 +84,9 @@ OLD_KINDS = ("daily", "weekdays", "weekly", "every")  # regular schedules before
 # How often cron can run something, in minutes: every n minutes or hours where n divides an hour or a day.
 CRON_SPANS = (15, 20, 30, 60, 120, 180, 240, 360, 480, 720, 1440)
 SCHEDULES = (
-    '"now" (once, straight away unless a chat is going on), "in 2h" or "in 30m", "once 2026-10-16 09:00", '
-    '"once 09:00" (the next 09:00), a cron schedule for a regular one, such as "30 7 * * 1-5" (07:30 on '
-    "weekdays: minute, hour, day of the month, month and day of the week; @daily and the like too; at most "
-    'every 15 minutes), or "on arrive-home" (each time that event comes in, from an iPhone Shortcut or '
-    "anything else that calls Athena's /hooks/arrive-home)"
+    '"now", "in 2h", "once 2026-10-16 09:00", "once 09:00" (the next 09:00), cron for a regular one, such as '
+    '"30 7 * * 1-5" (07:30 on weekdays; at most every 15 minutes), or "on arrive-home" (each time something, such '
+    "as an iPhone Shortcut, calls /hooks/arrive-home)"
 )
 EVENT = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")  # an event's name: what /hooks/<name> fires
 EVENT_GAP = 60.0  # seconds: an event coming in again sooner doesn't run a task again
@@ -186,13 +184,20 @@ class Schedule:
             raise ScheduleError(f"I don't understand the schedule {text!r}: {exc} Schedules: {SCHEDULES}.") from None
         return cls("cron", regular.text, cron=regular)
 
+    @classmethod
+    def kept(cls, text: str, tz: tzinfo) -> Schedule:
+        """A schedule as a task keeps it, including a one-off's whose time has come and gone."""
+        kind, _, rest = text.partition(" ")
+        if kind == "once" and (match := _DATE_CLOCK.match(rest)):
+            return cls("once", text, when=_at(match, tz))
+        return cls.parse(text, tz)
+
     @staticmethod
     def _once(rest: str, tz: tzinfo, now: datetime) -> datetime:
         if rest.startswith("in "):
             return (now + _span(rest[3:])).replace(second=0, microsecond=0)
         if match := _DATE_CLOCK.match(rest):
-            day = date.fromisoformat(match.group(1))
-            return datetime.combine(day, clock(int(match.group(2)), int(match.group(3))), tz)
+            return _at(match, tz)
         if _CLOCK.match(rest):
             at = datetime.combine(now.date(), _clock(rest), tz)
             return at if at > now else at + timedelta(days=1)
@@ -250,6 +255,11 @@ def old_to_cron(text: str, due: datetime | None = None) -> tuple[str, bool]:
     hours = every // 60
     at = "*" if hours == 1 else ",".join(str(h) for h in range(due.hour % hours, 24, hours))
     return f"{due.minute} {at} * * *", exact
+
+
+def _at(match: re.Match[str], tz: tzinfo) -> datetime:
+    """The date and time _DATE_CLOCK matched."""
+    return datetime.combine(date.fromisoformat(match.group(1)), clock(int(match.group(2)), int(match.group(3))), tz)
 
 
 def _clock(text: str) -> clock:
@@ -542,7 +552,7 @@ class Scheduler:
         for task in self.store.all():
             if task.status != "active" or task.next_run is None:
                 continue
-            schedule = Schedule.parse(task.schedule, self.tz)
+            schedule = Schedule.kept(task.schedule, self.tz)
             if schedule.kind == "on":  # an event came in before Athena stopped: what came with it is gone
                 task.next_run = None
                 self.store.save(task)
@@ -633,7 +643,7 @@ class Scheduler:
 
     async def run(self, task: Task) -> None:
         """Run ``task`` now, tell you what it found, and work out when it's next due."""
-        schedule = Schedule.parse(task.schedule, self.tz)
+        schedule = Schedule.kept(task.schedule, self.tz)
         self.running = task
         step = self._stepper(lambda: self._free(task), self.cfg.max_minutes, f"Task {task.id}")
 
@@ -947,18 +957,42 @@ class Scheduler:
     # -- what you, and Athena, can do to them --
 
     def add(self, title: str, instructions: str, schedule: str, allowed_tools: list[str], created_by: str) -> Task:
-        title, instructions = title.strip(), instructions.strip()
-        if not title or not instructions:
-            raise ValueError("A task needs a title and instructions.")
+        title, instructions, allowed = self._check(title, instructions, allowed_tools)
         parsed = Schedule.parse(schedule, self.tz)
-        allowed = self.check_tools(allowed_tools)
         first = parsed.first(datetime.now(self.tz))
-        task = self.store.add(
-            title[:120], instructions, parsed.text, allowed, created_by, first.timestamp() if first else None
-        )
+        due = first.timestamp() if first else None
+        task = self.store.add(title, instructions, parsed.text, allowed, created_by, due)
         log.info("Task %d (%s) added by %s: %s", task.id, task.title, created_by, parsed.describe())
         self.wake()
         return task
+
+    def change(self, task_id: int, title: str, instructions: str, schedule: str, allowed_tools: list[str]) -> Task:
+        """Change a task, unless it's running. A new schedule counts from now, and a one-off that's done is
+        scheduled again by one."""
+        task = self._get(task_id)
+        if self.running and self.running.id == task.id:
+            raise ValueError(f"“{task.title}” is running: change it once it's finished, or stop it first.")
+        task.title, task.instructions, task.allowed_tools = self._check(title, instructions, allowed_tools)
+        same = " ".join(schedule.lower().split()) == task.schedule  # as kept: a one-off's time may have passed
+        parsed = Schedule.kept(task.schedule, self.tz) if same else Schedule.parse(schedule, self.tz)
+        if parsed.text != task.schedule:
+            task.schedule = parsed.text
+            self._events.pop(task.id, None)
+            if task.status == "done":
+                task.status = "active"
+            first = parsed.first(datetime.now(self.tz))
+            task.next_run = first.timestamp() if first and task.status == "active" else None
+        self.store.save(task)
+        log.info("Task %d (%s) changed: %s", task.id, task.title, parsed.describe())
+        self.wake()
+        return task
+
+    def _check(self, title: str, instructions: str, allowed_tools: list[str]) -> tuple[str, str, list[str]]:
+        """A task's title, instructions and tools as they're kept. ValueError if one won't do."""
+        title, instructions = title.strip(), instructions.strip()
+        if not title or not instructions:
+            raise ValueError("A task needs a title and instructions.")
+        return title[:120], instructions, self.check_tools(allowed_tools)
 
     def check_tools(self, names: list[str]) -> list[str]:
         known = {t.name for t in self._tools()}
@@ -1015,16 +1049,16 @@ class Scheduler:
 
     def resume(self, task_id: int) -> Task:
         task = self._get(task_id)
-        schedule = Schedule.parse(task.schedule, self.tz)
+        schedule = Schedule.kept(task.schedule, self.tz)
         now = datetime.now(self.tz)
         task.status = "active"
         if schedule.kind == "on":
             task.next_run = None  # it waits for the event again
             self._events.pop(task.id, None)
-        elif task.last_run:
-            task.next_run = (schedule.after(now) or now).timestamp()
+        elif schedule.kind == "once":
+            task.next_run = max(schedule.when or now, now).timestamp()  # its time, or now if that's passed
         else:
-            task.next_run = schedule.first(now).timestamp()  # type: ignore[union-attr]
+            task.next_run = schedule.after(now).timestamp()  # type: ignore[union-attr]
         self.store.save(task)
         self.wake()
         return task
@@ -1052,7 +1086,7 @@ class Scheduler:
 
     def describe(self, task: Task) -> dict[str, Any]:
         """A task as the dashboard and Telegram show it."""
-        schedule = Schedule.parse(task.schedule, self.tz)
+        schedule = Schedule.kept(task.schedule, self.tz)
         running = bool(self.running and self.running.id == task.id)
         return {
             "id": task.id,
@@ -1098,7 +1132,7 @@ class Scheduler:
                 )
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
-            return f"Scheduled task #{task.id}, “{task.title}”, {Schedule.parse(task.schedule, self.tz).describe()}."
+            return f"Scheduled task #{task.id}, “{task.title}”, {Schedule.kept(task.schedule, self.tz).describe()}."
 
         async def list_tasks(args: dict[str, Any]) -> str:
             tasks = self.store.all()

@@ -111,7 +111,7 @@ It needs a model that can see, such as Qwen 3.6 35B-A3B. Some MLX conversions of
 A web page for Athena, on your iPhone or Mac. It has six tabs:
 
 - **Status:** what Athena is doing, as on the status board, and how much it's used: messages answered, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, out of the most the model can read, and what's in Athena's memory. Under Connections, **Thinking** switches the model's thinking on, short or off, as `/think` does.
-- **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, run them now, pause, resume or delete them, and read what each said last time. See [Tasks](#tasks).
+- **Tasks:** what Athena does by itself: add tasks, from scratch or from examples, change, run, pause, resume or delete them, and read what each said last time. See [Tasks](#tasks).
 - **Memory:** what Athena wanted to remember while it worked by itself, to save, change or discard. Search what it remembers, your past conversations and your documents, by meaning and by words. Choose the folders on your Mac to index, and index them: see [Documents](#documents). List your private words, which tools can't send where nothing about you should go: see [Privacy](#privacy).
 - **Skills:** read, write, change and delete skills, see each one's history and go back to an earlier version, and approve, change or discard the skills and changes Athena suggests, shown line by line. See [Skills](#skills).
 - **Board:** the coding projects Athena has handed to Claude, each an epic with its stories in To do, In progress and Done, as Claude reports them. See [Projects for Claude](#projects-for-claude).
@@ -224,6 +224,7 @@ Servers are listed under `[mcp_servers.<name>]` in `config.toml`. Each has eithe
 
 - `include`, `exclude` and `confirm` take glob patterns matched against the server's tool names.
 - `confirm` lists the tools that ask for your approval before they run. It defaults to `["*"]`, every tool, because any tool might send your data off your network. If you narrow it to some tools, use `include` too, so tools you haven't checked can't run without asking.
+- `arguments` are arguments Athena gives the server's tools itself, such as `{ account_name = "athena" }` for the email server. The model isn't shown them, so it can't get them wrong or choose others.
 - `headers` adds HTTP headers, such as an auth token.
 - `env` passes extra environment variables to a local server. Local servers otherwise get only a minimal environment, so your Telegram token isn't exposed to them.
 - `enabled = false` keeps a server's settings without starting it.
@@ -445,7 +446,7 @@ On the dashboard, open **Email** and fill in the address, your provider's IMAP a
 - `MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS`: who it may email, comma-separated, with `*` as a wildcard. Start with just your own address.
 - `MCP_EMAIL_SERVER_ALLOWED_MUTATIONS = "send"`: it can send, but never delete, move, flag or draft.
 
-Sending always asks first. Check the recipients, and the `attachments` list: it can attach any file the Pi can read. To have it only see mail from you, also set `MCP_EMAIL_SERVER_ALLOWED_SENDERS` to your own addresses.
+Athena names its account in every request itself (`arguments` in that block), so the model never has to guess it. Sending always asks first. Check the recipients, and the `attachments` list: it can attach any file the Pi can read. To have it only see mail from you, also set `MCP_EMAIL_SERVER_ALLOWED_SENDERS` to your own addresses.
 
 ### Adding a server
 
@@ -538,7 +539,7 @@ Athena can work on things by itself, then message you what it found: a briefing 
   - A tool that asks first still asks for a task, in Telegram, saying which task wants it, unless you've allowed that task to use it without asking. Unanswered after `confirm_minutes` (60), it's denied.
   - Scheduling another task always asks, so a task can't start others by itself.
 - **If it fails**, say because the Mac's asleep, it tries again after 10 minutes, then 30, then tells you and waits for its next run.
-- **In Telegram**, `/tasks` lists them, with buttons to run, pause, resume, stop or delete each. On the dashboard, the **Tasks** tab does the same.
+- **In Telegram**, `/tasks` lists them, with buttons to run, pause, resume, stop or delete each. On the dashboard, the **Tasks** tab does the same, and you can change a task's title, instructions, schedule and the tools it may use without asking. A new schedule counts from then, and gives a one-off that's done another run. A task can't be changed while it's running.
 
 ### Triggers
 

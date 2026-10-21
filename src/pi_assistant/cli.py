@@ -26,9 +26,16 @@ def _setup_logging(level: int) -> None:
 
 def cmd_run(args: argparse.Namespace) -> int:
     from pi_assistant.app import build_services
+    from pi_assistant.settings import Settings, SettingsError
     from pi_assistant.telegram_bot import TelegramBot
 
     cfg = load_config(args.config)
+    try:
+        if added := Settings(cfg.path, cfg.env_path).add_later_settings():
+            logging.getLogger(__name__).info("Gave %s settings new since it was set up", ", ".join(added))
+            cfg = load_config(args.config)
+    except (SettingsError, OSError) as exc:  # it runs as it is: only what's new is missing
+        logging.getLogger(__name__).warning("Couldn't add new settings to config.toml: %s", exc)
     services = build_services(cfg)
     services.status.channel = "Telegram"
     services.status.approval_timeout = cfg.telegram.confirm_timeout_seconds

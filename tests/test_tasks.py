@@ -496,6 +496,83 @@ async def test_the_scheduler_runs_what_is_due_and_skips_long_missed_runs(athena)
         await scheduler.stop()
 
 
+async def test_a_one_off_runs_once_its_time_has_come(athena):
+    a = athena([completion("Call Sam now.")])
+    task = a["scheduler"].add("Call", "Remind me to call Sam.", "in 2h", [], created_by="you")
+    task.schedule = "once 2026-10-01 09:00"  # as it's kept, once that time has passed
+    a["scheduler"].store.save(task)
+    assert a["scheduler"].describe(task)["when"] == "once, on Thu 1 Oct at 09:00"
+    await a["scheduler"].run(task)
+    assert a["channel"].said == ["📋 **Call**\n\nCall Sam now."]
+    assert a["scheduler"].store.get(task.id).status == "done"
+
+
+# -- changing them -------------------------------------------------------------------------------------
+
+
+def test_changing_a_task(athena):
+    scheduler = athena([])["scheduler"]
+    task = scheduler.add("Daily", "Check.", "30 7 * * *", [], created_by="athena")
+    changed = scheduler.change(task.id, " Weekly ", "Check more. ", "0 9 * * 1", ["publish"])
+    kept = scheduler.store.get(task.id)
+    assert (kept.title, kept.instructions, kept.schedule, kept.allowed_tools) == (
+        "Weekly", "Check more.", "0 9 * * 1", ["publish"],
+    )  # fmt: skip
+    assert kept.next_run == Schedule.parse("0 9 * * 1", LONDON).after(datetime.now(LONDON)).timestamp()
+    assert changed.created_by == "athena" and kept.status == "active"
+    scheduler.change(task.id, "Weekly", "Check again.", "0 9 * * 1", [])  # the same schedule: still due then
+    assert scheduler.store.get(task.id).next_run == kept.next_run
+
+
+def test_a_change_that_wont_do_changes_nothing(athena):
+    scheduler = athena([])["scheduler"]
+    task = scheduler.add("Daily", "Check.", "30 7 * * *", [], created_by="you")
+    for title, schedule, tools, why in [
+        ("", "30 7 * * *", [], "needs a title"),
+        ("Daily", "sometime", [], "I don't understand"),
+        ("Daily", "30 7 * * *", ["schedule_task"], "always has to ask"),
+    ]:
+        with pytest.raises(ValueError, match=why):
+            scheduler.change(task.id, title, "Changed.", schedule, tools)
+    assert scheduler.store.get(task.id).instructions == "Check."
+    with pytest.raises(ValueError, match="no task #99"):
+        scheduler.change(99, "X", "Y", "now", [])
+
+
+def test_a_done_one_off_can_be_renamed_or_scheduled_again(athena):
+    scheduler = athena([])["scheduler"]
+    task = scheduler.add("Call", "Remind me.", "in 2h", [], created_by="you")
+    task.schedule, task.status, task.next_run = "once 2026-10-01 09:00", "done", None  # it's run
+    scheduler.store.save(task)
+    scheduler.change(task.id, "Call Sam", "Remind me.", "once 2026-10-01 09:00", [])  # its time has passed
+    assert (scheduler.store.get(task.id).title, scheduler.store.get(task.id).status) == ("Call Sam", "done")
+    later = (datetime.now(LONDON) + timedelta(days=2)).replace(hour=10, minute=0, second=0, microsecond=0)
+    scheduler.change(task.id, "Call Sam", "Remind me.", f"once {later:%Y-%m-%d %H:%M}", [])
+    kept = scheduler.store.get(task.id)
+    assert kept.status == "active" and kept.next_run == later.timestamp()
+
+
+def test_a_paused_task_stays_paused_and_resumes_on_its_new_schedule(athena):
+    scheduler = athena([])["scheduler"]
+    task = scheduler.add("Call", "Remind me.", "now", [], created_by="you")
+    task.last_run = time.time() - 60  # it ran, and was stopped, so it's paused
+    scheduler.store.save(task)
+    scheduler.pause(task.id)
+    later = (datetime.now(LONDON) + timedelta(days=2)).replace(hour=10, minute=0, second=0, microsecond=0)
+    scheduler.change(task.id, "Call", "Remind me.", f"once {later:%Y-%m-%d %H:%M}", [])
+    assert (scheduler.store.get(task.id).status, scheduler.store.get(task.id).next_run) == ("paused", None)
+    assert scheduler.resume(task.id).next_run == later.timestamp()  # not straight away
+
+
+async def test_a_running_task_cant_be_changed(athena):
+    a = athena([completion("Done.")])
+    scheduler = a["scheduler"]
+    task = scheduler.add("Sums", "Work it out.", "now", [], created_by="you")
+    scheduler.running = task
+    with pytest.raises(ValueError, match="is running"):
+        scheduler.change(task.id, "Sums", "Something else.", "now", [])
+
+
 # -- the model's tools ---------------------------------------------------------------------------------
 
 

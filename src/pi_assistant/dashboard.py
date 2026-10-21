@@ -22,7 +22,8 @@ The page talks to Athena with JSON:
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
   GET    /api/tasks             what Athena does by itself, and what a new task can use
   POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools"}
-  POST   /api/tasks/<id>        {"action": "run" | "pause" | "resume" | "stop"}
+  POST   /api/tasks/<id>        change one: {"title", "instructions", "schedule", "tools"}, or
+                                {"action": "run" | "pause" | "resume" | "stop"}
   DELETE /api/tasks/<id>        delete one
   GET    /api/memory            what's in memory, the documents indexed from your Mac, and suggested memories
   POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning and by words
@@ -72,7 +73,7 @@ from pi_assistant.memory import KINDS, relevance
 from pi_assistant.settings import EnvFile, Running, Settings, SettingsError, hand_written
 from pi_assistant.status import StatusFeed
 from pi_assistant.status_api import wait_seconds
-from pi_assistant.tasks import EXAMPLES, NEVER_UNASKED, SCHEDULES, Scheduler
+from pi_assistant.tasks import EXAMPLES, NEVER_UNASKED, Scheduler
 from pi_assistant.tool_search import NAMES as META_TOOLS
 from pi_assistant.tools import ToolError, matches_any
 from pi_assistant.triggers import PREFIX as HOOKS
@@ -373,17 +374,7 @@ class DashboardServer(Server):
             if not task and method == "GET":
                 return _json(self.tasks())
             if not task and method == "POST":
-                body = _body(request)
-                tools = body.get("tools") or []
-                if not isinstance(tools, list):
-                    raise ValueError("Send the tools it may use without asking as a list of names.")
-                scheduler.add(
-                    str(body.get("title") or ""),
-                    str(body.get("instructions") or ""),
-                    str(body.get("schedule") or ""),
-                    tools,
-                    created_by="you",
-                )
+                scheduler.add(*_task_fields(_body(request)), created_by="you")
                 return _json(self.tasks())
             if not task.isdigit():
                 raise HTTPError(404, "There's no task like that.")
@@ -391,8 +382,11 @@ class DashboardServer(Server):
                 scheduler.delete(int(task))
                 return _json(self.tasks())
             if method == "POST":
-                action = _body(request).get("action")
-                if action == "stop":
+                body = _body(request)
+                action = body.get("action")
+                if action is None:
+                    scheduler.change(int(task), *_task_fields(body))
+                elif action == "stop":
                     scheduler.stop_running()
                 elif action in ("run", "pause", "resume"):
                     getattr(scheduler, "run_now" if action == "run" else action)(int(task))
@@ -705,7 +699,6 @@ class DashboardServer(Server):
         return {
             "tasks": [scheduler.describe(t) for t in scheduler.store.all()],
             "tools": asks,  # tools that ask first, which a task may be allowed to use without asking
-            "schedules": SCHEDULES,
             "examples": EXAMPLES,
             "quiet_minutes": scheduler.cfg.quiet_minutes,
             "watching": scheduler.watching(),
@@ -857,6 +850,15 @@ def _body(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPError(400, "Send a JSON object.")
     return body
+
+
+def _task_fields(body: dict[str, Any]) -> tuple[str, str, str, list[str]]:
+    """A task's title, instructions, schedule and the tools it may use without asking, as the page sends them."""
+    tools = body.get("tools") or []
+    if not isinstance(tools, list):
+        raise ValueError("Send the tools it may use without asking as a list of names.")
+    title, instructions, schedule = (str(body.get(key) or "") for key in ("title", "instructions", "schedule"))
+    return title, instructions, schedule, tools
 
 
 def _skill_body(request: Request) -> dict[str, str]:

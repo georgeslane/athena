@@ -58,6 +58,21 @@ async def test_include_filter_and_name_collisions():
         await manager.stop()
 
 
+async def test_arguments_athena_gives_are_hidden_from_the_model_and_cant_be_changed():
+    manager = MCPManager({"demo": demo_stdio(include=["get_env", "add"], env={"WANTED": "yes"},
+                                             arguments={"name": "WANTED"})})  # fmt: skip
+    await manager.start()
+    try:
+        tools = {t.name: t for t in manager.tools()}
+        assert tools["get_env"].parameters["properties"] == {} and tools["get_env"].parameters["required"] == []
+        assert await tools["get_env"].handler({}) == "yes"
+        assert await tools["get_env"].handler({"name": "HOME"}) == "yes"  # the model can't choose another
+        assert set(tools["add"].parameters["properties"]) == {"a", "b"}  # a tool without one isn't sent it
+        assert await tools["add"].handler({"a": 1, "b": 2}) == "3"
+    finally:
+        await manager.stop()
+
+
 async def test_local_servers_dont_see_our_secrets(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:secret")
     monkeypatch.setenv("LLM_API_KEY", "sk-secret")

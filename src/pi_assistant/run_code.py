@@ -64,11 +64,11 @@ class CodeRunner(Builtin):
     entry = Integration(
         "code",
         "Running code",
-        "Runs Python that Athena writes, for sums, data and files, in a sandbox with no network that sees "
-        "nothing of yours but its own folder.",
+        "Runs Python that Athena writes, for sums, data and files, in a sandbox with no network or access to "
+        "your files.",
         "code",
         builtin=True,
-        asks="Never asks: the code can't reach the network or anything of yours outside its own folder.",
+        asks="Never asks: the code can't reach the network, or anything outside its own folder.",
     )
 
     @classmethod

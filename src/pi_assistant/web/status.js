@@ -201,7 +201,7 @@ function contextMeter(context, max) {
     h("div.bar", { class: share > 0.9 ? "full" : share > 0.7 ? "warn" : "" }, h("span", { style: { width: `${width}%` } })),
     h("p.hint", {
       text: tokens
-        ? "What Athena reads before your next message: its instructions, its tools and this session's conversation." +
+        ? "What Athena reads with your next message: its instructions, its tools and this session's conversation." +
           (max || state.overview.model.reachable !== true ? "" : " The model server didn't say its limit: set llm.context_window to show it.")
         : "It's measured after Athena's next reply.",
     })
@@ -249,7 +249,7 @@ function memoryCard(o) {
     ),
     h("p.hint", {
       style: { marginTop: "10px" },
-      text: "Exchanges are your messages and Athena's replies, kept so it can search what you've talked about in any session.",
+      text: "Exchanges are your messages and Athena's replies, kept so it can search past conversations.",
     }),
     h("div.tool-actions", { style: { marginTop: "10px" } }, h("a.button.small", { href: "#memory", text: "Search and documents" })),
     h(

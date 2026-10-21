@@ -54,7 +54,7 @@ function suggestedMemories(m) {
     "section.card.review",
     {},
     h("div.card-head", {}, h("h2", { text: "Suggested memories" }), h("span.aside", { text: plural(items.length, "to review", "to review") })),
-    h("p.note", {}, icon("info"), h("span", { text: "Athena wanted to remember these while it worked by itself. It keeps them only if you save them. Change one first if it isn't quite right." })),
+    h("p.note", {}, icon("info"), h("span", { text: "Athena wanted to remember these while it worked by itself. It keeps only those you save, as you've edited them." })),
     h("div.review-list", {}, items)
   );
 }
@@ -214,7 +214,7 @@ function privacyCard() {
       "p.note",
       {},
       icon("lock"),
-      h("span", {}, "Words that identify you, one per line: your full name, address, family's names, employer. ", blocked, " Other tools that ask first tell you when they'd send one. Email addresses, phone numbers, postcodes, card and bank numbers and street addresses are caught without listing them.")
+      h("span", {}, "Words that identify you, one per line, such as your full name, family's names and employer. ", blocked, " Tools that ask first warn you when they'd send one. Email addresses, phone numbers, postcodes and card numbers are caught without being listed.")
     ),
     form,
     tryIt,
@@ -255,7 +255,7 @@ function documentsCard(m) {
         "p.note.setup",
         {},
         icon("info"),
-        h("span", { text: "Choose folders on your Mac to index. Then you can search them here, or ask Athena about them. Your Mac needs setting up first: see the README, “Documents”." })
+        h("span", { text: "Choose folders on your Mac to index, to search here or ask Athena about. Your Mac needs setting up first: see the README, “Documents”." })
       )
     );
   } else {
