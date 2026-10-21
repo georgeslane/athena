@@ -740,7 +740,7 @@ class Scheduler:
         """Message you. ``keep``: (a line for your side, what was said), to keep in your chat too."""
         channel = self.channel()
         if channel is None:
-            log.warning("Nowhere to send a task's message: %s", text[:200])
+            log.warning("Nowhere to send a task's message of %d characters", len(text))  # not what it says
             return
         try:
             await channel.tell(text)

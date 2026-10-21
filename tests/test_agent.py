@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import openai
 import pytest
@@ -83,6 +84,28 @@ async def test_tool_call_round_trip_and_cache_friendly_prefix(config, memory):
     # ...while the system prompt and earlier turns are unchanged (prompt cache can be reused).
     assert server.requests[2]["messages"][0] == server.requests[0]["messages"][0]
     assert server.requests[2]["messages"][1] == {"role": "user", "content": "My sister Anna's birthday is 14 March"}
+
+
+async def test_the_log_says_which_tools_ran_but_not_what_they_were_given_or_gave(config, memory, caplog):
+    fact = "George's sister Anna's birthday is 14 March."
+    server = FakeLLMServer(
+        [
+            completion(None, [("remember", {"fact": fact})]),
+            completion("Got it."),
+            completion(None, [("search_memory", {"query": "Anna"})]),
+            completion("14 March."),
+        ]
+    )
+    agent = make_agent(config, memory, server)
+    caplog.set_level(logging.INFO, logger="pi_assistant.agent")
+    await agent.respond("chat1", "My sister Anna's birthday is 14 March")
+    assert "tool remember: ran" in caplog.text
+    assert "Anna" not in caplog.text and "Saved as memory" not in caplog.text
+
+    caplog.clear()
+    caplog.set_level(logging.DEBUG, logger="pi_assistant.agent")  # with --verbose
+    await agent.respond("chat1", "When's Anna's birthday?")
+    assert 'tool search_memory({"query": "Anna"})' in caplog.text
 
 
 async def test_confirmation_declined(config, memory):

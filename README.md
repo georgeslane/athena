@@ -631,8 +631,10 @@ The unit is hardened: if Athena, or a tool it runs, were taken over, it could ch
 ## Development
 
 ```bash
-uv sync          # includes the test dependencies
-uv run pytest    # offline: fake model server, real sqlite-vec, real MCP servers in subprocesses
+uv sync                  # includes the test dependencies
+uv run pytest            # offline: fake model server, real sqlite-vec, real MCP servers in subprocesses
+uv run ruff check .      # lint; CI fails on anything either of these finds
+uv run ruff format .     # formatting
 ```
 
 uv uses its own Python build for this project (`[tool.uv]` in `pyproject.toml`), because some others, including the python.org installer for macOS, can't load sqlite-vec.

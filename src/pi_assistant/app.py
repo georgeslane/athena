@@ -183,7 +183,7 @@ class Services:
         """Tell you something you didn't ask about, such as what a task found. Logged if there's no channel.
         False if it couldn't be sent."""
         if self.channel is None:
-            log.warning("Nowhere to send a message: %s", text[:200])
+            log.warning("Nowhere to send a message of %d characters", len(text))  # not what it says: it can be personal
             return False
         try:
             await self.channel.tell(text)
