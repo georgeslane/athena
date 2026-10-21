@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from pi_assistant.compaction import KEEP_MESSAGES, MIN_MESSAGES, summarise
 from pi_assistant.config import AgentConfig
 from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMClient, LLMReply, ToolCall
@@ -31,6 +32,8 @@ log = logging.getLogger(__name__)
 ConfirmFn = Callable[[str, dict[str, Any], str | None], Awaitable[bool]]
 # Notified as each tool runs: (tool name, arguments, result).
 ToolEventFn = Callable[[str, dict[str, Any], str], Awaitable[None]]
+
+WINDOW_SECONDS = 600.0  # how long the model's context window, as its server says, is taken to stay the same
 
 FALLBACK_PROMPT = (
     "You are {assistant_name}, a helpful personal assistant for {user_name}. "
@@ -73,6 +76,8 @@ class AgentResult:
     model_calls: int = 0
     elapsed: float = 0.0
     saved: bool = False  # the exchange went into the history
+    # Tokens of the context window the conversation takes now: what its first request read, and the answer.
+    context_tokens: int = 0
     notes: dict[str, list[str]] = field(default_factory=dict)  # what tools noted (tools.Turn)
     # Everything the model saw and said, kept when it read a skill, to look back at how that went.
     transcript: list[dict[str, Any]] | None = None
@@ -105,11 +110,16 @@ class Agent:
         self.prompt_extra: Callable[[], str] | None = None
         # Called after each exchange is saved to the history, once the chat is free again.
         self.on_saved: Callable[[], None] | None = None
+        # Called when a chat's been compacted, so what the model sees of it has changed.
+        self.on_compacted: Callable[[], None] | None = None
         # Called with each answer, and the background work it was for (None: you), once it's finished.
         self.on_answered: Callable[[AgentResult, Background | None], None] | None = None
         # Looks through what each tool would send for personal details and secrets (privacy.py).
         self.privacy: Privacy | None = None
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._compact_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._compacting: dict[str, asyncio.Task[None]] = {}  # compacting after an answer, by chat
+        self._window: tuple[LLMClient, float, int] | None = None  # (for which client, when, the context window)
         # While paused, new messages wait; `busy` counts the ones being answered.
         self._open = asyncio.Event()
         self._open.set()
@@ -246,6 +256,71 @@ class Agent:
         log.exception("Tool %s failed", name)
         return f"Error: {type(exc).__name__}: {exc}"
 
+    # -- compacting --------------------------------------------------------------------
+
+    async def compact(self, chat_id: str, keep: int = KEEP_MESSAGES) -> int:
+        """Summarise the older part of a chat, keeping about the last ``keep`` messages as they were (compaction.py).
+        Returns how many messages were summarised: 0 if there weren't any, or the chat moved on meanwhile."""
+        async with self._compact_locks[chat_id]:
+            older = await asyncio.to_thread(self.history.older, chat_id, keep)
+            if older is None:
+                return 0
+            task = self.status.begin("Compacting our conversation")
+            try:
+                task.thinking()
+                summary = await summarise(self.llm, self.cfg, older)
+            except BaseException as exc:
+                task.finish(exc)
+                raise
+            task.finish()
+            if not await asyncio.to_thread(self.history.compact, chat_id, older, summary):
+                log.info("Didn't compact: the conversation was cleared or reset meanwhile")
+                return 0
+        log.info("Compacted %d messages into a summary of %d characters", len(older.messages), len(summary))
+        if self.on_compacted:
+            self.on_compacted()
+        return len(older.messages)
+
+    def _compact_soon(self, chat_id: str, tokens: int) -> None:
+        """After an answer, compact the chat in the background if it's grown long, or filled the context window."""
+        running = self._compacting.get(chat_id)
+        if running and not running.done():
+            return
+        self._compacting[chat_id] = asyncio.create_task(self._compact_if_full(chat_id, tokens), name="compact")
+
+    async def _compact_if_full(self, chat_id: str, tokens: int) -> None:
+        length = await asyncio.to_thread(self.history.length, chat_id)
+        full = length >= self.cfg.max_history_messages
+        if not full and self.cfg.compact_at and tokens and length >= MIN_MESSAGES:
+            window = await self.context_window()
+            full = bool(window) and tokens >= self.cfg.compact_at * window
+        if not full:
+            return
+        try:
+            await self.compact(chat_id)
+        except Exception as exc:  # the model may be down: the history is trimmed instead, if it grows much longer
+            log.warning("Couldn't compact the conversation: %s", describe_error(exc))
+
+    async def context_window(self) -> int | None:
+        """The most the model can read at once, in tokens, if it's known: from [llm] context_window, or its server."""
+        now = time.monotonic()
+        if self._window and self._window[0] is self.llm and now - self._window[1] < WINDOW_SECONDS:
+            return self._window[2]
+        try:
+            window = await asyncio.wait_for(self.llm.context_window(), 10)
+        except Exception as exc:
+            log.info("Couldn't ask the model server for its context window: %s", describe_error(exc))
+            return None
+        if window:
+            self._window = (self.llm, now, window)
+        return window
+
+    async def close(self) -> None:
+        """Stop compacting, if it is."""
+        for task in self._compacting.values():
+            task.cancel()
+        await asyncio.gather(*self._compacting.values(), return_exceptions=True)
+
     # -- main entry point -------------------------------------------------------------
 
     async def warm_up(self, chat_id: str) -> LLMReply | None:
@@ -308,6 +383,8 @@ class Agent:
             task.finish()
         if result.saved and self.on_saved:
             self.on_saved()
+        if result.saved:
+            self._compact_soon(chat_id, result.context_tokens)
         if self.on_answered:
             self.on_answered(result, background)
         return result
@@ -413,8 +490,11 @@ class Agent:
                 task.thinking()
                 reply = await step(schemas)
                 result.model_calls += 1
+                if result.model_calls == 1:  # what the conversation itself takes, before any tool's results
+                    result.context_tokens = reply.prompt_tokens or 0
                 if not reply.tool_calls:
                     result.text = reply.content
+                    result.context_tokens += reply.completion_tokens or 0
                     break
                 messages.append(
                     {

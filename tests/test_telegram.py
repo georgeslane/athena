@@ -304,7 +304,47 @@ def command_update(chat_id=1):
 
 def test_the_new_commands_are_in_the_menu(config):
     names = {name for h in make_bot(config, None).build().handlers[0] if hasattr(h, "commands") for name in h.commands}
-    assert {"stop", "retry", "think"} <= names
+    assert {"stop", "retry", "think", "compact"} <= names
+
+
+async def test_compact_says_how_it_went(config):
+    bot = make_bot(config, None)
+    outcomes = [12, 0, ConnectionError("down")]
+    asked = []
+
+    async def compact(chat_id):
+        asked.append(chat_id)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    bot.s.agent.compact = compact
+    said = []
+    for _ in range(3):
+        sent = []
+
+        async def reply_text(text, sent=sent, **kwargs):
+            message = SimpleNamespace(edits=[])
+
+            async def edit_text(new, **kwargs):
+                message.edits.append(new)
+
+            message.edit_text = edit_text
+            sent.append((text, message))
+            return message
+
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text), effective_chat=SimpleNamespace(id=1)
+        )
+        await bot.cmd_compact(update, SimpleNamespace(bot=FakeBot()))
+        [(first, message)] = sent
+        assert first == "Compacting our conversation…"
+        said.append(message.edits[-1])
+    assert asked == ["1", "1", "1"]
+    assert said[0].startswith("Done: I've summarised the 12 messages before the last few")
+    assert said[1].startswith("There's nothing to compact yet")
+    assert said[2].startswith("I couldn't compact our conversation:") and said[2].endswith("It's as it was.")
 
 
 async def test_think_shows_and_changes_how_much_the_model_thinks(config):

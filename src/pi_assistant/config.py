@@ -117,10 +117,12 @@ class AgentConfig(_Section):
     max_tool_rounds: int = 8
     tool_timeout_seconds: float = 120.0
     max_tool_result_chars: int = 6000
-    # When the conversation grows past this many messages, the oldest half is
-    # dropped in one go (rather than one message per turn) so the model server's
-    # prompt cache stays valid most of the time.
+    # A conversation's older part is compacted: summarised, with the last two exchanges kept as they
+    # were, after an answer when it's this many messages long, or the answer filled compact_at of the
+    # model's context window (0: never for that reason). /compact in Telegram does it now. If it can't
+    # be (the model's down), the oldest half is dropped once it's twice this long.
     max_history_messages: int = 40
+    compact_at: float = Field(default=0.8, ge=0, lt=1)
 
 
 class DisplayConfig(_Section):

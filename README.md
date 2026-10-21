@@ -34,7 +34,7 @@ A personal AI assistant that runs on your own hardware. A Raspberry Pi hosts the
 - **Projects for Claude**: Athena hands coding projects to Claude as pull requests in a private GitHub repo, with requirements broken into stories, after you approve them. The dashboard's Board tab shows each as an epic with its stories, following Claude's progress. Athena tells you when one's done, and starts Claude again if it couldn't start or stopped part way, such as at your usage limit. See [Projects for Claude](#projects-for-claude).
 - **Alerts**: a message in Telegram when the Mac's model server, an MCP server or anything else Athena needs stops working, and when it's back, and when Athena itself has stopped. See [Alerts](#alerts).
 - **Your documents, searched by meaning**: choose folders on your Mac in the dashboard, and Athena indexes them when you ask. Ask it in Telegram about something in them, and it says which file and can summarise it. The dashboard's search finds them too. See [Documents](#documents).
-- **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is trimmed in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
+- **Fast replies with prompt caching**: the system prompt, tools and earlier messages stay identical between requests, and old history is compacted in batches. That lets oMLX reuse its cached prompt, which matters a lot on Apple Silicon. The assistant also keeps that cache warm, reading each reply into it straight away, so your messages rarely wait for it, and `doctor` measures how long your Mac takes to read the prompt.
 - **A dashboard**: a web page for your iPhone or Mac, over Tailscale. It shows what Athena is doing, how much it's used and how full the model's context is, for the session and in total. From it you can switch tools and MCP servers on and off, set them up and give them keys, without editing `config.toml`. See [Dashboard](#dashboard).
 - **A status board**: with a Pimoroni Display HAT Mini, the Pi's screen shows what the assistant is doing: idle, working on your request, or waiting for your approval. The board is its own service, [pi-display-microservice](#status-board), which reads Athena's status API.
 - **SSH-friendly tools**: `pi-assistant doctor` checks every connection, `pi-assistant chat` gives you a terminal chat, and `pi-assistant eval` compares models on tool calling.
@@ -76,6 +76,7 @@ Then:
 |---|---|
 | `/session` | Start a new session: the conversation so far is cleared from the model's context, in every chat. Memories are kept, and earlier conversations can still be searched. `/reset` does the same. |
 | `/stop` | Stop the answer Athena is working on, and any messages waiting their turn. |
+| `/compact` | Summarise the conversation so far, keeping the last two exchanges as they were, to make room in the model's context. Athena also does this by itself (see [Sessions and context](#sessions-and-context)). |
 | `/retry` | Answer your last message again, say after changing how much Athena thinks. If it's already been answered, that answer is taken out of the conversation and memory first. While Athena's still answering, it stops first. |
 | `/tasks` | What Athena does by itself, with buttons to run, pause, resume, stop or delete each. See [Tasks](#tasks). |
 | `/think [on\|short\|off]` | How much the model thinks before answering: on, briefly (`short`), or not at all. With no choice, it says which it is, with buttons to change it. It's saved in `config.toml`. |
@@ -134,6 +135,8 @@ You stay signed in for 90 days. To change the password, set `DASHBOARD_TOKEN` in
 ### Sessions and context
 
 Athena keeps the conversation going from one message to the next, so each reply can build on the last. All of it counts towards the model's context, and the more there is, the longer the Mac takes to read it. A **session** is everything since you last started one: send `/session` in Telegram, or press **New session** on the dashboard. The conversation is cleared from the model's context in every chat, and Athena carries on with its memories. Every exchange is also kept in memory, so Athena can still search what you talked about in earlier sessions.
+
+**Compacting** keeps a long conversation going without filling the model's context. Once a conversation is `max_history_messages` long (40), or an answer fills `compact_at` of the context window (80%), Athena has the model summarise everything but the last two exchanges, in the background after it answers. From then on the model sees the summary, then the messages since. `/compact` does it straight away. The summary belongs to the session: `/session` or **Forget everything** ends it. The messages themselves are still kept in memory, so they can be searched. If summarising keeps failing, say because the model server is down, the oldest half of the conversation is dropped once it's twice `max_history_messages`, as before.
 
 **Context** on the dashboard is what Athena reads before your next message: the system prompt, the tools' descriptions and this session's conversation. Athena measures it after each reply, when it warms up the model server's cache. The limit comes from the model server. If yours doesn't say, set `llm.context_window` in `config.toml`.
 
@@ -669,7 +672,8 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/tool_approvals.py` | Which version of each MCP tool you've approved |
 | `src/pi_assistant/server_envs.py`, `mcp-locks/` | Locked environments for servers started with `uvx`, and the recommended servers' locks |
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
-| `src/pi_assistant/history.py` | Per-chat history, with cache-friendly trimming |
+| `src/pi_assistant/history.py` | Per-chat history, its summaries, and cache-friendly trimming |
+| `src/pi_assistant/compaction.py` | Summarising a conversation's older part, when it's long or `/compact` asks |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
 | `src/pi_assistant/photos.py` | Photos you send: kept in the data folder, and shown to the model |
 | `src/pi_assistant/siri.py` | The endpoint the Siri shortcut calls |

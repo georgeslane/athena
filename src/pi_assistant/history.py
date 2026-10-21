@@ -13,6 +13,10 @@ did things and write skills for what it does the same way often (skills.py).
 
 A message with photos notes them by name, and they're kept in the data folder (photos.py). The model
 sees the photos of the last few such messages, and the rest just as their text, which says "[Photo]".
+
+A chat's older messages can be compacted: summarised by the model (compaction.py), with the summary
+kept for the chat and shown at the start of what the model sees, and the window moved past them. A
+summary belongs to the session it was made in, so a new session, /reset or forgetting everything ends it.
 """
 
 from __future__ import annotations
@@ -49,6 +53,17 @@ class Exchange:
     photos: tuple[str, ...] = ()  # the message's photos, by name in the PhotoStore
 
 
+@dataclass(frozen=True)
+class Older:
+    """The part of a chat to compact: the messages before the last few, and the summary of those before them."""
+
+    summary: str | None
+    messages: list[tuple[str, str]]  # (role, content), oldest first
+    through: int  # the id of the last of them
+    start: int  # the window's start when they were read, which compacting checks is unchanged
+    session: int
+
+
 class ConversationStore:
     def __init__(self, db_path: Path, max_messages: int = 40):
         self.max_messages = max(4, max_messages)
@@ -82,6 +97,10 @@ class ConversationStore:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN tools TEXT")
             if "photos" not in columns:  # or before messages could have photos
                 self._conn.execute("ALTER TABLE messages ADD COLUMN photos TEXT")
+            state = {row[1] for row in self._conn.execute("PRAGMA table_info(chat_state)")}
+            if "summary" not in state:  # or before chats could be compacted
+                self._conn.execute("ALTER TABLE chat_state ADD COLUMN summary TEXT")
+                self._conn.execute("ALTER TABLE chat_state ADD COLUMN summary_session INTEGER")
         self.session = self._current_session() or self.new_session(first_message=0)
 
     def _current_session(self) -> Session | None:
@@ -118,28 +137,77 @@ class ConversationStore:
         )
 
     def load(self, chat_id: str) -> list[dict[str, Any]]:
-        """Messages the model should see, oldest first, always starting with a user message. The last IN_CONTEXT
-        messages with photos have them, as long as they're kept."""
+        """Messages the model should see, oldest first, always starting with a user message, and with the chat's
+        summary at the start if it's been compacted. The last IN_CONTEXT messages with photos have them, as long
+        as they're kept."""
         with self._lock, self._conn:
-            rows = self._conn.execute(
-                "SELECT id, role, content, photos FROM messages WHERE chat_id = ? AND id > ? ORDER BY id",
-                (chat_id, self._window_start(chat_id)),
-            ).fetchall()
-            if len(rows) > self.max_messages:
-                # Drop the oldest messages in one step, down to half the limit, so the
-                # prefix stays stable (and cached) for the next several turns.
-                keep = rows[-(self.max_messages // 2) :]
-                while keep and keep[0][1] != "user":
-                    keep = keep[1:]
-                cut_after = rows[len(rows) - len(keep) - 1][0]
-                self._set_window_start(chat_id, cut_after)
+            rows = self._rows(chat_id)
+            if len(rows) > 2 * self.max_messages:
+                # It should have been compacted long before (the model may be down): drop the oldest messages
+                # in one step, down to half the limit, so the prefix stays stable (and cached) for a while.
+                keep = _from_a_question(rows[-(self.max_messages // 2) :])
+                self._set_window_start(chat_id, rows[len(rows) - len(keep) - 1][0])
                 rows = keep
+            summary = self._summary(chat_id)
         shown = {row[0] for row in [r for r in rows if r[3]][-IN_CONTEXT:]}
         messages: list[dict[str, Any]] = []
         for message_id, role, content, names in rows:
+            if summary and not messages:
+                content = f"{summary_block(summary)}\n\n{content}"
             photos = [p for name in json.loads(names) if (p := self.photos.load(name))] if message_id in shown else []
             messages.append({"role": role, "content": with_photos(content, photos)})
         return messages
+
+    def _rows(self, chat_id: str) -> list[tuple[int, str, str, str | None]]:
+        return self._conn.execute(
+            "SELECT id, role, content, photos FROM messages WHERE chat_id = ? AND id > ? ORDER BY id",
+            (chat_id, self._window_start(chat_id)),
+        ).fetchall()
+
+    def _summary(self, chat_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT summary FROM chat_state WHERE chat_id = ? AND summary_session = ?", (chat_id, self.session.id)
+        ).fetchone()
+        return row[0] if row else None
+
+    def length(self, chat_id: str) -> int:
+        """How many messages the model sees in a chat."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND id > ?", (chat_id, self._window_start(chat_id))
+            ).fetchone()[0]
+
+    def older(self, chat_id: str, keep: int) -> Older | None:
+        """The messages to summarise when compacting a chat: all it sees but the last ``keep`` or so, which start
+        with a message of yours. None if there aren't any."""
+        with self._lock:
+            start = self._window_start(chat_id)
+            rows = self._rows(chat_id)
+            kept = _from_a_question(rows[-keep:]) if keep else []
+            older = rows[: len(rows) - len(kept)]
+            if not older:
+                return None
+            return Older(
+                self._summary(chat_id),
+                [(role, content) for _, role, content, _ in older],
+                older[-1][0],
+                start,
+                self.session.id,
+            )
+
+    def compact(self, chat_id: str, older: Older, summary: str) -> bool:
+        """Replace ``older`` with ``summary``. False, and nothing's changed, if the chat's moved on in a way that
+        means it no longer applies: a new session, a reset, everything forgotten, or another compaction."""
+        with self._lock, self._conn:
+            if self.session.id != older.session or self._window_start(chat_id) != older.start:
+                return False
+            self._conn.execute(
+                "INSERT INTO chat_state (chat_id, window_start, summary, summary_session) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET window_start = excluded.window_start, summary = excluded.summary, "
+                "summary_session = excluded.summary_session",
+                (chat_id, older.through, summary, older.session),
+            )
+        return True
 
     def append_exchange(
         self,
@@ -208,6 +276,10 @@ class ConversationStore:
     def reset(self, chat_id: str) -> None:
         with self._lock, self._conn:
             self._set_window_start(chat_id, self._last_message_id())
+            self._conn.execute("PRAGMA secure_delete = ON")
+            self._conn.execute(
+                "UPDATE chat_state SET summary = NULL, summary_session = NULL WHERE chat_id = ?", (chat_id,)
+            )
 
     def clear(self) -> Session:
         """Delete every message, and every photo, in every chat, and start a new session."""
@@ -220,3 +292,15 @@ class ConversationStore:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def summary_block(summary: str) -> str:
+    """A chat's summary as the model sees it, before the messages since."""
+    return f"<summary>\nWhat we said earlier in this conversation, summarised:\n{summary}\n</summary>"
+
+
+def _from_a_question(rows: list[Any]) -> list[Any]:
+    """``rows`` from the first of your messages on, so what the model sees starts with one."""
+    while rows and rows[0][1] != "user":
+        rows = rows[1:]
+    return rows
