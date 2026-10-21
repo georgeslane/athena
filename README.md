@@ -115,7 +115,7 @@ A web page for Athena, on your iPhone or Mac. It has six tabs:
 - **Memory:** what Athena wanted to remember while it worked by itself, to save, change or discard. Search what it remembers, your past conversations and your documents, by meaning and by words. Choose the folders on your Mac to index, and index them: see [Documents](#documents). List your private words, which tools can't send where nothing about you should go: see [Privacy](#privacy).
 - **Skills:** read, write, change and delete skills, see each one's history and go back to an earlier version, and approve, change or discard the skills and changes Athena suggests, shown line by line. See [Skills](#skills).
 - **Board:** the coding projects Athena has handed to Claude, each an epic with its stories in To do, In progress and Done, as Claude reports them. See [Projects for Claude](#projects-for-claude).
-- **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
+- **Tools:** switch the built-in tools and MCP servers on and off, change their settings and give them keys. For a connected server you can choose which of its tools Athena uses and which ask first, and you can add servers of your own. **In every message** shows how much each tool adds to every message and how often it's used, and lets you choose the ones found only when they're needed: see [Tools found when needed](#tools-found-when-needed). Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply straight away, once Athena has finished anything it's in the middle of, without a restart.
 
 A number on the Memory and Skills tabs says how many of Athena's suggestions are waiting for you. It follows your device's light or dark mode. In Safari on an iPhone, Share > Add to Home Screen makes it an app.
 
@@ -258,6 +258,25 @@ When a reviewed lock in `mcp-locks/` changes, servers using it take it the next 
 A tool's description and arguments go into every prompt, and a server can change them whenever it's updated: a hosted server like GitHub's at any time. A changed description can carry instructions to the model, so Athena remembers each tool as it was when you approved it. A tool that's new, or has changed since then, is held back from the model until you approve it. Athena sends you a Telegram message about it, and the server's card on the dashboard says **waiting for you**. Open the card to see what changed, then press **Approve**. Tools that haven't changed keep working meanwhile, and so do tools the config hides, which aren't checked until you use them.
 
 A server's tools are approved as they are the first time it connects, since you've just chosen it and can see them on the dashboard. Removing a server forgets its approvals.
+
+### Tools found when needed
+
+Every tool's description and arguments go into every message, and the Mac reads them each time. Tools you rarely use can be left out, and found when they're needed instead. Choose them on the dashboard's Tools tab, under **In every message**, which lists every tool, built-in or from a server, by how many tokens it adds and how often it's been used in the last 30 days. Or list them in `config.toml`, where patterns work too:
+
+```toml
+[tools]
+on_demand = ["trading212_*", "database_query", "find_mcp_servers"]
+```
+
+In their place the model has two tools. `find_tools` names each of them, with a few words on what it does, and gives the full description of those it asks for. `use_tool` runs one. The list of tools sent with every message stays the same, so the model server's cache still holds. What `find_tools` says goes at the end of the conversation, like any tool's result.
+
+A tool run this way is treated exactly as if it were called by name:
+- It asks first if it would anyway.
+- It's checked for personal details.
+- A task may use it without asking only if you've allowed that tool.
+- The status board and statistics show it by its own name.
+
+Looking tools up takes a little room itself: about 200 tokens, and 30 more for each tool. So it's worth it for the bigger ones, such as an MCP server's, that you use now and then. An MCP server's tool can't be called `find_tools` or `use_tool`: one that is gets its server's name in front, as when two servers' tools share a name.
 
 ### Sandbox
 
@@ -683,6 +702,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 | `src/pi_assistant/server_envs.py`, `mcp-locks/` | Locked environments for servers started with `uvx`, and the recommended servers' locks |
 | `src/pi_assistant/memory.py` | Embeddings, sqlite-vec store, chunking, memory tools |
 | `src/pi_assistant/history.py` | Per-chat history, its summaries, and cache-friendly trimming |
+| `src/pi_assistant/tool_search.py` | Tools found when they're needed: `find_tools` and `use_tool` |
 | `src/pi_assistant/compaction.py` | Summarising a conversation's older part, when it's long or `/compact` asks |
 | `src/pi_assistant/telegram_bot.py` | Telegram handlers and approval buttons |
 | `src/pi_assistant/photos.py` | Photos you send: kept in the data folder, and shown to the model |

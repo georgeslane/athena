@@ -34,8 +34,11 @@ from pi_assistant.tools import Tool, matches_any, safe_tool_name
 
 log = logging.getLogger(__name__)
 
-# Built-in tools' names, which a server's tools can't take: the memory tools' and the skills'.
+# Built-in tools' names, which a server's tools can't take: the memory tools', the skills', and what finds
+# tools when they're needed (tool_search.py).
 RESERVED_NAMES = {
+    "find_tools",
+    "use_tool",
     "remember",
     "search_memory",
     "read_document",

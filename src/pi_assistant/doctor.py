@@ -322,7 +322,8 @@ async def check_prompt(cfg: Config, mcp_tools: list[Tool], report: Callable[[str
         report(WARN, f"skipped: {type(exc).__name__}: {exc}")
         return
     try:
-        schemas = [tool.schema() for tool in [*services.tools.all(), *mcp_tools]]
+        services.tools.add_provider(lambda: mcp_tools)
+        schemas = services.tools.schemas()  # as they're sent: without those found when they're needed
         report_prompt(await measure_prompt(services.llm, services.agent.system_prompt, schemas), report)
     except Exception as exc:
         report(FAIL, f"{type(exc).__name__}: {exc}")

@@ -47,6 +47,7 @@ def cmd_display(args: argparse.Namespace) -> int:
 
 async def _chat(args: argparse.Namespace) -> int:
     from pi_assistant.app import build_services
+    from pi_assistant.tools import flags
 
     cfg = load_config(args.config)
     services = build_services(cfg)
@@ -87,7 +88,7 @@ async def _chat(args: argparse.Namespace) -> int:
                 continue
             if line == "/tools":
                 for tool in services.tools.all():
-                    print(f"  - {tool.name} [{tool.source}]{' (asks first)' if tool.needs_confirmation else ''}")
+                    print(f"  - {tool.name} [{tool.source}]{flags(tool, services.tools)}")
                 continue
             try:
                 result = await services.agent.respond(

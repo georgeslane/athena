@@ -239,6 +239,13 @@ class PrivacyConfig(_Section):
     block: list[str] = Field(default_factory=lambda: ["hand_to_claude", "answer_claude", "extend_claude_project"])
 
 
+class ToolsConfig(_Section):
+    # Tools the model finds when it needs them (tool_search.py), rather than having them described in every
+    # prompt, which keeps prompts short: patterns of tool names, as the model sees them, such as "trading212_*".
+    # The dashboard's Tools tab chooses them, showing how much each takes up and how often it's used.
+    on_demand: list[str] = Field(default_factory=list)
+
+
 class _Config(_Section):
     data_dir: str = "data"
     llm: LLMConfig
@@ -255,6 +262,7 @@ class _Config(_Section):
     triggers: TriggersConfig = Field(default_factory=TriggersConfig)
     security_updates: SecurityUpdatesConfig = Field(default_factory=SecurityUpdatesConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Directory containing the config file; relative paths are resolved against it.

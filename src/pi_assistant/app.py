@@ -292,8 +292,9 @@ class Services:
             try:
                 async with self.agent.paused():
                     old, self.builtins = self.builtins, Builtins.build(cfg)
-                    for section in (*(b.section for b in BUILTINS), "mcp_servers", "documents"):
+                    for section in (*(b.section for b in BUILTINS), "mcp_servers", "documents", "tools"):
                         setattr(self.config, section, getattr(cfg, section))
+                    self.tools.on_demand = list(cfg.tools.on_demand)
                     await self.mcp.configure(cfg.mcp_servers, reconnect=reconnect)
                     self.documents.configure(cfg.documents)
                 await old.close()
@@ -398,6 +399,7 @@ def build_services(cfg: Config) -> Services:
     stats = UsageStats(cfg.db_path)
 
     tools = ToolRegistry()
+    tools.on_demand = list(cfg.tools.on_demand)
     for tool in memory.tools():
         tools.add(tool)
     mcp = MCPManager(

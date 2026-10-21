@@ -770,6 +770,22 @@ class Settings:
             _set(section, key, value)
         return self._save(doc, {})
 
+    def set_on_demand(self, names: Iterable[str], known: Iterable[str]) -> Config:
+        """Choose the tools found when they're needed (tool_search.py), by name, from those ``known``. Patterns
+        written in config.toml by hand, such as "trading212_*", are kept, and so are the tools they name."""
+        doc, raw = self._load()
+        names, known = list(dict.fromkeys(names)), set(known)
+        if unknown := [n for n in names if n not in known]:
+            raise SettingsError(f"There's no tool called {', '.join(unknown)}.")
+        patterns = [p for p in raw.get("tools", {}).get("on_demand", []) if hand_written(p)]
+        if kept := [(t, p) for t in sorted(known - set(names)) for p in patterns if matches_any(t, [p])]:
+            tool, pattern = kept[0]
+            raise SettingsError(f"{tool} is found when needed because of “{pattern}” in config.toml: change it there.")
+        section = _section(doc, "tools", create=True)
+        assert section is not None
+        _set(section, "on_demand", patterns + [n for n in names if not matches_any(n, patterns)])
+        return self._save(doc, {})
+
     def remove_server(self, name: str) -> Config:
         doc, raw = self._load()
         if name in BY_ID:
@@ -913,6 +929,11 @@ def _flag(choice: Any, key: str) -> bool:
     if not isinstance(choice, dict) or not isinstance(choice.get(key), bool):
         raise SettingsError("Each tool needs on and asks, as true or false.")
     return choice[key]
+
+
+def hand_written(pattern: str) -> bool:
+    """A pattern of [tools] on_demand that names tools by a pattern, as only config.toml can, not one by name."""
+    return any(c in pattern for c in "*?[")
 
 
 def _tool_on(tool: str, section: Mapping[str, Any]) -> bool:
