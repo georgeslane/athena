@@ -43,7 +43,8 @@ system_prompt_file = "prompts/system.md"
 max_tool_rounds = 8                    # tool calls per message before forcing an answer
 tool_timeout_seconds = 120
 max_tool_result_chars = 6000
-max_history_messages = 40
+max_history_messages = 40              # past this, older messages are summarised (/compact does it now)
+compact_at = 0.8                       # ...or when the conversation fills this much of the context window
 
 [embeddings]
 # The model that turns memories and documents into vectors, to search them by meaning. Empty

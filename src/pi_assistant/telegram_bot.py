@@ -40,7 +40,7 @@ from pi_assistant.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown
 from pi_assistant.memory import Found
 from pi_assistant.photos import MAX_BYTES, MAX_PER_MESSAGE, Photo, label, mime_of
 from pi_assistant.siri import VOICE_NOTE, SiriServer
-from pi_assistant.status import State
+from pi_assistant.status import State, describe_error
 from pi_assistant.tool_approvals import ToolChange
 
 log = logging.getLogger(__name__)
@@ -81,6 +81,7 @@ MAX_SIDE = 2048  # of the copies Telegram keeps of a photo, the largest up to th
 
 COMMANDS = [
     ("session", "Start a new session: clears our conversation (memories are kept)"),
+    ("compact", "Summarise our conversation so far, keeping the last few messages, to make room"),
     ("stop", "Stop the answer I'm working on"),
     ("retry", "Answer your last message again"),
     ("think", "Think before answering: /think on, short or off"),
@@ -128,6 +129,7 @@ class TelegramBot:
             app.add_handler(CommandHandler("start", self.cmd_start, filters=me))
             app.add_handler(CommandHandler("help", self.cmd_start, filters=me))
             app.add_handler(CommandHandler(["session", "reset"], self.cmd_session, filters=me))
+            app.add_handler(CommandHandler("compact", self.cmd_compact, filters=me))
             app.add_handler(CommandHandler("stop", self.cmd_stop, filters=me))
             app.add_handler(CommandHandler("retry", self.cmd_retry, filters=me))
             app.add_handler(CommandHandler("think", self.cmd_think, filters=me))
@@ -521,6 +523,24 @@ class TelegramBot:
             f"Started session {session.id}. I've cleared our conversation from my context. "
             "Memories are kept, and I can still search what we said before."
         )
+
+    async def cmd_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        assert message is not None
+        said = await message.reply_text("Compacting our conversation…")
+        try:
+            summarised = await self.s.agent.compact(str(update.effective_chat.id))  # type: ignore[union-attr]
+        except Exception as exc:
+            log.warning("Couldn't compact the conversation: %s", exc)
+            text = f"I couldn't compact our conversation: {describe_error(exc)}. It's as it was."
+        else:
+            text = (
+                f"Done: I've summarised the {summarised} messages before the last few, and kept them as they were."
+                if summarised
+                else "There's nothing to compact yet: I see only the last few messages as they are."
+            )
+        with contextlib.suppress(TelegramError):
+            await said.edit_text(text)
 
     async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         stopped = await self._stop(update.effective_chat.id)  # type: ignore[union-attr]

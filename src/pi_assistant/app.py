@@ -158,6 +158,7 @@ class Services:
         self._security: asyncio.Task[None] | None = None
         self._projects_lock = asyncio.Lock()
         self.agent.on_saved = self._conversation_saved
+        self.agent.on_compacted = self.rewarm.set  # what the model sees of the chat has changed
 
     def approve_tools(self, server: str, tools: dict[str, str]) -> None:
         """Let the model use tools that were held back because they're new or changed: {tool: fingerprint}."""
@@ -263,6 +264,7 @@ class Services:
             self._indexer.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._indexer
+        await self.agent.close()  # before the model client and history it uses
         await self.documents.stop()
         await self.mcp.stop()
         if self.mcp.approvals:

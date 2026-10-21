@@ -1,20 +1,115 @@
 from pi_assistant.history import ConversationStore
 
 
-def test_history_window_drops_half_at_once(tmp_path):
+def test_a_history_that_couldnt_be_compacted_drops_half_at_twice_the_limit(tmp_path):
     store = ConversationStore(tmp_path / "h.db", max_messages=8)
-    for i in range(4):
+    for i in range(8):
         store.append_exchange("chat", f"q{i}", f"a{i}")
-    assert len(store.load("chat")) == 8
+    assert len(store.load("chat")) == 16  # compacting should have happened by now, but nothing's dropped yet
 
-    store.append_exchange("chat", "q4", "a4")  # 10 messages > 8: trim to the newest 4
+    store.append_exchange("chat", "q8", "a8")  # 18 messages > 16: trim to the newest 4
     msgs = store.load("chat")
-    assert [m["content"] for m in msgs] == ["q3", "a3", "q4", "a4"]
+    assert [m["content"] for m in msgs] == ["q7", "a7", "q8", "a8"]
     assert msgs[0]["role"] == "user"
 
     # The window then stays put (stable prompt prefix) until it fills up again.
+    store.append_exchange("chat", "q9", "a9")
+    assert [m["content"] for m in store.load("chat")][:2] == ["q7", "a7"]
+
+
+def test_compacting_replaces_the_older_messages_with_a_summary(tmp_path):
+    store = ConversationStore(tmp_path / "h.db")
+    assert store.older("chat", keep=4) is None
+    for i in range(2):
+        store.append_exchange("chat", f"q{i}", f"a{i}")
+    assert store.older("chat", keep=4) is None  # only the last few: nothing to compact
+    for i in range(2, 5):
+        store.append_exchange("chat", f"q{i}", f"a{i}")
+    store.append_exchange("other", "elsewhere", "yes")
+
+    older = store.older("chat", keep=4)
+    assert older.summary is None
+    assert older.messages == [("user", "q0"), ("assistant", "a0"), ("user", "q1"), ("assistant", "a1"),
+                              ("user", "q2"), ("assistant", "a2")]  # fmt: skip
+    assert store.compact("chat", older, "George asked q0 to q2.")
+    msgs = store.load("chat")
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
+    assert msgs[0]["content"] == (
+        "<summary>\nWhat we said earlier in this conversation, summarised:\nGeorge asked q0 to q2.\n</summary>\n\nq3"
+    )
+    assert [m["content"] for m in msgs[1:]] == ["a3", "q4", "a4"]
+    assert store.length("chat") == 4 and [m["content"] for m in store.load("other")] == ["elsewhere", "yes"]
+
+    # The next compaction summarises the summary and what came after it.
     store.append_exchange("chat", "q5", "a5")
-    assert [m["content"] for m in store.load("chat")][:2] == ["q3", "a3"]
+    again = store.older("chat", keep=4)
+    assert again.summary == "George asked q0 to q2." and again.messages == [("user", "q3"), ("assistant", "a3")]
+    assert store.compact("chat", again, "q0 to q3.")
+    assert store.load("chat")[0]["content"].endswith("q0 to q3.\n</summary>\n\nq4")
+
+    store.close()
+    reopened = ConversationStore(tmp_path / "h.db")  # it's kept
+    assert reopened.load("chat")[0]["content"].endswith("q0 to q3.\n</summary>\n\nq4")
+
+
+def test_a_summary_never_outlives_its_session_a_reset_or_forgetting(tmp_path):
+    store = ConversationStore(tmp_path / "h.db")
+    for i in range(4):
+        store.append_exchange("chat", f"q{i}", f"a{i}")
+
+    store.compact("chat", store.older("chat", keep=4), "Old news.")
+    store.new_session()
+    store.append_exchange("chat", "hello", "hi")
+    assert store.load("chat") == [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
+
+    for i in range(3):
+        store.append_exchange("chat", f"q{i}", f"a{i}")
+    store.compact("chat", store.older("chat", keep=4), "This session.")
+    store.reset("chat")
+    store.append_exchange("chat", "after", "reset")
+    assert store.load("chat")[0]["content"] == "after"
+
+    # Compacting what was said before the chat moved on changes nothing.
+    for i in range(3):
+        store.append_exchange("chat", f"q{i}", f"a{i}")
+    for move_on in (store.new_session, lambda: store.reset("chat"), store.clear):
+        store.append_exchange("chat", "x", "y")
+        store.append_exchange("chat", "z", "w")
+        store.append_exchange("chat", "u", "v")
+        older = store.older("chat", keep=4)
+        move_on()
+        assert not store.compact("chat", older, "What was said before.")
+        assert "before" not in str(store.load("chat"))
+
+
+def test_compacting_a_chat_for_the_first_time_after_forgetting_everything_brings_nothing_back(tmp_path):
+    store = ConversationStore(tmp_path / "h.db")
+    for i in range(3):
+        store.append_exchange("chat", f"secret {i}", "ok")
+    older = store.older("chat", keep=4)  # no state kept for the chat yet: its window starts at 0
+    store.clear()  # as forgetting everything does, which starts a new session
+    for i in range(3):
+        store.append_exchange("chat", f"new {i}", "ok")
+    assert not store.compact("chat", older, "secret 0 and secret 1")
+    assert "secret" not in str(store.load("chat"))
+
+
+def test_a_history_from_before_compacting_gets_it(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE chat_state (chat_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO chat_state VALUES ('chat', 0);"
+    )
+    conn.commit()
+    conn.close()
+    store = ConversationStore(db)
+    for i in range(3):
+        store.append_exchange("chat", f"q{i}", f"a{i}")
+    assert store.compact("chat", store.older("chat", keep=4), "Summary.")
+    assert store.load("chat")[0]["content"].endswith("Summary.\n</summary>\n\nq1")
 
 
 def test_reset_and_chats_are_separate(tmp_path):
