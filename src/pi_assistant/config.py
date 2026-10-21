@@ -215,6 +215,9 @@ class MCPServerConfig(_Section):
     # Arguments Athena gives the server's tools itself, such as which email account to use. The model isn't
     # shown them, so it can't get them wrong or choose others.
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # What the server is, for the model, when its tools don't say, such as whose account they use: a line in the
+    # system prompt, beside the names of its tools.
+    about: str = Field(default="", max_length=300)
     timeout_seconds: float = 60.0
     # Local servers run in a sandbox (see sandbox.py): without your home folder, and without the
     # network unless `network`. `read_only_paths` are folders or files it may read as well.

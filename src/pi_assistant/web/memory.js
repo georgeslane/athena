@@ -217,6 +217,7 @@ function privacyCard() {
       h("span", {}, "Words that identify you, one per line, such as your full name, family's names and employer. ", blocked, " Tools that ask first warn you when they'd send one. Email addresses, phone numbers, postcodes and card numbers are caught without being listed.")
     ),
     form,
+    h("div.try-head", {}, h("span.field-label", { text: "Try it" }), h("span.field-help", { text: "See what would be caught in some text." })),
     tryIt,
     found
   );

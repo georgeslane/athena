@@ -3,6 +3,7 @@
 import difflib
 import json
 import os
+import re
 import stat
 import tomllib
 from pathlib import Path
@@ -174,13 +175,18 @@ def test_switching_a_server_on_changes_one_line_and_keeps_the_comments(setup):
 
 
 def test_a_server_set_up_before_a_setting_came_in_is_given_it(setup):
-    """Such as the email server, which was set up before Athena named its account itself."""
+    """Such as the email server, which was set up before Athena named its account itself, or said what it is."""
     settings, config, _ = setup
-    old = config.read_text().replace('arguments = { account_name = "athena" }', "")
+    old = re.sub(r"\n(arguments|about) = .*", "", config.read_text())
     config.write_text(old)
-    assert settings.add_later_settings() == ["email"]
-    assert changed_lines(old, config.read_text()) == ['+arguments = {account_name = "athena"}']
-    assert load_config(config).mcp_servers["email"].arguments == {"account_name": "athena"}
+    assert settings.add_later_settings() == ["apple", "email"]
+    assert changed_lines(old, config.read_text()) == [
+        f'+about = "{BY_ID["apple"].defaults["about"]}"',
+        '+arguments = {account_name = "athena"}',
+        f'+about = "{BY_ID["email"].defaults["about"]}"',
+    ]
+    email = load_config(config).mcp_servers["email"]
+    assert email.arguments == {"account_name": "athena"} and email.about.startswith("Your own inbox, not the user's")
     assert settings.add_later_settings() == [] and config.read_text().count("\narguments =") == 1  # just once
 
 

@@ -128,7 +128,8 @@ class Services:
             chat_name=self._chat_name,
             on_change=self.rewarm.set,  # the list of them is in the prompt
         )
-        self.agent.prompt_extra = self.skills.index
+        # After the system prompt: what some MCP servers are, and the skills.
+        self.agent.prompt_extra = lambda: "\n\n".join(part for part in (self.mcp.about(), self.skills.index()) if part)
         for tool in self.skills.tools():
             self.tools.add(tool)
         # Keeps personal details and secrets from leaving in what tools send (privacy.py).
@@ -334,8 +335,8 @@ class Services:
         return session
 
     async def forget_everything(self) -> Session:
-        """Delete every memory, the conversation history and the code's workspace, and start a new session. Usage
-        statistics stay."""
+        """Delete every memory, the conversation history, the code's workspace and what tasks found, and start a new
+        session. Usage statistics, and the tasks themselves, stay."""
         if self.tasks:
             self.tasks.stop_running()  # it would save what it's doing after everything's deleted
             self.tasks.reviews.clear()  # they hold what was said
@@ -348,6 +349,8 @@ class Services:
             await asyncio.to_thread(self.memory.store.clear)
             session = await asyncio.to_thread(self.history.clear)
             await asyncio.to_thread(clear_workspace, self.config)  # what code made from what was said
+            if self.tasks:
+                await asyncio.to_thread(self.tasks.forget)  # what tasks found, and the steps they took
         self.rewarm.set()
         return session
 

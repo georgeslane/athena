@@ -75,7 +75,7 @@ async def _chat(args: argparse.Namespace) -> int:
         )
         return answer.strip().lower() in {"y", "yes"}
 
-    async def on_tool(tool: str, tool_args: dict[str, Any], output: str) -> None:
+    async def on_tool(tool: str, tool_args: dict[str, Any], output: str, outcome: str) -> None:
         preview = output.replace("\n", " ")
         print(f"  · {tool}({json.dumps(tool_args, ensure_ascii=False)[:120]}) -> {preview[:160]}")
 

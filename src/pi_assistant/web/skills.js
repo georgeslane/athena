@@ -58,7 +58,7 @@ function skillCard(skill) {
   const changed = `${skill.versions > 1 ? "Changed" : "Written"} ${dateTime(skill.updated_at)} by ${by(skill.updated_by)}`;
   const actions = [h("button.button.small", { type: "button", text: "Edit", onclick: () => editSkill(skill) })];
   if (skill.versions > 1) actions.push(h("button.button.small", { type: "button", text: "History", onclick: () => skillHistory(skill) }));
-  actions.push(h("button.button.small.danger", { type: "button", text: "Delete", onclick: () => deleteSkill(skill) }));
+  actions.push(h("span.grow"), h("button.button.small.danger", { type: "button", text: "Delete", onclick: () => deleteSkill(skill) }));
   return h(
     "article.task.skill",
     {},

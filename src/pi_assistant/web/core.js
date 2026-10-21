@@ -85,6 +85,12 @@ export function clock(timestamp, options) {
   }
 }
 
+// A day in Athena's time zone as YYYY-MM-DD, as a date field has it.
+export function isoDay(timestamp) {
+  const [d, m, y] = clock(timestamp, { day: "2-digit", month: "2-digit", year: "numeric" }).split("/");
+  return `${y}-${m}-${d}`;
+}
+
 const sameDay = (a, b) => clock(a, { dateStyle: "short" }) === clock(b, { dateStyle: "short" });
 export const when = (t) => (sameDay(t, now()) ? clock(t, { hour: "2-digit", minute: "2-digit" }) : clock(t, { day: "numeric", month: "short" }));
 

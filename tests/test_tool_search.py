@@ -165,7 +165,7 @@ async def test_the_model_finds_a_tool_and_uses_it_with_the_tools_sent_staying_th
     agent.stats = stats
     seen = []
 
-    async def on_tool(name, args, output):
+    async def on_tool(name, args, output, outcome):
         seen.append((name, args))
 
     result = await agent.respond("chat", "What do I hold?", on_tool=on_tool)

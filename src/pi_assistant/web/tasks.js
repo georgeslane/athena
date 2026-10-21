@@ -1,11 +1,12 @@
 // The Tasks tab: what Athena does by itself.
 
-import { ask, call, clock, h, icon, plural, state, toast } from "./core.js";
+import { ask, call, clock, h, icon, isoDay, plural, state, toast } from "./core.js";
 
 // -- tasks: what Athena does by itself ---------------------------------------------------------------
 
 const tasks_ = { timer: null };
 const TASK_STATES = { active: "Scheduled", paused: "Paused", done: "Done", running: "Working on it" };
+const MARKS = { ran: "✓", failed: "✗", declined: "–" }; // how each step a run took went
 // Schedules to start from, in the task form: what each is called, and how it's written.
 const WHEN = [
   ["Now", "now"],
@@ -40,6 +41,8 @@ function renderTasks() {
     icon("info"),
     h("span", { text: `Athena works on these once you've been quiet for ${plural(t.quiet_minutes, "minute")}, and messages you what it finds.` })
   );
+  // What you've opened stays open when the tab's drawn again, as it is every few seconds while something runs.
+  const opened = new Set([...panel.querySelectorAll("details[data-keep][open]")].map((d) => d.dataset.keep));
   const list = t.tasks.length
     ? h("div.task-list", {}, t.tasks.map(taskCard))
     : h("p.empty", { text: "No tasks yet. Add one, or ask Athena: “every weekday at 7:30, brief me”." });
@@ -57,6 +60,7 @@ function renderTasks() {
       watchingCard(t.watching)
     )
   );
+  for (const d of panel.querySelectorAll("details[data-keep]")) if (opened.has(d.dataset.keep)) d.open = true;
   // While one is running or due, or Athena's checking what it's watching, follow how it's going.
   if (t.tasks.some((task) => task.status === "running" || task.waiting_for_you) || t.watching.checking || t.watching.asked) {
     tasks_.timer = setTimeout(() => location.hash === "#tasks" && loadTasks().catch(() => {}), 3000);
@@ -74,17 +78,18 @@ function taskCard(task) {
   else actions.push(h("button.button.small", { type: "button", text: "Run now", onclick: (e) => taskAction(e, task, "run") }), h("button.button.small", { type: "button", text: "Edit", onclick: () => taskForm({ task }) }));
   if (task.status === "active") actions.push(h("button.button.small", { type: "button", text: "Pause", onclick: (e) => taskAction(e, task, "pause") }));
   else if (task.status !== "running") actions.push(h("button.button.small", { type: "button", text: "Resume", onclick: (e) => taskAction(e, task, "resume") }));
-  actions.push(h("button.button.small.danger", { type: "button", text: "Delete", onclick: () => deleteTask(task) }));
-  const last = task.last_run
+  actions.push(h("span.grow"), h("button.button.small.danger", { type: "button", text: "Delete", onclick: () => deleteTask(task) }));
+  const at = task.last_run && clock(task.last_run, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const last = task.last_outcome
     ? h(
         "details.task-last",
-        {},
-        h("summary", { text: `Last run ${clock(task.last_run, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}: ${task.last_outcome}` }),
-        task.last_result ? h("p.task-said", { text: task.last_result }) : h("p.hint", { text: "It didn't say anything." })
+        { "data-keep": `last-${task.id}` },
+        h("summary", { text: at ? `Last run ${at}: ${task.last_outcome}` : `Last try: ${task.last_outcome}` }),
+        task.last_result ? h("p.task-said", { text: task.last_result }) : null,
+        stepList(task.last_steps, `steps-${task.id}-${task.last_run}`),
+        task.last_result || task.last_steps.length ? null : h("p.hint", { text: "It didn't say or do anything." })
       )
-    : task.last_outcome
-      ? h("p.hint", { text: `Last try: ${task.last_outcome}` })
-      : null;
+    : null;
   return h(
     "article.task",
     { "data-status": task.waiting_for_you ? "waiting" : task.status },
@@ -101,12 +106,40 @@ function taskCard(task) {
   );
 }
 
+// What a run did: each tool it used, what it was given and what came back, and whether it worked.
+function stepList(steps, key) {
+  if (!steps || !steps.length) return null;
+  const io = (label, text) => (text ? h("div.step-io", {}, h("span.label", { text: label }), h("pre", { text })) : null);
+  return h(
+    "div.steps",
+    {},
+    h("span.label", { text: `What it did: ${plural(steps.length, "step")}` }),
+    h(
+      "ol.step-list",
+      {},
+      steps.map((s, i) =>
+        h(
+          "li.step",
+          { "data-outcome": s.outcome },
+          h(
+            "details",
+            { "data-keep": `${key}-${i}` },
+            h("summary", {}, h("span.step-mark", { text: MARKS[s.outcome] || "·", title: s.outcome }), h("code.step-tool", { text: s.tool }), s.outcome === "ran" ? null : h("span.step-outcome", { text: s.outcome }), h("span.step-given", { text: s.given })),
+            io("Given", s.given),
+            io("Got back", s.said || "(nothing)")
+          )
+        )
+      )
+    )
+  );
+}
+
 // How to start a task that runs on an event: the address to call, and with what.
 function trigger(event) {
   const on = state.tasks.triggers.on;
   return h(
     "details.task-last",
-    {},
+    { "data-keep": `trigger-${event}` },
     h("summary", { text: on ? `Runs on POST ${location.origin}/hooks/${event}` : "Triggers are off: set TRIGGERS_TOKEN in .env on the Pi" }),
     h("p.hint", {
       text:
@@ -126,10 +159,19 @@ function watchingCard(w) {
   else if (w.asked) about = "Athena will check as soon as it's free.";
   else {
     const parts = [`Checked every ${plural(w.every_minutes, "minute")}: you only hear when something needs you.`];
-    if (w.last) parts.push(`Last ${time_(w.last.at)}, ${w.last.outcome}.`);
     if (w.next) parts.push(`Next about ${time_(Math.max(w.next, Date.now() / 1000))}.`);
     about = parts.join(" ");
   }
+  const last =
+    w.last &&
+    h(
+      "details.task-last.check-last",
+      { "data-keep": "check" },
+      h("summary", { text: `Last checked ${time_(w.last.at)}: ${w.last.outcome}` }),
+      w.last.said ? h("p.task-said", { text: w.last.said }) : null,
+      stepList(w.last.steps, `check-${w.last.at}`),
+      w.last.said || (w.last.steps || []).length ? null : h("p.hint", { text: "It didn't say or do anything." })
+    );
   const items = w.items.length
     ? h(
         "div.task-list",
@@ -138,10 +180,16 @@ function watchingCard(w) {
           h(
             "article.task",
             { "data-status": "active" },
-            h("p.task-instructions", { text: item.what }),
-            h("p.hint", { text: `${day_(item.created)} to ${day_(item.until)}` + (item.by === "you" ? "" : " · added by Athena") }),
+            h("div.task-head", {}, h("h3", { text: item.what })),
+            h("p.task-when", { text: [item.until ? `Until ${day_(item.until)}` : "No end", `since ${day_(item.created)}`, item.by === "you" ? "" : "added by Athena"].filter(Boolean).join(" · ") }),
             item.note ? h("p.task-said", { text: `Athena's note: ${item.note}` }) : null,
-            h("div.tool-actions", {}, h("button.button.small.danger", { type: "button", text: "Stop watching", onclick: (e) => stopWatching(e, item) }))
+            h(
+              "div.tool-actions",
+              {},
+              h("button.button.small", { type: "button", text: "Edit", onclick: () => watchForm(item) }),
+              h("span.grow"),
+              h("button.button.small.danger", { type: "button", text: "Stop watching", onclick: (e) => stopWatching(e, item) })
+            )
           )
         )
       )
@@ -158,10 +206,11 @@ function watchingCard(w) {
         "div.actions",
         {},
         h("button.button.small", { type: "button", text: "Check now", disabled: !w.items.length || w.checking || !w.every_minutes, onclick: checkNow }),
-        h("button.button.small.primary", { type: "button", text: "Watch for…", onclick: newWatch })
+        h("button.button.small.primary", { type: "button", text: "Watch for…", onclick: () => watchForm() })
       )
     ),
     h("p.note", {}, icon("info"), h("span", { text: about })),
+    last,
     items
   );
 }
@@ -190,12 +239,17 @@ async function stopWatching(event, item) {
   }
 }
 
-function newWatch() {
+// Something to watch for, new or to change: what, and until when, or with no end.
+function watchForm(item) {
   const what = h("textarea", { required: true, rows: 3, maxLength: 300, placeholder: "When the parcel from Amazon has been delivered" });
-  const days = h("input", { type: "number", min: 1, max: 90, value: 14, required: true });
+  what.value = item ? item.what : "";
+  const tomorrow = isoDay(Date.now() / 1000 + 86400);
+  const until = h("input", { type: "date", min: tomorrow, required: true, value: isoDay(item && item.until ? item.until : Date.now() / 1000 + 14 * 86400), "aria-label": "Until" });
+  const noEnd = h("input", { type: "checkbox", checked: Boolean(item && item.until === null), onchange: () => (until.disabled = noEnd.checked) });
+  until.disabled = noEnd.checked;
   const error = h("p.form-error", { role: "alert" });
   const dialog = document.getElementById("dialog");
-  const save = h("button.button.primary", { type: "submit", text: "Watch" });
+  const save = h("button.button.primary", { type: "submit", text: item ? "Save" : "Watch" });
   const form = h(
     "form.task-form",
     {
@@ -204,19 +258,25 @@ function newWatch() {
         save.disabled = true;
         error.textContent = "";
         try {
-          state.tasks = await call("POST", "/api/watches", { what: what.value, days: Number(days.value) });
+          const body = { what: what.value, until: noEnd.checked ? null : until.value };
+          state.tasks = await call("POST", item ? `/api/watches/${item.id}` : "/api/watches", body);
           dialog.close();
           renderTasks();
-          toast("Watching it.");
+          toast(item ? "Saved." : "Watching it.");
         } catch (e) {
           error.textContent = e.message;
           save.disabled = false;
         }
       },
     },
-    h("h2", { text: "Watch for something" }),
+    h("h2", { text: item ? "Edit what's watched" : "Watch for something" }),
     h("label.field", {}, h("span.field-label", { text: "What to watch for" }), h("span.field-help", { text: "And when to tell you. Athena checks with its tools, such as email or prices." }), what),
-    h("label.field", {}, h("span.field-label", { text: "For how many days" }), days),
+    h(
+      "div.field",
+      {},
+      h("span.field-label", { text: "Until" }),
+      h("div.until", {}, until, h("label.check", {}, noEnd, h("span", { text: "No end: check every time" })))
+    ),
     error,
     h("div.tool-actions", {}, h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }), save)
   );

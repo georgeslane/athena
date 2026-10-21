@@ -31,8 +31,8 @@ log = logging.getLogger(__name__)
 # Asks the user to approve a tool call: (tool name, arguments, what it will do if the
 # tool can say) -> approved?
 ConfirmFn = Callable[[str, dict[str, Any], str | None], Awaitable[bool]]
-# Notified as each tool runs: (tool name, arguments, result).
-ToolEventFn = Callable[[str, dict[str, Any], str], Awaitable[None]]
+# After each tool call: the tool, its arguments, what it gave back, and what happened (RAN, FAILED or DECLINED).
+ToolEventFn = Callable[[str, dict[str, Any], str, str], Awaitable[None]]
 
 WINDOW_SECONDS = 600.0  # how long the model's context window, as its server says, is taken to stay the same
 
@@ -518,7 +518,7 @@ class Agent:
                     log.info("tool %s: %s", run.name, outcome)
                     log.debug("tool %s(%s) -> %s", run.name, run.raw_arguments[:200], output[:200].replace("\n", " "))
                     if on_tool:
-                        await on_tool(run.name, run.arguments or {}, output)
+                        await on_tool(run.name, run.arguments or {}, output, outcome)
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
             else:
                 # Out of tool rounds: ask for a final answer with tools switched off.

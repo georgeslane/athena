@@ -53,11 +53,10 @@ function toolsPage() {
     h("div.tool-list", { "data-list": "builtin" }),
     h("h2.label.group-title", { text: "MCP servers" }),
     h("div.tool-list", { "data-list": "servers" }),
+    new AddServer().el,
     h("div", { "data-group": "more" }, h("h2.label.group-title", { text: "Recommended, not set up yet" }), h("div.tool-list", { "data-list": "more" })),
-    h("h2.label.group-title", { text: "In every message" }),
-    onDemand.el,
-    h("h2.label.group-title", { text: "Another server" }),
-    new AddServer().el
+    h("h2.label.group-title", { text: "Prompt size" }),
+    onDemand.el
   );
 }
 
@@ -499,6 +498,7 @@ class OnDemand {
     this.data = null;
     this.chosen = null; // the names you've ticked, until saved
     this.editable = false;
+    this.open = false; // the list of tools, which is long, is shown
   }
 
   update(data, editable) {
@@ -567,16 +567,21 @@ class OnDemand {
       h("p.hint", {
         text:
           "Athena reads every tool's description with each message. Tools you rarely use can be looked up when needed instead, " +
-          `which costs about 200 tokens plus 30 for each, so it pays for the bigger ones. Used: in the last ${d.days} days.`,
+          `which costs about 200 tokens plus 30 for each, so it pays for the bigger ones. Used counts the last ${d.days} days.`,
       }),
       h(
-        "div.server-tools.on-demand-tools",
-        {},
-        h("div.on-demand-tool.head", {}, h("span", { text: "Tool" }), h("span", { text: "Tokens" }), h("span", { text: "Used" }), h("span", { text: "When needed" })),
-        rows
-      ),
-      error,
-      h("div.actions", {}, save)
+        "details.on-demand-list",
+        { open: this.open || this.dirty(), ontoggle: (e) => (this.open = e.target.open) },
+        h("summary", { text: `Choose which, from ${d.tools.length} tools` }),
+        h(
+          "div.server-tools.on-demand-tools",
+          {},
+          h("div.on-demand-tool.head", {}, h("span", { text: "Tool" }), h("span", { text: "Tokens" }), h("span", { text: "Used", title: `In the last ${d.days} days` }), h("span", { text: "When needed" })),
+          rows
+        ),
+        error,
+        h("div.actions", {}, save)
+      )
     );
   }
 }
@@ -605,10 +610,11 @@ class AddServer {
   }
 
   expanded() {
-    const v = { name: "", runs: "command", command: "uvx", args: "", url: "", env: [], headers: [] };
+    const v = { name: "", about: "", runs: "command", command: "uvx", args: "", url: "", env: [], headers: [] };
     const error = h("p.form-error", { role: "alert" });
     const where = h("div.add-form");
     const name = h("input", { type: "text", placeholder: "weather", autocapitalize: "none", spellcheck: false, oninput: () => (v.name = name.value) });
+    const about = h("input", { type: "text", maxLength: 300, placeholder: "The forecast for where I live", oninput: () => (v.about = about.value) });
     const rowsEditor = (list, columns, noun) => {
       const box = h("div.map");
       const draw = () =>
@@ -664,7 +670,7 @@ class AddServer {
       text: "Add server",
       onclick: async () => {
         const map = (rows) => Object.fromEntries(rows.filter((r) => r.key.trim()).map((r) => [r.key.trim(), r.secret ? { secret: r.value } : r.value]));
-        const body = { name: v.name.trim() };
+        const body = { name: v.name.trim(), about: v.about.trim() };
         if (v.runs === "command") Object.assign(body, { command: v.command.trim(), args: v.args.split("\n").map((a) => a.trim()).filter(Boolean), env: map(v.env) });
         else Object.assign(body, { url: v.url.trim(), headers: map(v.headers) });
         add.disabled = true;
@@ -685,6 +691,7 @@ class AddServer {
         "div.add-form",
         {},
         h("label.field", {}, h("span.field-label", { text: "Name" }), h("span.field-help", { text: "Lower-case letters, digits, - or _." }), name),
+        h("label.field", {}, h("span.field-label", { text: "What it's for" }), h("span.field-help", { text: "Optional: a line for Athena, if its tools don't say, such as whose account it uses." }), about),
         h("div.field", {}, h("span.field-label", { text: "Where it runs" }), runs),
         where,
         h("p.note", {}, icon("lock"), h("span", { text: "Every tool it has asks first, until you choose otherwise once it's connected." })),

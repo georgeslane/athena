@@ -62,7 +62,7 @@ from pi_assistant.watching import WatchStore, watch_tool
 from pi_assistant.watching import describe as describe_watch
 
 if TYPE_CHECKING:
-    from pi_assistant.agent import Agent
+    from pi_assistant.agent import Agent, ToolEventFn
     from pi_assistant.channel import Channel
     from pi_assistant.config import TasksConfig
     from pi_assistant.llm import LLMReply
@@ -79,6 +79,7 @@ REVIEW_MINUTES, REVIEW_ROUNDS = 10, 4  # looking back at how a skill went: the m
 HEARTBEAT_MINUTES = 10  # the most a check on what's watched works for, not counting time it waits for you
 MIN_HEARTBEAT = 10.0  # minutes: checks are at least this far apart, whatever heartbeat_minutes says
 MAX_REVIEWS = 5  # waiting to be done; the oldest is dropped for a new one past this
+MAX_STEPS, STEP_CHARS = 40, 400  # a run's tool calls kept for the dashboard, and how much of each's in and out
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")  # as schedules before cron named them
 OLD_KINDS = ("daily", "weekdays", "weekly", "every")  # regular schedules before cron (see old_to_cron)
 # How often cron can run something, in minutes: every n minutes or hours where n divides an hour or a day.
@@ -303,6 +304,7 @@ class Task:
     last_result: str = ""  # what it said last time
     runs: int = 0
     failures: int = 0  # in a row, for this run
+    last_steps: list[dict[str, str]] = field(default_factory=list)  # the tools it used last time (steps())
 
 
 class TaskStore:
@@ -328,19 +330,22 @@ class TaskStore:
                     last_outcome TEXT NOT NULL DEFAULT '',
                     last_result TEXT NOT NULL DEFAULT '',
                     runs INTEGER NOT NULL DEFAULT 0,
-                    failures INTEGER NOT NULL DEFAULT 0
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    last_steps TEXT NOT NULL DEFAULT '[]'
                 )
                 """
             )
+            if "last_steps" not in {row[1] for row in self._conn.execute("PRAGMA table_info(tasks)")}:
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN last_steps TEXT NOT NULL DEFAULT '[]'")
 
     _COLUMNS = (
         "id, title, instructions, schedule, allowed_tools, status, created_by, created_at, "
-        "next_run, last_run, last_outcome, last_result, runs, failures"
+        "next_run, last_run, last_outcome, last_result, runs, failures, last_steps"
     )
 
     def _task(self, row: tuple[Any, ...]) -> Task:
         values = list(row)
-        values[4] = json.loads(values[4])
+        values[4], values[14] = json.loads(values[4]), json.loads(values[14])
         return Task(*values)
 
     def add(
@@ -385,7 +390,8 @@ class TaskStore:
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE tasks SET title = ?, instructions = ?, schedule = ?, allowed_tools = ?, status = ?, "
-                "next_run = ?, last_run = ?, last_outcome = ?, last_result = ?, runs = ?, failures = ? WHERE id = ?",
+                "next_run = ?, last_run = ?, last_outcome = ?, last_result = ?, runs = ?, failures = ?, last_steps = ? "
+                "WHERE id = ?",
                 (
                     task.title,
                     task.instructions,
@@ -398,6 +404,7 @@ class TaskStore:
                     task.last_result,
                     task.runs,
                     task.failures,
+                    json.dumps(task.last_steps),
                     task.id,
                 ),
             )
@@ -433,6 +440,23 @@ class Review:
     skills: list[str]
     transcript: list[dict[str, Any]] = field(repr=False)  # what it did, from AgentResult.transcript
     what: str  # what it used them for: "our chat", or "your task “Briefing”"
+
+
+def steps() -> tuple[list[dict[str, str]], ToolEventFn]:
+    """What a run did, for the dashboard: a list it fills, and the Agent.respond on_tool that fills it with each
+    tool call, what it was given and gave back (cut short), and whether it ran, failed or was declined."""
+    taken: list[dict[str, str]] = []
+
+    async def on_tool(tool: str, args: dict[str, Any], output: str, outcome: str) -> None:
+        if len(taken) < MAX_STEPS:
+            given = json.dumps(args, ensure_ascii=False) if args else ""
+            taken.append({"tool": tool, "given": _cut(given), "outcome": outcome, "said": _cut(output)})
+
+    return taken, on_tool
+
+
+def _cut(text: str) -> str:
+    return text if len(text) <= STEP_CHARS else text[: STEP_CHARS - 1] + "…"
 
 
 def suggested(notes: dict[str, list[str]]) -> str:
@@ -666,11 +690,13 @@ class Scheduler:
             source=f"your task “{task.title}”",
         )
         log.info("Running task %d (%s)", task.id, task.title)
+        taken, on_tool = steps()
         self._run = asyncio.create_task(
             self.agent.respond(
                 f"task:{task.id}",
                 task.instructions,
                 confirm=confirm,
+                on_tool=on_tool,
                 note=self._note(task, schedule, self._events.get(task.id)),
                 channel="Task",
                 background=background,
@@ -686,6 +712,7 @@ class Scheduler:
             self.running = None
             self._now_please.discard(task.id)
         task = self.store.get(task.id) or task  # changed meanwhile, say paused from the dashboard
+        task.last_steps = taken  # saved with how it went, below
         now = datetime.now(self.tz)
         if self._run.cancelled():
             await self._finished(task, schedule, now, "stopped", "")
@@ -863,9 +890,16 @@ class Scheduler:
         )
         log.info("Checking on %d watched thing%s", len(watching), "" if len(watching) == 1 else "s")
         self.checking = True
+        taken, on_tool = steps()
         self._run = asyncio.create_task(
             self.agent.respond(
-                "heartbeat", text, confirm=confirm, note=note, channel="Heartbeat", background=background
+                "heartbeat",
+                text,
+                confirm=confirm,
+                on_tool=on_tool,
+                note=note,
+                channel="Heartbeat",
+                background=background,
             )
         )
         try:
@@ -894,7 +928,7 @@ class Scheduler:
                     await self._tell(f"👀 {said}", keep=("(You checked what I asked you to watch.)", said))
                 else:
                     said = ""
-        self.check_result = {"at": self.last_check, "outcome": outcome, "said": said}
+        self.check_result = {"at": self.last_check, "outcome": outcome, "said": said, "steps": taken}
         log.info("The heartbeat: %s", outcome)
         self.on_ran()
 
@@ -1071,6 +1105,16 @@ class Scheduler:
         self._events.pop(task_id, None)
         self._now_please.discard(task_id)
 
+    def forget(self) -> None:
+        """Forget what tasks and checks found, as forgetting everything does: what each said and did last time,
+        and the notes on what's watched. The tasks, and what's watched, stay."""
+        for task in self.store.all():
+            task.last_result, task.last_steps = "", []
+            self.store.save(task)
+        self.check_result = None
+        if self.watches:
+            self.watches.forget_notes()
+
     def stop_running(self) -> bool:
         """Stop the task that's running. False if none is."""
         if self._run and not self._run.done():
@@ -1103,6 +1147,7 @@ class Scheduler:
             "last_run": task.last_run,
             "last_outcome": task.last_outcome,
             "last_result": task.last_result,
+            "last_steps": task.last_steps,
             "runs": task.runs,
         }
 
