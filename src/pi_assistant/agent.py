@@ -23,6 +23,7 @@ from pi_assistant.photos import Photo, label, with_photos
 from pi_assistant.privacy import Privacy, refusal, warning
 from pi_assistant.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 from pi_assistant.status import StatusTracker, Task, describe_error
+from pi_assistant.tool_search import USE_TOOL, unwrap
 from pi_assistant.tools import ToolError, ToolRegistry, Turn, begin_turn
 
 log = logging.getLogger(__name__)
@@ -504,15 +505,20 @@ class Agent:
                     }
                 )
                 for call in reply.tool_calls:
-                    output, outcome = await self._run_tool(call, confirm, task, only)
-                    result.tools_used.append(call.name)
-                    record.tools.append((call.name, outcome))
+                    # use_tool runs a tool found when needed: as that tool, for everything but the model's own record.
+                    run = unwrap(call) if call.name == USE_TOOL else call
+                    if isinstance(run, str):
+                        output, outcome, run = run, FAILED, call
+                    else:
+                        output, outcome = await self._run_tool(run, confirm, task, only)
+                    result.tools_used.append(run.name)
+                    record.tools.append((run.name, outcome))
                     # What a tool was given and gave back can be personal, and the journal keeps it after
                     # "forget everything": so only with --verbose.
-                    log.info("tool %s: %s", call.name, outcome)
-                    log.debug("tool %s(%s) -> %s", call.name, call.raw_arguments[:200], output[:200].replace("\n", " "))
+                    log.info("tool %s: %s", run.name, outcome)
+                    log.debug("tool %s(%s) -> %s", run.name, run.raw_arguments[:200], output[:200].replace("\n", " "))
                     if on_tool:
-                        await on_tool(call.name, call.arguments or {}, output)
+                        await on_tool(run.name, run.arguments or {}, output)
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
             else:
                 # Out of tool rounds: ask for a final answer with tools switched off.

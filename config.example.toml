@@ -123,6 +123,12 @@ environment = "live"                   # or "demo" for the practice account, whi
 # these files are ever opened. Name them however you like:
 # "budget" = "/home/you/budget.db"
 
+[tools]
+# Tools found when the model needs them, rather than described in every message, which keeps messages
+# quicker to read: names or patterns of names (README, "Tools found when needed"). The dashboard's
+# Tools tab shows how much each takes up and how often it's used.
+on_demand = []
+
 [mcp_registry]
 # Lets Athena search the official MCP Registry for servers that would help with something it
 # can't do yet, and suggest them (see README, "Tasks"). You add any you want on the dashboard.

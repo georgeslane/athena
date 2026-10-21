@@ -6,6 +6,7 @@ import { loadOverview } from "./dashboard.js";
 // -- the Tools tab --------------------------------------------------------------------------------------
 
 let polling = null;
+let onDemand = null; // the card choosing which tools are found when they're needed
 
 export async function loadTools() {
   showTools(await call("GET", "/api/tools"));
@@ -20,6 +21,7 @@ function showTools(data) {
   fillList("servers", data.tools.filter((t) => !t.builtin && t.added));
   fillList("more", more);
   panel.querySelector("[data-group='more']").hidden = !more.length;
+  onDemand.update(data.on_demand, data.editable && !data.applying);
   const ids = new Set(data.tools.map((t) => t.id));
   for (const id of [...state.cards.keys()]) if (!ids.has(id)) state.cards.delete(id);
 
@@ -36,6 +38,7 @@ function showTools(data) {
 }
 
 function toolsPage() {
+  onDemand = new OnDemand();
   return h(
     "div.tools",
     {},
@@ -51,6 +54,8 @@ function toolsPage() {
     h("h2.label.group-title", { text: "MCP servers" }),
     h("div.tool-list", { "data-list": "servers" }),
     h("div", { "data-group": "more" }, h("h2.label.group-title", { text: "Recommended, not set up yet" }), h("div.tool-list", { "data-list": "more" })),
+    h("h2.label.group-title", { text: "In every message" }),
+    onDemand.el,
     h("h2.label.group-title", { text: "Another server" }),
     new AddServer().el
   );
@@ -487,6 +492,96 @@ class ToolCard {
 }
 
 // A form for an MCP server that isn't one of the recommended ones.
+// Every tool the model has, by how much it adds to each message: those rarely used can be found when needed instead.
+class OnDemand {
+  constructor() {
+    this.el = h("section.card.on-demand");
+    this.data = null;
+    this.chosen = null; // the names you've ticked, until saved
+    this.editable = false;
+  }
+
+  update(data, editable) {
+    const same = this.data && JSON.stringify(this.data) === JSON.stringify(data);
+    this.editable = editable;
+    if (!same || !this.chosen || !this.dirty()) {
+      this.data = data;
+      this.chosen = new Set(data.tools.filter((t) => t.on_demand).map((t) => t.name));
+    }
+    this.render();
+  }
+
+  dirty() {
+    const saved = this.data.tools.filter((t) => t.on_demand).map((t) => t.name);
+    return saved.length !== this.chosen.size || saved.some((n) => !this.chosen.has(n));
+  }
+
+  render() {
+    const d = this.data;
+    const save = h("button.button.small", { type: "button", text: "Save", disabled: !this.editable || !this.dirty() });
+    const error = h("p.form-error", { role: "alert" });
+    const rows = [...d.tools]
+      .sort((a, b) => b.tokens - a.tokens || a.name.localeCompare(b.name))
+      .map((t) => {
+        const box = h("input", {
+          type: "checkbox",
+          checked: this.chosen.has(t.name),
+          disabled: !this.editable || Boolean(t.pattern),
+          title: t.pattern ? `Found when needed because of “${t.pattern}” in config.toml` : null,
+          "aria-label": `Find ${t.name} only when it's needed`,
+          onchange: () => {
+            if (box.checked) this.chosen.add(t.name);
+            else this.chosen.delete(t.name);
+            save.disabled = !this.editable || !this.dirty();
+          },
+        });
+        return h(
+          "div.on-demand-tool",
+          {},
+          h("div", {}, h("span.name", {}, breakable(t.name)), h("span.description", { text: t.from })),
+          h("span.number", { text: t.tokens.toLocaleString() }),
+          h("span.number", { text: t.used.toLocaleString() }),
+          h("label.check", {}, box)
+        );
+      });
+    save.onclick = async () => {
+      save.disabled = true;
+      error.textContent = "";
+      try {
+        const saved = await call("POST", "/api/tools/on-demand", { tools: [...this.chosen] });
+        this.chosen = null;
+        showTools(saved);
+        toast("Saved. Applying…");
+      } catch (e) {
+        error.textContent = e.message;
+        save.disabled = false;
+      }
+    };
+    this.el.replaceChildren(
+      h(
+        "div.card-head",
+        {},
+        h("h2", { text: "Tools in every message" }),
+        h("span.aside", { text: `About ${d.in_prompt.toLocaleString()} tokens` + (d.finding ? `, ${d.finding.toLocaleString()} of them for finding the rest` : "") })
+      ),
+      h("p.hint", {
+        text:
+          "Athena reads every tool's description with each message, which takes the Mac a moment. Tools you rarely use can be found " +
+          "when they're needed instead: Athena looks them up first, and they work just the same. Looking them up takes a little room " +
+          `itself, about 200 tokens and 30 more for each, so it's worth it for the bigger ones. Used: in the last ${d.days} days.`,
+      }),
+      h(
+        "div.server-tools.on-demand-tools",
+        {},
+        h("div.on-demand-tool.head", {}, h("span", { text: "Tool" }), h("span", { text: "Tokens" }), h("span", { text: "Used" }), h("span", { text: "When needed" })),
+        rows
+      ),
+      error,
+      h("div.actions", {}, save)
+    );
+  }
+}
+
 class AddServer {
   constructor() {
     this.el = h("section.card");

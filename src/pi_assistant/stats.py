@@ -139,5 +139,15 @@ class UsageStats:
             "context": context,
         }
 
+    def tool_calls_since(self, when: float) -> dict[str, int]:
+        """How many times each tool's been called since ``when`` (Unix time)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT c.tool, COUNT(*) FROM stats_tool_calls AS c JOIN stats_queries AS q ON q.id = c.query "
+                "WHERE q.started >= ? GROUP BY c.tool",
+                (when,),
+            ).fetchall()
+        return dict(rows)
+
     def close(self) -> None:
         self._conn.close()

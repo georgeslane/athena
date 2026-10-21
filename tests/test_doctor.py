@@ -9,7 +9,7 @@ from conftest import FakeLLMServer, completion
 from pi_assistant import doctor
 from pi_assistant.databases import Databases
 from pi_assistant.doctor import FAIL, OK, WARN, PromptCost, check_prompt, measure_prompt, report_prompt
-from pi_assistant.tools import Tool
+from pi_assistant.tools import Tool, ToolRegistry
 from pi_assistant.trading212 import Trading212
 
 SCHEMAS = [{"type": "function", "function": {"name": "x", "description": "y", "parameters": {"type": "object"}}}]
@@ -63,19 +63,27 @@ async def test_check_uses_the_assistants_own_prompt_and_tools(config, monkeypatc
     async def close():
         closed.append(True)
 
-    services = SimpleNamespace(
-        tools=SimpleNamespace(all=lambda: [builtin]),
-        agent=SimpleNamespace(system_prompt="You are Athena."),
-        llm=server.client(config.llm),
-        close=close,
-    )
-    monkeypatch.setattr(doctor, "build_services", lambda cfg: services)
+    def services(on_demand=()):
+        tools = ToolRegistry()
+        tools.add(builtin)
+        tools.on_demand = list(on_demand)
+        llm = server.client(config.llm)
+        return SimpleNamespace(
+            tools=tools, agent=SimpleNamespace(system_prompt="You are Athena."), llm=llm, close=close
+        )
+
+    monkeypatch.setattr(doctor, "build_services", lambda cfg: services())
     reported = []
     await check_prompt(config, [from_mcp], lambda mark, msg: reported.append((mark, msg)))
 
     assert [t["function"]["name"] for t in server.requests[1]["tools"]] == ["remember", "search_files"]
     assert reported[0] == (OK, "2 tools, adding 1,000 tokens to every request")
     assert closed
+
+    # What's measured is what's sent: without the tools found when they're needed, with what finds them.
+    monkeypatch.setattr(doctor, "build_services", lambda cfg: services(on_demand=["search_*"]))
+    await check_prompt(config, [from_mcp], lambda mark, msg: None)
+    assert [t["function"]["name"] for t in server.requests[-1]["tools"]] == ["remember", "find_tools", "use_tool"]
 
 
 async def test_check_reports_a_failing_model_server(config, monkeypatch):

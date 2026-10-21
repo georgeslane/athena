@@ -42,6 +42,7 @@ from pi_assistant.photos import MAX_BYTES, MAX_PER_MESSAGE, Photo, label, mime_o
 from pi_assistant.siri import VOICE_NOTE, SiriServer
 from pi_assistant.status import State, describe_error
 from pi_assistant.tool_approvals import ToolChange
+from pi_assistant.tools import flags
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -738,8 +739,7 @@ class TelegramBot:
     async def cmd_tools(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines = ["Tools:"]
         for tool in self.s.tools.all():
-            flag = " (asks first)" if tool.needs_confirmation else ""
-            lines.append(f"- {tool.name} [{tool.source}]{flag}")
+            lines.append(f"- {tool.name} [{tool.source}]{flags(tool, self.s.tools)}")
         lines.append("")
         lines.append("MCP servers:")
         for st in self.s.mcp.status() or []:

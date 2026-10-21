@@ -18,6 +18,7 @@ The page talks to Athena with JSON:
   POST   /api/tools             add an MCP server
   DELETE /api/tools/<id>        remove a server that isn't one of the recommended ones
   POST   /api/tools/<id>/approve  let the model use tools held back because they changed: {"tools": {name: fingerprint}}
+  POST   /api/tools/on-demand   {"tools": [names]}: the tools the model finds when it needs them, not in every prompt
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
   GET    /api/tasks             what Athena does by itself, and what a new task can use
   POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools"}
@@ -68,11 +69,12 @@ from urllib.parse import urlsplit
 from pi_assistant.config import Config
 from pi_assistant.documents import DocumentsError
 from pi_assistant.memory import KINDS, relevance
-from pi_assistant.settings import EnvFile, Running, Settings, SettingsError
+from pi_assistant.settings import EnvFile, Running, Settings, SettingsError, hand_written
 from pi_assistant.status import StatusFeed
 from pi_assistant.status_api import wait_seconds
 from pi_assistant.tasks import EXAMPLES, NEVER_UNASKED, SCHEDULES, Scheduler
-from pi_assistant.tools import ToolError
+from pi_assistant.tool_search import NAMES as META_TOOLS
+from pi_assistant.tools import ToolError, matches_any
 from pi_assistant.triggers import PREFIX as HOOKS
 from pi_assistant.triggers import Hooks
 from pi_assistant.watching import DEFAULT_DAYS
@@ -113,6 +115,7 @@ MIN_TOKEN_CHARS = 12
 SIGN_IN_TRIES = 10  # wrong passwords allowed in SIGN_IN_WINDOW, after which it waits
 SIGN_IN_WINDOW = 600.0
 MODEL_CHECK_SECONDS = 60.0
+USED_DAYS = 30  # how far back the Tools tab counts each tool's use
 
 
 # The API, as (method, path, handler): the first that matches a request answers it. A method of None
@@ -126,6 +129,7 @@ ROUTES = (
     ("GET", r"/api/tools", "_get_tools"),
     ("POST", r"/api/tools", "_add_server"),
     ("POST", r"/api/reconnect", "_reconnect"),
+    ("POST", r"/api/tools/on-demand", "_set_on_demand"),
     ("POST", r"/api/tools/(?P<name>[^/]+)/approve", "_approve_tools"),
     ("POST", r"/api/tools/(?P<name>[^/]+)/fix", "_fix_server"),
     ("POST", r"/api/tools/(?P<name>[^/]+)", "_change_server"),
@@ -312,6 +316,13 @@ class DashboardServer(Server):
         except ValueError as exc:
             raise HTTPError(409, str(exc)) from None
         return _json(self.tools())
+
+    async def _set_on_demand(self, request: Request, method: str) -> Response:
+        names = _body(request).get("tools")
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise HTTPError(400, 'Say which tools to find when they\'re needed: {"tools": ["name", ...]}.')
+        known = [t.name for t in self.s.tools.all()]
+        return await self._change(lambda: self.settings.set_on_demand(names, known))
 
     async def _fix_server(self, request: Request, method: str, name: str) -> Response:
         """Check a server's dependencies now, and update any with known vulnerabilities that have a fix."""
@@ -722,6 +733,33 @@ class DashboardServer(Server):
             "applying": self._applying,
             "error": self._apply_error or problem,
             "tools": listed,
+            "on_demand": self.on_demand(),
+        }
+
+    def on_demand(self) -> dict[str, Any]:
+        """Every tool the model has, how much it adds to every prompt, how much it's used, and whether it's found
+        when it's needed instead (tool_search.py)."""
+        registry = self.s.tools
+        since = time.time() - USED_DAYS * 86400
+        used = self.s.stats.tool_calls_since(since) if self.s.stats else {}
+        patterns = [p for p in registry.on_demand if hand_written(p)]
+        tools = [
+            {
+                "name": t.name,
+                "from": t.source.removeprefix("mcp:") if t.source.startswith("mcp:") else "Athena",
+                "tokens": _tokens(t.schema()),
+                "used": used.get(t.name, 0),
+                "on_demand": matches_any(t.name, registry.on_demand),
+                "pattern": next((p for p in patterns if matches_any(t.name, [p])), None),  # set in config.toml
+            }
+            for t in registry.all()
+        ]
+        sent = registry.in_prompt()
+        return {
+            "tools": tools,
+            "days": USED_DAYS,
+            "in_prompt": sum(_tokens(t.schema()) for t in sent),  # with find_tools and use_tool, if they're there
+            "finding": sum(_tokens(t.schema()) for t in sent if t.name in META_TOOLS),  # what those two take
         }
 
     @property
@@ -804,6 +842,11 @@ class DashboardServer(Server):
 
 def _json(payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> Response:
     return Response(json.dumps(payload, ensure_ascii=False), "application/json", status, headers or {})
+
+
+def _tokens(schema: dict[str, Any]) -> int:
+    """Roughly how many tokens a tool's schema takes in the prompt: about four characters each."""
+    return -(-len(json.dumps(schema, ensure_ascii=False)) // 4)
 
 
 def _body(request: Request) -> dict[str, Any]:

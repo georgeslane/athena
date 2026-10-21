@@ -72,6 +72,13 @@ class Tool:
         }
 
 
+def flags(tool: Tool, registry: ToolRegistry) -> str:
+    """How a tool's listed for you: whether it asks first, and whether it's found when it's needed."""
+    said = [said for said, yes in (("asks first", tool.needs_confirmation),
+                                   ("when needed", matches_any(tool.name, registry.on_demand))) if yes]  # fmt: skip
+    return f" ({', '.join(said)})" if said else ""
+
+
 def safe_tool_name(name: str) -> str:
     """Tool names must match ^[a-zA-Z0-9_-]{1,64}$ for most OpenAI-compatible servers."""
     return _INVALID_NAME_CHARS.sub("_", name)[:64] or "tool"
@@ -86,11 +93,15 @@ class ToolRegistry:
 
     The order of tools is stable so the prompt sent to the model stays identical
     between requests, which keeps the model server's prompt cache warm.
+
+    Tools ``on_demand`` names are found by the model when it needs them, rather than sent with every
+    request: find_tools and use_tool are sent in their place (tool_search.py).
     """
 
     def __init__(self) -> None:
         self._static: dict[str, Tool] = {}
         self._providers: list[ToolProvider] = []
+        self.on_demand: list[str] = []  # patterns of tool names: [tools] on_demand
 
     def add(self, tool: Tool) -> None:
         if tool.name in self._static:
@@ -111,10 +122,24 @@ class ToolRegistry:
         return tools
 
     def get(self, name: str) -> Tool | None:
+        """Any tool by its name: one that's found when needed, or find_tools itself, as well."""
         for tool in self.all():
             if tool.name == name:
                 return tool
-        return None
+        return next((t for t in self._meta_tools() if t.name == name), None)
+
+    def deferred(self) -> list[Tool]:
+        """The tools found when they're needed, rather than sent with every request."""
+        return [t for t in self.all() if matches_any(t.name, self.on_demand)]
+
+    def in_prompt(self) -> list[Tool]:
+        """The tools sent with every request: all but those found when needed, and what finds them."""
+        return [t for t in self.all() if not matches_any(t.name, self.on_demand)] + self._meta_tools()
+
+    def _meta_tools(self) -> list[Tool]:
+        from pi_assistant.tool_search import meta_tools  # it builds on Tool, from here
+
+        return meta_tools(self.deferred()) if self.on_demand else []
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [t.schema() for t in self.all()]
+        return [t.schema() for t in self.in_prompt()]
