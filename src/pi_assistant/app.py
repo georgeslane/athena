@@ -25,6 +25,7 @@ from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.privacy import Privacy, TermStore
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
+from pi_assistant.server_security import ServerSecurity
 from pi_assistant.settings import PROTECTED_SECRETS, Settings
 from pi_assistant.skills import Skills, SkillStore
 from pi_assistant.stats import UsageStats
@@ -152,6 +153,9 @@ class Services:
         self._indexer: asyncio.Task[None] | None = None
         self._index_again = False
         self._projects: asyncio.Task[None] | None = None  # reads Claude's projects now and then
+        # Updates the MCP servers' dependencies that have known vulnerabilities (server_security.py).
+        self.security = ServerSecurity(self.config.security_updates, self.mcp, self._tell_security, self._restart)
+        self._security: asyncio.Task[None] | None = None
         self._projects_lock = asyncio.Lock()
         self.agent.on_saved = self._conversation_saved
 
@@ -173,6 +177,7 @@ class Services:
         if self.alerts:
             self.alerts.start()
         self._projects = asyncio.create_task(self._watch_projects(), name="claude-projects")
+        self._security = asyncio.create_task(self.security.forever(), name="security-updates")
 
     async def notify(self, text: str) -> bool:
         """Tell you something you didn't ask about, such as what a task found. Logged if there's no channel.
@@ -225,11 +230,22 @@ class Services:
             projects = self.builtins.get("claude_projects")
             await asyncio.sleep(max(1.0, projects.cfg.poll_minutes if projects else 5.0) * 60)
 
+    async def _tell_security(self, text: str) -> None:
+        if await self.notify(text) and self.channel:  # in your chat too, so you can ask about it
+            self.history.append_exchange(self.channel.chat_id, "(You checked the MCP servers' dependencies.)", text)
+
+    async def _restart(self, names: set[str]) -> None:
+        """Restart these MCP servers, once Athena's finished answering, holding new messages meanwhile."""
+        async with self.agent.paused():
+            await self.mcp.reload(names)
+        self.rewarm.set()
+
     async def close(self) -> None:
-        if self._projects:
-            self._projects.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._projects
+        for task in (self._projects, self._security):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         if self.alerts:
             await self.alerts.stop()
         if self.tasks:

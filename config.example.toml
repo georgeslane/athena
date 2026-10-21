@@ -158,6 +158,14 @@ heartbeat_tools = []                   # tools that ask first which checking may
 # TRIGGERS_TOKEN is set in .env.
 max_per_hour = 30                      # events taken in an hour, of every kind; more are refused
 
+[security_updates]
+# Every day, Athena checks the packages locked for MCP servers started with uvx for known vulnerabilities,
+# updates each that has a fix to the version that fixes it, restarts the server and tells you (see README,
+# "Security updates"). The Tools tab shows what it found, with a Fix button.
+enabled = true
+every_hours = 24
+automatic = true                       # false: just tell you, and you press Fix
+
 [alerts]
 # Athena messages you in Telegram when something it needs stops working, and when it's back
 # (see README, "Alerts"): the model server, embeddings, MCP servers, built-ins, free space.

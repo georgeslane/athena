@@ -127,6 +127,7 @@ ROUTES = (
     ("POST", r"/api/tools", "_add_server"),
     ("POST", r"/api/reconnect", "_reconnect"),
     ("POST", r"/api/tools/(?P<name>[^/]+)/approve", "_approve_tools"),
+    ("POST", r"/api/tools/(?P<name>[^/]+)/fix", "_fix_server"),
     ("POST", r"/api/tools/(?P<name>[^/]+)", "_change_server"),
     ("DELETE", r"/api/tools/(?P<name>[^/]+)", "_remove_server"),
     ("GET", r"/api/memory", "_get_memory"),
@@ -310,6 +311,13 @@ class DashboardServer(Server):
             self.s.approve_tools(name, tools)
         except ValueError as exc:
             raise HTTPError(409, str(exc)) from None
+        return _json(self.tools())
+
+    async def _fix_server(self, request: Request, method: str, name: str) -> Response:
+        """Check a server's dependencies now, and update any with known vulnerabilities that have a fix."""
+        if name not in self.s.security.locked():
+            raise HTTPError(404, "Only servers started with uvx have dependencies Athena locks, and so can fix.")
+        await self.s.security.check([name], fix=True)
         return _json(self.tools())
 
     async def _change_server(self, request: Request, method: str, name: str) -> Response:
@@ -701,6 +709,7 @@ class DashboardServer(Server):
             builtins=self.s.builtins.status(),
             applying=self._applying,
             held={st.name: [_held(c) for c in st.pending] for st in servers if st.pending},
+            security=self.s.security.results,
         )
         try:
             listed = self.settings.describe(running)
