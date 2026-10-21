@@ -142,12 +142,22 @@ class ServerEnvs:
         project = self.root / name
         text = project_text(name, server)
         lock = project / "uv.lock"
+        reviewed = self.reviewed / name if self.reviewed else None
+        matches = bool(reviewed and _read(reviewed / "pyproject.toml") == text and (reviewed / "uv.lock").exists())
+        if lock.exists() and _read(project / "pyproject.toml") == text and matches:
+            assert reviewed is not None
+            if (reviewed / "uv.lock").read_bytes() != lock.read_bytes():
+                # The reviewed lock has changed, say for a security fix in a dependency, with the server's version
+                # the same: take it, and the environment's installed again from it below.
+                log.info("The reviewed lock for the MCP server '%s' has changed: using it", name)
+                shutil.copyfile(reviewed / "uv.lock", lock)
+                (project / "origin").write_text("reviewed\n")
         if not lock.exists() or _read(project / "pyproject.toml") != text:
             project.mkdir(parents=True, exist_ok=True)
             lock.unlink(missing_ok=True)
             (project / "pyproject.toml").write_text(text)
-            reviewed = self.reviewed / name if self.reviewed else None
-            if reviewed and _read(reviewed / "pyproject.toml") == text and (reviewed / "uv.lock").exists():
+            if matches:
+                assert reviewed is not None
                 shutil.copyfile(reviewed / "uv.lock", lock)
                 origin = "reviewed"
             else:
