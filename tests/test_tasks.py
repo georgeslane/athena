@@ -2,6 +2,7 @@
 asking, and what they tell you."""
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -193,6 +194,14 @@ async def test_a_task_reports_what_it_found_in_your_chat(athena):
     ran_at = datetime.fromtimestamp(saved.last_run, LONDON)
     assert saved.next_run == Schedule.parse("daily 07:30", LONDON).after(ran_at).timestamp()
     assert a["ran"] == [1]  # so the model server reads your chat again, with the report in it
+
+
+async def test_a_tasks_message_with_nowhere_to_go_isnt_logged_either(athena, caplog):
+    caplog.set_level(logging.INFO)
+    scheduler = athena([])["scheduler"]
+    scheduler.channel = lambda: None
+    await scheduler._tell("Your locker number is 42")
+    assert "Nowhere to send a task's message of 24 characters" in caplog.text and "locker" not in caplog.text
 
 
 async def test_nothing_to_report_stays_quiet(athena):

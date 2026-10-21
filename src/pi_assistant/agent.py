@@ -427,7 +427,10 @@ class Agent:
                     output, outcome = await self._run_tool(call, confirm, task, only)
                     result.tools_used.append(call.name)
                     record.tools.append((call.name, outcome))
-                    log.info("tool %s(%s) -> %s", call.name, call.raw_arguments[:200], output[:200].replace("\n", " "))
+                    # What a tool was given and gave back can be personal, and the journal keeps it after
+                    # "forget everything": so only with --verbose.
+                    log.info("tool %s: %s", call.name, outcome)
+                    log.debug("tool %s(%s) -> %s", call.name, call.raw_arguments[:200], output[:200].replace("\n", " "))
                     if on_tool:
                         await on_tool(call.name, call.arguments or {}, output)
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})

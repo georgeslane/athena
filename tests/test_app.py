@@ -1,6 +1,7 @@
 """The assistant's services changing while it runs: tools reloaded from config.toml, sessions and forgetting."""
 
 import asyncio
+import logging
 import os
 
 import pytest
@@ -97,6 +98,13 @@ async def test_each_reply_is_added_to_memory_in_the_background(services):
     [entry] = services.memory.store.recent(kind="conversation")
     assert entry.text == "User: My locker number is 42\nAssistant: OK."
     assert services.rewarm.is_set()
+
+
+async def test_a_message_with_nowhere_to_go_isnt_logged_either(services, caplog):
+    caplog.set_level(logging.INFO)
+    services.channel = None
+    assert await services.notify("Your locker number is 42") is False
+    assert "Nowhere to send a message of 24 characters" in caplog.text and "locker" not in caplog.text
 
 
 async def test_a_new_session_and_forgetting_everything(services):

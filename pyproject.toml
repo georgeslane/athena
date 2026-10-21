@@ -32,6 +32,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pypdf>=6",  # the Mac files server's tests read a real PDF
+    "ruff==0.17.1",  # exact, so a new release's rules can't fail CI by themselves
 ]
 
 [build-system]
