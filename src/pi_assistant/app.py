@@ -23,7 +23,6 @@ from pi_assistant.llm import LLMClient
 from pi_assistant.mcp_manager import MCPManager
 from pi_assistant.memory import Embedder, MemoryService, MemoryStore
 from pi_assistant.privacy import Privacy, TermStore
-from pi_assistant.run_code import clear_workspace
 from pi_assistant.sandbox import Sandbox
 from pi_assistant.server_envs import ServerEnvs
 from pi_assistant.server_security import ServerSecurity
@@ -36,6 +35,7 @@ from pi_assistant.tasks import Scheduler, TaskStore
 from pi_assistant.tool_approvals import ToolApprovals
 from pi_assistant.tools import Tool, ToolRegistry
 from pi_assistant.watching import WatchStore
+from pi_assistant.workspace import clear_workspace
 
 if TYPE_CHECKING:
     from pi_assistant.channel import Channel

@@ -17,6 +17,10 @@ class Channel(Protocol):
         """Send you ``text``, in Markdown."""
         ...
 
+    async def send_file(self, noted: str) -> None:
+        """Send you a file from the workspace, as send_file noted it (files.py)."""
+        ...
+
     async def ask(self, tool: str, args: dict[str, Any], summary: str | None, *, why: str, timeout: float) -> bool:
         """Ask you to allow a tool call, saying ``why`` it's wanted. False if you deny it or don't answer in time."""
         ...

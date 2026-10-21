@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo
 from pi_assistant import cron
 from pi_assistant.agent import AgentResult, Background
 from pi_assistant.cron import Cron, CronError
+from pi_assistant.files import SENT
 from pi_assistant.memory import connect_db
 from pi_assistant.skills import READ_SKILL, REVIEW, SAVE_SKILL
 from pi_assistant.status import Task as StatusTask
@@ -701,6 +702,7 @@ class Scheduler:
             await self._finished(task, schedule, now, "nothing new", text if result.saved else "")
             return
         await self._tell(f"📋 **{task.title}**\n\n{text}{review}", keep=(f"(Your task “{task.title}” ran.)", text))
+        await self._send_files(result.notes.get(SENT, []))
         await self._finished(task, schedule, now, "told you", text)
 
     def _note(self, task: Task, schedule: Schedule, event: Event | None = None) -> str:
@@ -784,6 +786,15 @@ class Scheduler:
         if keep:  # in your chat too, so you can ask about it
             yours, said = keep
             self.agent.history.append_exchange(channel.chat_id, yours, said)
+
+    async def _send_files(self, noted: list[str]) -> None:
+        """Send you the files a task sent with what it found (send_file, in files.py)."""
+        channel = self.channel()
+        for file in noted if channel else []:
+            try:
+                await channel.send_file(file)  # type: ignore[union-attr]
+            except Exception as exc:
+                log.warning("Couldn't send a task's file: %s", exc)
 
     # -- checking on what's watched --
 

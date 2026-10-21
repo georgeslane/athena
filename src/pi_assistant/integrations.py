@@ -5,6 +5,7 @@ from __future__ import annotations
 from pi_assistant.builtin import Builtin
 from pi_assistant.claude_projects import ClaudeProjects
 from pi_assistant.databases import Databases
+from pi_assistant.files import Files
 from pi_assistant.markets import Markets
 from pi_assistant.mcp_registry import MCPRegistry
 from pi_assistant.news import NewsReader
@@ -17,6 +18,7 @@ BUILTINS: tuple[type[Builtin], ...] = (
     Trading212,
     Databases,
     CodeRunner,
+    Files,
     MCPRegistry,
     ClaudeProjects,
 )

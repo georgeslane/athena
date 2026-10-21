@@ -133,6 +133,13 @@ max_output_chars = 10000               # of what it prints, given back to the mo
 max_file_mb = 50                       # the largest file it can write
 workspace_mb = 500                     # past this, it can only delete files until there's room
 
+[workspace]
+# read_file, write_file and send_file: files in Athena's own folder, data/workspace, Markdown and PDFs
+# among them, and sending them to you in Telegram; files you send Athena go there too (README, "Files").
+enabled = true
+max_read_mb = 20                       # the largest file it reads, or you can send it
+max_send_mb = 50                       # the largest it sends you: Telegram takes up to 50 MB
+
 [tools]
 # Tools found when the model needs them, rather than described in every message, which keeps messages
 # quicker to read: names or patterns of names (README, "Tools found when needed"). The dashboard's

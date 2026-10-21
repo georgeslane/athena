@@ -58,7 +58,8 @@ async def test_reloading_applies_the_tools_settings_from_config_toml(services, m
         "save_skill",
         "recent_work",
     }
-    assert names() == memory_and_tasks | tasks_and_skills | {"find_mcp_servers"}
+    files = {"read_file", "write_file", "send_file"}
+    assert names() == memory_and_tasks | tasks_and_skills | files | {"find_mcp_servers"}
     path = services.config.path
     path.write_text(CONFIG + '\n[news.feeds]\n"BBC" = "https://feeds.bbci.co.uk/news/rss.xml"\n')
     services.rewarm.clear()
