@@ -88,7 +88,7 @@ print(len([p for p in os.listdir('/proc') if p.isdigit()]) < 5)
         *(Path(p).relative_to(home).parts[0] for p in (sys.prefix, sys.base_prefix) if home in Path(p).parents),
     }
     assert set(ast.literal_eval(lines[1])) <= ways, lines[1]
-    assert lines[2] == "False ['HOME', 'LANG', 'MPLBACKEND', 'PATH', 'PYTHONDONTWRITEBYTECODE']"
+    assert lines[2] == "False ['HOME', 'LANG', 'MPLBACKEND', 'PATH', 'PWD', 'PYTHONDONTWRITEBYTECODE']"  # PWD: bwrap's
     assert lines[3] == "[]"  # the system's logs, drives and the like aren't there at all
     assert lines[4] == "True"  # only its own processes
 
