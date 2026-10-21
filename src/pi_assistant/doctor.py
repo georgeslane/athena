@@ -105,8 +105,13 @@ async def run_doctor(cfg: Config) -> bool:
     try:
         store = MemoryStore(cfg.db_path, cfg.embeddings.dimensions, cfg.embeddings.model)
         counts = store.count()
+        words = store.words
         store.close()
         report(OK, f"sqlite-vec loaded; {counts.get('fact', 0)} facts, {counts.get('document', 0)} document chunks")
+        if words:
+            report(OK, "Memory can be searched by its words, as well as by meaning")
+        else:
+            report(WARN, "Memory can only be searched by meaning: this Python's SQLite has no FTS5. Use uv's Python.")
     except Exception as exc:
         report(FAIL, f"{type(exc).__name__}: {exc}")
 

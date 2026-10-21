@@ -184,6 +184,7 @@ async def test_athena_finds_and_reads_documents(athena, mac):
             "file": "~/Documents/Taxes/2025 return.txt",
             "changed": found[0]["changed"],
             "relevance": found[0]["relevance"],
+            "has_the_words": True,
             "passage": "Council tax band D for the flat on Elm Street.",
         }
     ]

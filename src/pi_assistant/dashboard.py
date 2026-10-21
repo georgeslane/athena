@@ -24,7 +24,7 @@ The page talks to Athena with JSON:
   POST   /api/tasks/<id>        {"action": "run" | "pause" | "resume" | "stop"}
   DELETE /api/tasks/<id>        delete one
   GET    /api/memory            what's in memory, the documents indexed from your Mac, and suggested memories
-  POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning
+  POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning and by words
   POST   /api/memory/suggestions/<id>  {"action": "approve" | "discard", "text"}: a memory a task suggested
   GET    /api/projects          the board: projects handed to Claude, as epics of stories
   POST   /api/projects/refresh  read them from GitHub now
@@ -67,7 +67,7 @@ from urllib.parse import urlsplit
 
 from pi_assistant.config import Config
 from pi_assistant.documents import DocumentsError
-from pi_assistant.memory import KINDS
+from pi_assistant.memory import KINDS, relevance
 from pi_assistant.settings import EnvFile, Running, Settings, SettingsError
 from pi_assistant.status import StatusFeed
 from pi_assistant.status_api import wait_seconds
@@ -581,7 +581,8 @@ class DashboardServer(Server):
                     "text": f.text,
                     "path": memory.show_path(f.path) if f.path else None,
                     "date": f.saved,
-                    "relevance": round(1 - f.distance, 3),
+                    "relevance": relevance(f),  # None if found by its words alone
+                    "words": f.words,
                     "id": f.id,
                 }
                 for f in found
