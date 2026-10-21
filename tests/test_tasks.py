@@ -16,7 +16,7 @@ from pi_assistant.config import TasksConfig
 from pi_assistant.history import ConversationStore
 from pi_assistant.llm import LLMReply
 from pi_assistant.status import StatusTracker
-from pi_assistant.tasks import NOTHING, Schedule, ScheduleError, Scheduler, TaskStore
+from pi_assistant.tasks import NOTHING, Schedule, ScheduleError, Scheduler, TaskStore, old_to_cron
 from pi_assistant.tools import Tool, ToolError, ToolRegistry
 from pi_assistant.watching import WatchStore
 
@@ -44,17 +44,22 @@ THURSDAY = datetime(2026, 10, 15, 12, 0, tzinfo=LONDON)  # a Thursday, at noon
             "once, on Fri 16 Oct at 09:00",
         ),
         ("Once 2026-10-20 18:30", "once 2026-10-20 18:30", datetime(2026, 10, 20, 18, 30, tzinfo=LONDON), None),
-        ("daily 7:30", "daily 07:30", datetime(2026, 10, 16, 7, 30, tzinfo=LONDON), "every day at 07:30"),
-        ("weekdays 13:00", "weekdays 13:00", datetime(2026, 10, 15, 13, 0, tzinfo=LONDON), "every weekday at 13:00"),
+        ("30 7 * * *", "30 7 * * *", datetime(2026, 10, 16, 7, 30, tzinfo=LONDON), "every day at 07:30"),
+        ("0 13 * * 1-5", "0 13 * * 1-5", datetime(2026, 10, 15, 13, 0, tzinfo=LONDON), "every weekday at 13:00"),
         (
-            "weekly Mon, thursday 18:00",
-            "weekly mon,thu 18:00",
+            "0  18 * *  MON,thu",
+            "0 18 * * mon,thu",
             datetime(2026, 10, 15, 18, 0, tzinfo=LONDON),
             "every Monday and Thursday at 18:00",
         ),
-        ("every 6h", "every 6h", THURSDAY, "every 6 hours"),
-        ("every 90 minutes", "every 90m", THURSDAY, "every 90 minutes"),
-        ("every 1d", "every 1d", THURSDAY, "every day"),
+        (
+            "cron 0 */6 * * *",
+            "0 */6 * * *",
+            datetime(2026, 10, 15, 18, 0, tzinfo=LONDON),
+            "every day at 00:00, 06:00, 12:00 and 18:00",
+        ),  # fmt: skip
+        ("@daily", "@daily", datetime(2026, 10, 16, 0, 0, tzinfo=LONDON), "every day at 00:00"),
+        ("on arrive-home", "on arrive-home", None, "each time “arrive-home” comes in"),
     ],
 )
 def test_schedules_are_understood_and_kept_the_same_way(said, kept, first, described):
@@ -68,34 +73,112 @@ def test_schedules_are_understood_and_kept_the_same_way(said, kept, first, descr
 
 def test_when_each_kind_runs_next():
     friday_evening = datetime(2026, 10, 16, 19, 0, tzinfo=LONDON)
-    assert Schedule.parse("weekdays 07:30", LONDON).after(friday_evening) == datetime(
-        2026, 10, 19, 7, 30, tzinfo=LONDON
-    )
-    weekly = Schedule.parse("weekly mon,thu 18:00", LONDON)
+    assert Schedule.parse("30 7 * * 1-5", LONDON).after(friday_evening) == datetime(2026, 10, 19, 7, 30, tzinfo=LONDON)
+    weekly = Schedule.parse("0 18 * * mon,thu", LONDON)
     assert weekly.after(datetime(2026, 10, 15, 18, 0, tzinfo=LONDON)) == datetime(2026, 10, 19, 18, 0, tzinfo=LONDON)
-    assert Schedule.parse("every 2h", LONDON).after(THURSDAY) == THURSDAY + timedelta(hours=2)
+    assert Schedule.parse("0 */2 * * *", LONDON).after(THURSDAY) == THURSDAY + timedelta(hours=2)
     assert Schedule.parse("now", LONDON).after(THURSDAY) is None  # only once
+    assert Schedule.parse("on arrive-home", LONDON).after(THURSDAY) is None
     # Across the clocks going back (Sunday 25 October): still 07:30 on the clock.
-    after_change = Schedule.parse("daily 07:30", LONDON).after(datetime(2026, 10, 24, 8, 0, tzinfo=LONDON))
+    after_change = Schedule.parse("30 7 * * *", LONDON).after(datetime(2026, 10, 24, 8, 0, tzinfo=LONDON))
     assert after_change == datetime(2026, 10, 25, 7, 30, tzinfo=LONDON) and after_change.utcoffset() == timedelta(0)
 
 
 @pytest.mark.parametrize(
     ("said", "why"),
     [
-        ("whenever", "I don't understand the schedule"),
-        ("daily 25:00", "Say the time as HH:MM"),
-        ("weekly 18:00", "Say which days"),
-        ("weekly fun 18:00", "isn't a day"),
-        ("every 5m", "at most every 15 minutes"),
-        ("every often", "Say how long"),
+        ("whenever", "I don't understand the schedule 'whenever': A cron schedule has five fields"),
+        ("30 25 * * *", "The hour must be 0-23"),
+        ("*/5 * * * *", "at most every 15 minutes"),
+        ("0 0 30 2 *", "never happens"),
         ("once 2026-10-14 09:00", "has already passed"),
         ("once soon", "Say when"),
+        ("on Arrive Home", "Name the event in lower case"),
     ],
 )
 def test_schedules_that_cant_be_understood_say_why(said, why):
     with pytest.raises(ScheduleError, match=why):
         Schedule.parse(said, LONDON, THURSDAY)
+
+
+@pytest.mark.parametrize(
+    ("said", "why"),
+    [
+        ("daily 07:30", "cron schedules now .*: “daily 07:30” is “30 7 \\* \\* \\*”"),
+        ("weekdays 13:00", "“weekdays 13:00” is “0 13 \\* \\* 1-5”"),
+        ("weekly mon,thu 18:00", "“weekly mon,thu 18:00” is “0 18 \\* \\* 1,4”"),
+        ("every 6h", "“every 6h” is “0 0,6,12,18 \\* \\* \\*”"),
+        ("every 90m", "cron schedules now .*Schedules:"),  # cron can't say it: no suggestion that's wrong
+        ("daily 25:00", "cron schedules now .*Schedules:"),
+    ],
+)
+def test_schedules_from_before_cron_say_what_they_are_in_cron(said, why):
+    with pytest.raises(ScheduleError, match=why):
+        Schedule.parse(said, LONDON, THURSDAY)
+
+
+@pytest.mark.parametrize(
+    ("old", "due", "cron", "exact"),
+    [
+        ("daily 07:30", None, "30 7 * * *", True),
+        ("weekdays 07:30", None, "30 7 * * 1-5", True),
+        ("weekly sun,mon 10:00", None, "0 10 * * 0,1", True),
+        ("every 15m", datetime(2026, 10, 15, 12, 7), "7-59/15 * * * *", True),  # keeps to when it was due
+        ("every 30m", datetime(2026, 10, 15, 12, 30), "*/30 * * * *", True),
+        ("every 1h", datetime(2026, 10, 15, 12, 20), "20 * * * *", True),
+        ("every 6h", datetime(2026, 10, 15, 14, 20), "20 2,8,14,20 * * *", True),
+        ("every 1d", datetime(2026, 10, 15, 9, 5), "5 9 * * *", True),
+        ("every 90m", datetime(2026, 10, 15, 12, 0), "0 0,2,4,6,8,10,12,14,16,18,20,22 * * *", False),  # 2 hours
+        ("every 5h", datetime(2026, 10, 15, 12, 0), "0 0,6,12,18 * * *", False),
+        ("every 2d", datetime(2026, 10, 15, 9, 0), "0 9 */2 * *", False),
+    ],
+)
+def test_schedules_from_before_cron_become_the_cron_that_does_the_same(old, due, cron, exact):
+    assert old_to_cron(old, due and due.replace(tzinfo=LONDON)) == (cron, exact)
+    Schedule.parse(cron, LONDON)  # and it's one that can be used
+
+
+async def test_tasks_kept_from_before_cron_are_given_cron_schedules_and_you_hear_of_any_that_changed(athena):
+    a = athena([])
+    store = a["scheduler"].store
+    due = datetime(2026, 10, 15, 14, 20, tzinfo=LONDON).timestamp()
+    briefing = store.add("Briefing", "Brief me.", "weekdays 07:30", [], "you", due)
+    often = store.add("Often", "Look.", "every 6h", [], "you", due)
+    odd = store.add("Odd", "Look.", "every 90m", [], "you", due)
+    paused = store.add("Paused", "Look.", "weekly fri 18:00", [], "you", None)
+    paused.status = "paused"
+    store.save(paused)
+
+    scheduler = make_scheduler(a, store)
+    assert [store.get(t.id).schedule for t in (briefing, often, odd, paused)] == [
+        "30 7 * * 1-5",
+        "20 2,8,14,20 * * *",
+        "20 0,2,4,6,8,10,12,14,16,18,20,22 * * *",
+        "0 18 * * 5",
+    ]
+    assert store.get(briefing.id).next_run == due and store.get(often.id).next_run == due  # as they were
+    assert store.get(odd.id).next_run > time.time() and store.get(paused.id).status == "paused"
+    scheduler.start()
+    try:
+        async with asyncio.timeout(3):
+            while not a["channel"].said:
+                await asyncio.sleep(0.01)
+    finally:
+        await scheduler.stop()
+    [said] = a["channel"].said
+    assert said.startswith("🗓️ Tasks' regular schedules are cron schedules now, and for some it's changed:")
+    assert "“Odd” was every 90m, which cron can't say: it now runs every day at 00:20, 02:20" in said
+    assert "Briefing" not in said and "Often" not in said  # they do just what they did
+
+    again = make_scheduler(a, store)  # converted once: nothing to do or say the next time
+    assert again._changed == []
+
+
+def make_scheduler(a, store):
+    old = a["scheduler"]
+    return Scheduler(
+        old.cfg, store, old.agent, timezone="Europe/London", channel=old.channel, tools=old._tools, poll_seconds=0.01
+    )
 
 
 # -- running them -------------------------------------------------------------------------------------
@@ -175,7 +258,7 @@ def athena(config, memory, tmp_path):
 
 async def test_a_task_reports_what_it_found_in_your_chat(athena):
     a = athena([completion(None, [("look", {})]), completion("Rain at 4pm, so take an umbrella.")])
-    task = a["scheduler"].add("Weather", "Check the weather for my commute.", "daily 07:30", [], created_by="you")
+    task = a["scheduler"].add("Weather", "Check the weather for my commute.", "30 7 * * *", [], created_by="you")
     await a["scheduler"].run(task)
 
     assert a["channel"].said == ["📋 **Weather**\n\nRain at 4pm, so take an umbrella."]
@@ -192,7 +275,7 @@ async def test_a_task_reports_what_it_found_in_your_chat(athena):
     saved = a["scheduler"].store.get(task.id)
     assert (saved.runs, saved.last_outcome, saved.status) == (1, "told you", "active")
     ran_at = datetime.fromtimestamp(saved.last_run, LONDON)
-    assert saved.next_run == Schedule.parse("daily 07:30", LONDON).after(ran_at).timestamp()
+    assert saved.next_run == Schedule.parse("30 7 * * *", LONDON).after(ran_at).timestamp()
     assert a["ran"] == [1]  # so the model server reads your chat again, with the report in it
 
 
@@ -239,7 +322,7 @@ def test_a_task_cant_be_allowed_to_schedule_others_or_use_tools_that_dont_exist(
 
 async def test_a_task_that_fails_tries_again_then_tells_you(athena):
     a = athena([])  # the model server has nothing to say: every call fails
-    task = a["scheduler"].add("Briefing", "Brief me.", "weekdays 07:30", [], created_by="you")
+    task = a["scheduler"].add("Briefing", "Brief me.", "30 7 * * 1-5", [], created_by="you")
     before = time.time()
     await a["scheduler"].run(task)
     saved = a["scheduler"].store.get(task.id)
@@ -253,7 +336,7 @@ async def test_a_task_that_fails_tries_again_then_tells_you(athena):
     saved = a["scheduler"].store.get(task.id)
     assert a["channel"].said[0].startswith("⚠️ I couldn't do your task “Briefing”: The model server returned an error")
     assert saved.failures == 0 and saved.status == "active"  # and on to its next run
-    assert saved.next_run == Schedule.parse("weekdays 07:30", LONDON).after(datetime.now(LONDON)).timestamp()
+    assert saved.next_run == Schedule.parse("30 7 * * 1-5", LONDON).after(datetime.now(LONDON)).timestamp()
 
 
 async def test_a_task_that_runs_out_of_time_says_so(athena):
@@ -398,7 +481,7 @@ async def test_your_messages_count_as_chatting_and_tasks_dont(athena):
 async def test_the_scheduler_runs_what_is_due_and_skips_long_missed_runs(athena):
     a = athena([completion("Here's your briefing.")])
     scheduler = a["scheduler"]
-    old = scheduler.add("Old", "Daily thing.", "daily 07:00", [], created_by="you")
+    old = scheduler.add("Old", "Daily thing.", "0 7 * * *", [], created_by="you")
     old.next_run = time.time() - 86400 * 2  # Athena was off for two days
     scheduler.store.save(old)
     scheduler.start()
@@ -425,7 +508,7 @@ async def test_the_model_schedules_tasks_with_your_ok(athena):
     args = {
         "title": "Papers",
         "instructions": "Find new papers on X.",
-        "schedule": "weekly mon 08:00",
+        "schedule": "0 8 * * mon",
         "tools": ["publish"],
     }
     summary = await schedule.preview(args)
@@ -433,8 +516,8 @@ async def test_the_model_schedules_tasks_with_your_ok(athena):
         summary
         == "A task, “Papers”, every Monday at 08:00:\nFind new papers on X.\n It may use publish without asking you."
     )
-    with pytest.raises(ToolError, match="Say the time as HH:MM"):
-        await schedule.preview({**args, "schedule": "weekly mon 8"})
+    with pytest.raises(ToolError, match="The hour must be 0-23"):
+        await schedule.preview({**args, "schedule": "0 24 * * mon"})
     with pytest.raises(ToolError, match="always has to ask"):
         await schedule.preview({**args, "tools": ["schedule_task"]})
 

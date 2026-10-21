@@ -49,7 +49,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from pi_assistant import cron
 from pi_assistant.agent import AgentResult, Background
+from pi_assistant.cron import Cron, CronError
 from pi_assistant.memory import connect_db
 from pi_assistant.skills import READ_SKILL, REVIEW, SAVE_SKILL
 from pi_assistant.status import Task as StatusTask
@@ -69,7 +71,6 @@ log = logging.getLogger(__name__)
 NOTHING = "NOTHING TO REPORT"  # what a task replies when there's nothing worth telling you
 # Tools a task can't be allowed to use without asking: starting more tasks, and pushing to GitHub.
 NEVER_UNASKED = {"schedule_task", "hand_to_claude", "answer_claude", "extend_claude_project"}
-MIN_EVERY = timedelta(minutes=15)
 MISSED_GRACE = timedelta(hours=6)  # a regular run missed by more than this (Athena was off) is skipped
 RETRIES = (600, 1800)  # after a run fails: try again in 10 minutes, then 30, then give up on that run
 FIRST_WAIT, LONGEST_WAIT = 60.0, 900.0  # waiting for you to finish chatting: 1 minute, doubling to 15
@@ -77,13 +78,16 @@ REVIEW_MINUTES, REVIEW_ROUNDS = 10, 4  # looking back at how a skill went: the m
 HEARTBEAT_MINUTES = 10  # the most a check on what's watched works for, not counting time it waits for you
 MIN_HEARTBEAT = 10.0  # minutes: checks are at least this far apart, whatever heartbeat_minutes says
 MAX_REVIEWS = 5  # waiting to be done; the oldest is dropped for a new one past this
-DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")  # as schedules before cron named them
+OLD_KINDS = ("daily", "weekdays", "weekly", "every")  # regular schedules before cron (see old_to_cron)
+# How often cron can run something, in minutes: every n minutes or hours where n divides an hour or a day.
+CRON_SPANS = (15, 20, 30, 60, 120, 180, 240, 360, 480, 720, 1440)
 SCHEDULES = (
     '"now" (once, straight away unless a chat is going on), "in 2h" or "in 30m", "once 2026-10-16 09:00", '
-    '"once 09:00" (the next 09:00), "daily 07:30", "weekdays 07:30", "weekly mon,thu 18:00", '
-    '"every 6h" (also m and d; at least 15m), or "on arrive-home" (each time that event comes in, from an '
-    "iPhone Shortcut or anything else that calls Athena's /hooks/arrive-home)"
+    '"once 09:00" (the next 09:00), a cron schedule for a regular one, such as "30 7 * * 1-5" (07:30 on '
+    "weekdays: minute, hour, day of the month, month and day of the week; @daily and the like too; at most "
+    'every 15 minutes), or "on arrive-home" (each time that event comes in, from an iPhone Shortcut or '
+    "anything else that calls Athena's /hooks/arrive-home)"
 )
 EVENT = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")  # an event's name: what /hooks/<name> fires
 EVENT_GAP = 60.0  # seconds: an event coming in again sooner doesn't run a task again
@@ -91,7 +95,7 @@ EVENT_GAP = 60.0  # seconds: an event coming in again sooner doesn't run a task 
 EXAMPLES = (
     {
         "title": "Morning briefing",
-        "schedule": "weekdays 07:30",
+        "schedule": "30 7 * * 1-5",
         "instructions": (
             "Brief me for the day ahead: what's on my calendar and reminders today, anything I've said is due, "
             "and the main news. Short, most important first."
@@ -99,7 +103,7 @@ EXAMPLES = (
     },
     {
         "title": "MCP servers worth adding",
-        "schedule": "weekly sun 10:00",
+        "schedule": "0 10 * * sun",
         "instructions": (
             "Look through what I've asked you about lately (search_memory, in conversations) for things you "
             "couldn't do, or did badly, for want of a tool. Search the MCP Registry for servers that would help. "
@@ -110,7 +114,7 @@ EXAMPLES = (
     },
     {
         "title": "Skills from habits",
-        "schedule": "weekly fri 18:00",
+        "schedule": "0 18 * * fri",
         "instructions": (
             "Look at what you've done this week with recent_work. Find things you did the same way three or more "
             "times: the same kind of request, handled with the same steps. For each, if none of your skills covers "
@@ -139,12 +143,10 @@ class ScheduleError(ValueError):
 
 @dataclass(frozen=True)
 class Schedule:
-    kind: str  # once, daily, weekdays, weekly, every or on (an event)
+    kind: str  # once, cron (a regular one) or on (an event)
     text: str  # as it's kept, which reads the same back
-    at: clock | None = None  # daily, weekdays, weekly
-    days: tuple[int, ...] = ()  # weekly: Monday is 0
     when: datetime | None = None  # once; None: as soon as you're not chatting
-    every: timedelta | None = None
+    cron: Cron | None = None
     event: str = ""  # on
 
     @classmethod
@@ -161,16 +163,6 @@ class Schedule:
             if when <= now:
                 raise ScheduleError(f"{when:%Y-%m-%d %H:%M} has already passed.")
             return cls("once", f"once {when:%Y-%m-%d %H:%M}", when=when)
-        if kind in ("daily", "weekdays"):
-            at = _clock(rest)
-            return cls(kind, f"{kind} {at:%H:%M}", at=at, days=tuple(range(5 if kind == "weekdays" else 7)))
-        if kind == "weekly":
-            names, _, at_text = rest.rpartition(" ")
-            days = sorted({_day(name) for name in re.split(r"[,\s]+", names) if name})
-            if not days:
-                raise ScheduleError(f'Say which days, like "weekly mon,thu 18:00". Schedules: {SCHEDULES}.')
-            at = _clock(at_text)
-            return cls("weekly", f"weekly {','.join(DAYS[d] for d in days)} {at:%H:%M}", at=at, days=tuple(days))
         if kind == "on":
             if not EVENT.match(rest):
                 raise ScheduleError(
@@ -178,12 +170,20 @@ class Schedule:
                     f"Schedules: {SCHEDULES}."
                 )
             return cls("on", f"on {rest}", event=rest)
-        if kind == "every":
-            span = _span(rest)
-            if span < MIN_EVERY:
-                raise ScheduleError("A task can run at most every 15 minutes.")
-            return cls("every", f"every {_show_span(span)}", every=span)
-        raise ScheduleError(f"I don't understand the schedule {text!r}. Schedules: {SCHEDULES}.")
+        if kind in OLD_KINDS:
+            try:
+                instead, exact = old_to_cron(words)
+            except ScheduleError:
+                instead, exact = "", False
+            raise ScheduleError(
+                f"Regular schedules are written as cron schedules now ({cron.HOW})"
+                + (f": “{words}” is “{instead}”." if instead and exact else f". Schedules: {SCHEDULES}.")
+            )
+        try:
+            regular = Cron.parse(rest if kind == "cron" else words)
+        except CronError as exc:
+            raise ScheduleError(f"I don't understand the schedule {text!r}: {exc} Schedules: {SCHEDULES}.") from None
+        return cls("cron", regular.text, cron=regular)
 
     @staticmethod
     def _once(rest: str, tz: tzinfo, now: datetime) -> datetime:
@@ -203,39 +203,52 @@ class Schedule:
             return None
         if self.kind == "once":
             return self.when or now
-        if self.kind == "every":
-            return now
-        return self.after(now)  # type: ignore[return-value]
+        return self.after(now)
 
     def after(self, last: datetime) -> datetime | None:
         """When it's next due after ``last``: None if it only runs once, or when an event comes in."""
-        if self.kind in ("once", "on"):
-            return None
-        if self.every:
-            return last + self.every
-        tz = last.tzinfo
-        assert self.at is not None and tz is not None
-        for offset in range(8):
-            day = last.date() + timedelta(days=offset)
-            candidate = datetime.combine(day, self.at, tz)
-            if candidate > last and day.weekday() in self.days:
-                return candidate
-        raise AssertionError("every schedule has at least one day")  # pragma: no cover
+        return self.cron.after(last) if self.cron else None
 
     def describe(self) -> str:
         if self.kind == "on":
             return f"each time “{self.event}” comes in"
         if self.kind == "once":
             return f"once, on {self.when:%a %-d %b at %H:%M}" if self.when else "once, as soon as you're not chatting"
-        if self.kind == "every":
-            return f"every {_show_span(self.every, words=True)}"  # type: ignore[arg-type]
-        at = f"at {self.at:%H:%M}"
-        if self.kind == "daily":
-            return f"every day {at}"
-        if self.kind == "weekdays":
-            return f"every weekday {at}"
-        names = [DAY_NAMES[d] for d in self.days]
-        return f"every {' and '.join([', '.join(names[:-1]), names[-1]] if len(names) > 1 else names)} {at}"
+        assert self.cron is not None
+        return self.cron.describe()
+
+
+def old_to_cron(text: str, due: datetime | None = None) -> tuple[str, bool]:
+    """A regular schedule as tasks had them before cron, as a cron schedule, and whether it does exactly the same:
+    "daily 07:30" is "30 7 * * *". One that ran every so often keeps to when it's ``due`` next, as it did. If cron
+    can't say how often, as for "every 90m", it's the nearest it can that runs no more often (every 2 hours).
+    ScheduleError if it isn't one."""
+    kind, _, rest = " ".join(text.strip().lower().split()).partition(" ")
+    if kind in ("daily", "weekdays"):
+        at = _clock(rest)
+        return f"{at.minute} {at.hour} * * {'*' if kind == 'daily' else '1-5'}", True
+    if kind == "weekly":
+        names, _, at_text = rest.rpartition(" ")
+        days = sorted({(_day(name) + 1) % 7 for name in re.split(r"[,\s]+", names) if name})  # cron's Sunday is 0
+        if not days:
+            raise ScheduleError(f"{text!r} doesn't say which days.")
+        at = _clock(at_text)
+        return f"{at.minute} {at.hour} * * {','.join(map(str, days))}", True
+    if kind != "every":
+        raise ScheduleError(f"{text!r} isn't a regular schedule.")
+    minutes = max(1, int(_span(rest).total_seconds() // 60))
+    due = due or datetime(2000, 1, 1)  # from the hour, and midnight, if it isn't known
+    every = next((m for m in CRON_SPANS if m >= minutes), None)
+    if every is None:  # days: the day of the month's step, which starts again each month
+        days = -(-minutes // 1440)
+        return f"{due.minute} {due.hour} */{days} * *", minutes == days * 1440 and days == 1
+    exact = every == minutes
+    if every < 60:
+        offset = due.minute % every
+        return (f"{offset}-59/{every}" if offset else f"*/{every}") + " * * * *", exact
+    hours = every // 60
+    at = "*" if hours == 1 else ",".join(str(h) for h in range(due.hour % hours, 24, hours))
+    return f"{due.minute} {at} * * *", exact
 
 
 def _clock(text: str) -> clock:
@@ -258,17 +271,6 @@ def _span(text: str) -> timedelta:
         raise ScheduleError(f"Say how long like 30m, 2h or 1d. Schedules: {SCHEDULES}.")
     n, unit = int(match.group(1)), match.group(2)[0]
     return timedelta(minutes=n) if unit == "m" else timedelta(hours=n) if unit == "h" else timedelta(days=n)
-
-
-def _show_span(span: timedelta, words: bool = False) -> str:
-    minutes = int(span.total_seconds() // 60)
-    for size, short, long in ((1440, "d", "day"), (60, "h", "hour"), (1, "m", "minute")):
-        if minutes % size == 0:
-            n = minutes // size
-            if words:
-                return long if n == 1 else f"{n} {long}s"
-            return f"{n}{short}"
-    raise AssertionError  # pragma: no cover
 
 
 # -- keeping them --------------------------------------------------------------------------------------
@@ -473,6 +475,31 @@ class Scheduler:
         self._wake = asyncio.Event()
         self._loop: asyncio.Task[None] | None = None
         self._run: asyncio.Task[Any] | None = None
+        self._changed = self._convert_old_schedules()  # what to tell you about, once it starts
+        self._telling: asyncio.Task[None] | None = None
+
+    def _convert_old_schedules(self) -> list[str]:
+        """Give tasks kept with a regular schedule from before cron the cron schedule that does the same. Returns
+        what to tell you about those cron can't say exactly, which run as near as it can, no more often."""
+        changed = []
+        for task in self.store.all():
+            if task.schedule.partition(" ")[0] not in OLD_KINDS:
+                continue
+            when = task.next_run or task.last_run
+            try:
+                instead, exact = old_to_cron(task.schedule, datetime.fromtimestamp(when, self.tz) if when else None)
+            except ScheduleError as exc:  # not one that could have been kept, but just in case
+                log.warning("Task %d's schedule %r couldn't be read: %s", task.id, task.schedule, exc)
+                continue
+            log.info("Task %d (%s): its schedule, %s, is now %s in cron", task.id, task.title, task.schedule, instead)
+            if not exact:
+                said = Schedule.parse(instead, self.tz).describe()
+                changed.append(f"“{task.title}” was {task.schedule}, which cron can't say: it now runs {said}.")
+            task.schedule = instead
+            if task.status == "active" and task.next_run is not None and not exact:
+                task.next_run = Schedule.parse(instead, self.tz).after(datetime.now(self.tz)).timestamp()  # type: ignore[union-attr]
+            self.store.save(task)
+        return changed
 
     # -- you, and whether you're chatting --
 
@@ -490,13 +517,20 @@ class Scheduler:
         if self._loop is None:
             self._skip_missed()
             self._loop = asyncio.create_task(self._forever(), name="tasks")
+        if self._changed:
+            lines, self._changed = self._changed, []
+            what = "\n".join(f"• {line}" for line in lines)
+            self._telling = asyncio.create_task(
+                self._tell(f"🗓️ Tasks' regular schedules are cron schedules now, and for some it's changed:\n{what}")
+            )
 
     async def stop(self) -> None:
-        if self._loop:
-            self._loop.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._loop
-            self._loop = None
+        for task in (self._loop, self._telling):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._loop = self._telling = None
 
     def wake(self) -> None:
         self._wake.set()
