@@ -212,6 +212,9 @@ class MCPServerConfig(_Section):
     # Ask the user before running these. Every tool by default, since any tool might send
     # data off the local network; set [] only for servers that can't (e.g. local, read-only).
     confirm: list[str] = Field(default_factory=lambda: ["*"])
+    # Arguments Athena gives the server's tools itself, such as which email account to use. The model isn't
+    # shown them, so it can't get them wrong or choose others.
+    arguments: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: float = 60.0
     # Local servers run in a sandbox (see sandbox.py): without your home folder, and without the
     # network unless `network`. `read_only_paths` are folders or files it may read as well.

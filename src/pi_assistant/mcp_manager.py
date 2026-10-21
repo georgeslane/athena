@@ -342,12 +342,13 @@ class MCPManager:
                 tool_name = safe_tool_name(remote.name)
                 if tool_name in taken or tool_name in RESERVED_NAMES:
                     tool_name = safe_tool_name(f"{conn.name}__{remote.name}")
+                given, parameters = _given(version.parameters, cfg.arguments)
                 mine.append(
                     Tool(
                         name=tool_name,
                         description=version.description,
-                        parameters=version.parameters,
-                        handler=self._make_handler(conn.client, remote.name),
+                        parameters=parameters,
+                        handler=self._make_handler(conn.client, remote.name, given),
                         needs_confirmation=matches_any(remote.name, cfg.confirm),
                         source=f"mcp:{conn.name}",
                     )
@@ -375,12 +376,24 @@ class MCPManager:
                 log.exception("Couldn't tell a listener about changed tools")
 
     @staticmethod
-    def _make_handler(client: Client, remote_name: str):
+    def _make_handler(client: Client, remote_name: str, given: dict[str, Any]):
         async def handler(args: dict[str, Any]) -> str:
-            result = await client.call_tool(remote_name, args)
+            result = await client.call_tool(remote_name, {**args, **given})
             return result_to_text(result)
 
         return handler
+
+
+def _given(schema: dict[str, Any], arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Of a server's ``arguments`` (its config's), those this tool takes, and its schema without them, for the model."""
+    properties = schema.get("properties") or {}
+    given = {name: value for name, value in arguments.items() if name in properties}
+    if not given:
+        return {}, schema
+    shown = {**schema, "properties": {k: v for k, v in properties.items() if k not in given}}
+    if "required" in schema:
+        shown["required"] = [name for name in schema["required"] if name not in given]
+    return given, shown
 
 
 def _version(remote: Any) -> ToolVersion:

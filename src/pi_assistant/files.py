@@ -48,8 +48,8 @@ class Files(Builtin):
     entry = Integration(
         "workspace",
         "Files",
-        "Reads and writes files in Athena's own folder, Markdown and PDFs among them, and sends them to you. "
-        "Files you send it in Telegram go there too.",
+        "Reads and writes files in Athena's own folder, PDFs included, and sends them to you. Files you send it go "
+        "there too.",
         "workspace",
         builtin=True,
         asks="Never asks: files stay in Athena's folder unless they're sent to you.",

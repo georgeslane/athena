@@ -1,11 +1,20 @@
 // The Tasks tab: what Athena does by itself.
 
-import { ask, call, clock, day, h, icon, plural, state, toast } from "./core.js";
+import { ask, call, clock, h, icon, plural, state, toast } from "./core.js";
 
 // -- tasks: what Athena does by itself ---------------------------------------------------------------
 
 const tasks_ = { timer: null };
 const TASK_STATES = { active: "Scheduled", paused: "Paused", done: "Done", running: "Working on it" };
+// Schedules to start from, in the task form: what each is called, and how it's written.
+const WHEN = [
+  ["Now", "now"],
+  ["In 2 hours", "in 2h"],
+  ["Next 09:00", "once 09:00"],
+  ["Weekdays 07:30", "30 7 * * 1-5"],
+  ["Fridays 18:00", "0 18 * * 5"],
+  ["When I get home", "on arrive-home"],
+];
 
 export async function loadTasks() {
   try {
@@ -29,15 +38,11 @@ function renderTasks() {
     "p.note",
     {},
     icon("info"),
-    h("span", {
-      text:
-        `Athena works on these by itself when they're due, but never while you're chatting: it waits until you haven't ` +
-        `messaged for ${plural(t.quiet_minutes, "minute")}, and stops for you while it works. When it finds something, it messages you in Telegram.`,
-    })
+    h("span", { text: `Athena works on these once you've been quiet for ${plural(t.quiet_minutes, "minute")}, and messages you what it finds.` })
   );
   const list = t.tasks.length
     ? h("div.task-list", {}, t.tasks.map(taskCard))
-    : h("p.empty", { text: "No tasks yet. Add one here, or ask Athena in Telegram, such as “every weekday at 7:30, send me a briefing”." });
+    : h("p.empty", { text: "No tasks yet. Add one, or ask Athena: “every weekday at 7:30, brief me”." });
   panel.replaceChildren(
     h(
       "div.stack",
@@ -45,7 +50,7 @@ function renderTasks() {
       h(
         "section.card",
         {},
-        h("div.card-head", {}, h("h2", { text: "Tasks" }), h("span.aside", { text: "What Athena does by itself" }), h("div.actions", {}, h("button.button.small.primary", { type: "button", text: "New task", onclick: () => newTask() }))),
+        h("div.card-head", {}, h("h2", { text: "Tasks" }), h("span.aside", { text: "What Athena does by itself" }), h("div.actions", {}, h("button.button.small.primary", { type: "button", text: "New task", onclick: () => taskForm() }))),
         intro,
         list
       ),
@@ -66,7 +71,7 @@ function taskCard(task) {
   else if (task.next_run) next = `Next ${clock(task.next_run, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`;
   const actions = [];
   if (task.status === "running") actions.push(h("button.button.small", { type: "button", text: "Stop", onclick: (e) => taskAction(e, task, "stop") }));
-  else actions.push(h("button.button.small", { type: "button", text: "Run now", onclick: (e) => taskAction(e, task, "run") }));
+  else actions.push(h("button.button.small", { type: "button", text: "Run now", onclick: (e) => taskAction(e, task, "run") }), h("button.button.small", { type: "button", text: "Edit", onclick: () => taskForm({ task }) }));
   if (task.status === "active") actions.push(h("button.button.small", { type: "button", text: "Pause", onclick: (e) => taskAction(e, task, "pause") }));
   else if (task.status !== "running") actions.push(h("button.button.small", { type: "button", text: "Resume", onclick: (e) => taskAction(e, task, "resume") }));
   actions.push(h("button.button.small.danger", { type: "button", text: "Delete", onclick: () => deleteTask(task) }));
@@ -89,7 +94,7 @@ function taskCard(task) {
     task.allowed_tools.length
       ? h("div.task-tools", {}, h("span.hint", { text: "Uses without asking:" }), h("div.chips", {}, task.allowed_tools.map((name) => h("span.chip", { text: name }))))
       : null,
-    task.created_by === "athena" ? h("p.hint", { text: "Suggested by Athena, and allowed by you." }) : null,
+    task.created_by === "athena" ? h("p.hint", { text: "Suggested by Athena" }) : null,
     task.event ? trigger(task.event) : null,
     last,
     h("div.tool-actions", {}, actions)
@@ -102,12 +107,11 @@ function trigger(event) {
   return h(
     "details.task-last",
     {},
-    h("summary", { text: on ? `Started by POST ${location.origin}/hooks/${event}` : "Triggers are off: set TRIGGERS_TOKEN in .env on the Pi" }),
+    h("summary", { text: on ? `Runs on POST ${location.origin}/hooks/${event}` : "Triggers are off: set TRIGGERS_TOKEN in .env on the Pi" }),
     h("p.hint", {
       text:
-        `In an iPhone Shortcuts automation, such as “When I arrive home”, add “Get contents of URL”: ${location.origin}/hooks/${event}, ` +
-        "method POST, with a header Authorization: Bearer and your TRIGGERS_TOKEN. Add a JSON body with “text” to pass on anything that helps. " +
-        "Set the automation to run immediately. See the README, “Triggers”.",
+        "From an iPhone Shortcuts automation, such as “When I arrive home”: Get Contents of URL, method POST, header " +
+        "Authorization: Bearer and your TRIGGERS_TOKEN. Any “text” in a JSON body is passed on. See the README, “Triggers”.",
     })
   );
 }
@@ -121,9 +125,9 @@ function watchingCard(w) {
   else if (w.checking) about = "Checking now.";
   else if (w.asked) about = "Athena will check as soon as it's free.";
   else {
-    const parts = [`Athena checks on all of these every ${plural(w.every_minutes, "minute")} when you're not chatting, and messages you only when something needs your attention.`];
-    if (w.last) parts.push(`Last checked at ${time_(w.last.at)}: ${w.last.outcome}.`);
-    if (w.next) parts.push(`Next at about ${time_(Math.max(w.next, Date.now() / 1000))}.`);
+    const parts = [`Checked every ${plural(w.every_minutes, "minute")}: you only hear when something needs you.`];
+    if (w.last) parts.push(`Last ${time_(w.last.at)}, ${w.last.outcome}.`);
+    if (w.next) parts.push(`Next about ${time_(Math.max(w.next, Date.now() / 1000))}.`);
     about = parts.join(" ");
   }
   const items = w.items.length
@@ -135,13 +139,13 @@ function watchingCard(w) {
             "article.task",
             { "data-status": "active" },
             h("p.task-instructions", { text: item.what }),
-            h("p.hint", { text: `Since ${day_(item.created)}, until ${day_(item.until)} · asked for by ${item.by === "you" ? "you" : "Athena, when you asked"}` }),
+            h("p.hint", { text: `${day_(item.created)} to ${day_(item.until)}` + (item.by === "you" ? "" : " · added by Athena") }),
             item.note ? h("p.task-said", { text: `Athena's note: ${item.note}` }) : null,
             h("div.tool-actions", {}, h("button.button.small.danger", { type: "button", text: "Stop watching", onclick: (e) => stopWatching(e, item) }))
           )
         )
       )
-    : h("p.empty", { text: "Nothing yet. Ask Athena, such as “let me know when Claude finishes the bank project”, or add something here." });
+    : h("p.empty", { text: "Nothing yet. Add something, or ask Athena: “tell me when my parcel arrives”." });
   return h(
     "section.card",
     {},
@@ -211,7 +215,7 @@ function newWatch() {
       },
     },
     h("h2", { text: "Watch for something" }),
-    h("label.field", {}, h("span.field-label", { text: "What to watch for" }), h("span.field-help", { text: "And when to tell you. Athena checks with the tools it has, such as your email, Claude's board or market prices." }), what),
+    h("label.field", {}, h("span.field-label", { text: "What to watch for" }), h("span.field-help", { text: "And when to tell you. Athena checks with its tools, such as email or prices." }), what),
     h("label.field", {}, h("span.field-label", { text: "For how many days" }), days),
     error,
     h("div.tool-actions", {}, h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }), save)
@@ -245,16 +249,24 @@ async function deleteTask(task) {
   }
 }
 
-function newTask(example) {
+// A task, new or to change. ``example``: one of Athena's to start a new one from.
+function taskForm({ task, example } = {}) {
   const t = state.tasks;
-  const title = h("input", { type: "text", maxLength: 120, required: true, value: example ? example.title : "" });
-  const instructions = h("textarea", { required: true, rows: 5, value: example ? example.instructions : "" });
-  instructions.value = example ? example.instructions : "";
-  const schedule = h("input", { type: "text", required: true, value: example ? example.schedule : "", placeholder: "30 7 * * 1-5", autocapitalize: "none", spellcheck: false });
-  const tools = t.tools.map((name) => h("label", {}, h("input", { type: "checkbox", value: name }), h("span", { text: name })));
+  const from = task || example || {};
+  const title = h("input", { type: "text", maxLength: 120, required: true, value: from.title || "" });
+  const instructions = h("textarea", { required: true, rows: 5 });
+  instructions.value = from.instructions || "";
+  const schedule = h("input", { type: "text", required: true, value: from.schedule || "", placeholder: "30 7 * * 1-5", autocapitalize: "none", spellcheck: false, "aria-label": "When" });
+  const suggestions = h(
+    "div.task-examples",
+    {},
+    WHEN.map(([label, value]) => h("button.button.small.quiet", { type: "button", text: label, title: value, onclick: () => ((schedule.value = value), schedule.focus()) }))
+  );
+  const allowed = new Set(from.allowed_tools || []);
+  const tools = t.tools.map((name) => h("label", {}, h("input", { type: "checkbox", value: name, checked: allowed.has(name) }), h("span", { text: name })));
   const error = h("p.form-error", { role: "alert" });
   const dialog = document.getElementById("dialog");
-  const save = h("button.button.primary", { type: "submit", text: "Add task" });
+  const save = h("button.button.primary", { type: "submit", text: task ? "Save" : "Add task" });
   const form = h(
     "form.task-form",
     {
@@ -263,7 +275,7 @@ function newTask(example) {
         save.disabled = true;
         error.textContent = "";
         try {
-          state.tasks = await call("POST", "/api/tasks", {
+          state.tasks = await call("POST", task ? `/api/tasks/${task.id}` : "/api/tasks", {
             title: title.value,
             instructions: instructions.value,
             schedule: schedule.value,
@@ -271,27 +283,27 @@ function newTask(example) {
           });
           dialog.close();
           renderTasks();
-          toast(`Added “${title.value.trim()}”.`);
+          toast(`${task ? "Saved" : "Added"} “${title.value.trim()}”.`);
         } catch (e) {
           error.textContent = e.message;
           save.disabled = false;
         }
       },
     },
-    h("h2", { text: "New task" }),
-    example
+    h("h2", { text: task ? "Edit task" : "New task" }),
+    task || example
       ? null
       : h(
           "div.task-examples",
           {},
           h("span.hint", { text: "Start from:" }),
-          t.examples.map((ex) => h("button.button.small", { type: "button", text: ex.title, onclick: () => newTask(ex) }))
+          t.examples.map((ex) => h("button.button.small", { type: "button", text: ex.title, onclick: () => taskForm({ example: ex }) }))
         ),
     h("label.field", {}, h("span.field-label", { text: "Title" }), title),
-    h("label.field", {}, h("span.field-label", { text: "What to do" }), h("span.field-help", { text: "Instructions Athena follows on its own, and what to tell you." }), instructions),
-    h("label.field", {}, h("span.field-label", { text: "When" }), h("span.field-help", { text: `Such as ${t.schedules}.` }), schedule),
+    h("label.field", {}, h("span.field-label", { text: "What to do" }), h("span.field-help", { text: "What Athena should do, and what to tell you." }), instructions),
+    h("div.field", {}, h("span.field-label", { text: "When" }), h("span.field-help", { text: "Once, or regularly as cron: minute, hour, day, month, weekday." }), schedule, suggestions),
     tools.length
-      ? h("fieldset.field", {}, h("legend.field-label", { text: "May use without asking" }), h("span.field-help", { text: "These normally ask you first. Anything not ticked still asks, in Telegram." }), h("div.choice", {}, tools))
+      ? h("fieldset.field", {}, h("legend.field-label", { text: "May use without asking" }), h("span.field-help", { text: "Anything not ticked asks you first, in Telegram." }), h("div.choice", {}, tools))
       : null,
     error,
     h("div.tool-actions", {}, h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }), save)

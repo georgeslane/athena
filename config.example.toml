@@ -223,6 +223,8 @@ reply_timeout_seconds = 20             # Siri gives up after about 25s; slower a
 #   confirm = [...]   ask for approval in Telegram before running these
 #                     (default: all of them, since any tool might send your data
 #                     off your network; set [] only for servers that can't)
+#   arguments = {...} arguments Athena gives the tools itself, which the model
+#                     isn't shown, such as which account to use
 # Local servers run in a sandbox, without your home folder (README, "Sandbox"):
 #   network = false   no network access either (default: true)
 #   read_only_paths = [...]   files or folders it may read
@@ -289,8 +291,9 @@ confirm = []                           # public filings; lookups go only to the 
 enabled = false
 command = "uvx"
 args = ["mcp-email-server==1.11.0", "stdio"]
-include = ["list_available_accounts", "list_emails_metadata", "get_emails_content", "send_email"]
+include = ["list_emails_metadata", "get_emails_content", "send_email"]
 confirm = ["send_email"]
+arguments = { account_name = "athena" }   # Athena names its account, so the model needn't
 
 [mcp_servers.email.env]
 MCP_EMAIL_SERVER_ACCOUNT_NAME = "athena"

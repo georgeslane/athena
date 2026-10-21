@@ -45,7 +45,7 @@ function toolsPage() {
     h(
       "div.tools-intro",
       {},
-      h("p", { text: "Switch tools on and off, and change their settings and keys. Changes apply straight away, once Athena has finished what it's doing." }),
+      h("p", { text: "Switch tools on and off, and change their settings and keys. Changes apply as soon as Athena's free." }),
       h("button.button.small", { type: "button", text: "Reconnect all", onclick: reconnect })
     ),
     h("div.banner.tools-banner", { role: "status", hidden: true }),
@@ -378,7 +378,7 @@ class ToolCard {
     return h(
       "section.held",
       {},
-      h("p.note.setup", {}, icon("info"), h("span", { text: `On ${when}, Athena found known vulnerabilities in what this server uses.` + (fixable ? " Fix updates each to the version that fixes it, and nothing else, then restarts the server." : "") })),
+      h("p.note.setup", {}, icon("info"), h("span", { text: `On ${when}, Athena found known vulnerabilities in what this server uses.` + (fixable ? " Fix updates just those, then restarts the server." : "") })),
       s.findings.map((f) =>
         h(
           "div.held-tool",
@@ -429,7 +429,7 @@ class ToolCard {
     return h(
       "section.held",
       {},
-      h("p.note.setup", {}, icon("info"), h("span", { text: "These tools are new, or have changed since you approved them, so Athena won't use them until you approve them. Check that each only describes what the tool does: a description can also carry instructions to the model." })),
+      h("p.note.setup", {}, icon("info"), h("span", { text: "New, or changed since you approved them, so Athena won't use them until you do. Check each only describes what the tool does: a description can carry instructions to the model." })),
       items,
       error,
       h("div.tool-actions", {}, approve)
@@ -566,9 +566,8 @@ class OnDemand {
       ),
       h("p.hint", {
         text:
-          "Athena reads every tool's description with each message, which takes the Mac a moment. Tools you rarely use can be found " +
-          "when they're needed instead: Athena looks them up first, and they work just the same. Looking them up takes a little room " +
-          `itself, about 200 tokens and 30 more for each, so it's worth it for the bigger ones. Used: in the last ${d.days} days.`,
+          "Athena reads every tool's description with each message. Tools you rarely use can be looked up when needed instead, " +
+          `which costs about 200 tokens plus 30 for each, so it pays for the bigger ones. Used: in the last ${d.days} days.`,
       }),
       h(
         "div.server-tools.on-demand-tools",

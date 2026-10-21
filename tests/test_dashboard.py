@@ -287,7 +287,7 @@ async def test_tasks_from_the_dashboard(athena):
         assert listing["tasks"] == [] and listing["tools"] == ["forget_memory"]  # the tools that ask first
         examples = [e["title"] for e in listing["examples"]]
         assert examples == ["Morning briefing", "MCP servers worth adding", "Skills from habits", "Research"]
-        assert listing["quiet_minutes"] == 5 and "30 7 * * 1-5" in listing["schedules"]
+        assert listing["quiet_minutes"] == 5
 
         bad = await http.post("/api/tasks", json={"title": "X", "instructions": "Y", "schedule": "sometime"})
         assert bad.status_code == 400 and "I don't understand the schedule" in bad.json()["error"]
@@ -318,6 +318,19 @@ async def test_tasks_from_the_dashboard(athena):
         resumed = (await http.post(f"/api/tasks/{daily['id']}", json={"action": "resume"})).json()["tasks"][1]
         assert resumed["status"] == "active"
         assert (await http.post(f"/api/tasks/{daily['id']}", json={"action": "explode"})).status_code == 400
+
+        # Changing one: its title, instructions, schedule and the tools it may use without asking.
+        change = {"title": "Weekly", "instructions": "Check more.", "schedule": "0 9 * * 1", "tools": ["forget_memory"]}
+        changed = (await http.post(f"/api/tasks/{daily['id']}", json=change)).json()["tasks"][1]
+        assert (changed["title"], changed["instructions"], changed["when"], changed["allowed_tools"]) == (
+            "Weekly",
+            "Check more.",
+            "every Monday at 09:00",
+            ["forget_memory"],
+        )
+        bad = await http.post(f"/api/tasks/{daily['id']}", json={**change, "schedule": "sometime"})
+        assert bad.status_code == 400 and "I don't understand the schedule" in bad.json()["error"]
+        assert (await http.get("/api/tasks")).json()["tasks"][1]["title"] == "Weekly"  # left as it was
         assert (await http.post("/api/tasks/nope", json={"action": "run"})).status_code == 404
         assert (await http.delete(f"/api/tasks/{daily['id']}")).status_code == 200
         assert [t["id"] for t in (await http.get("/api/tasks")).json()["tasks"]] == [task["id"]]

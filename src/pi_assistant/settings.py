@@ -191,8 +191,9 @@ CATALOG: tuple[Integration, ...] = (
             "enabled": False,
             "command": "uvx",
             "args": ["mcp-email-server==1.11.0", "stdio"],
-            "include": ["list_available_accounts", "list_emails_metadata", "get_emails_content", "send_email"],
+            "include": ["list_emails_metadata", "get_emails_content", "send_email"],
             "confirm": ["send_email"],
+            "arguments": {"account_name": "athena"},
             "env": {
                 "MCP_EMAIL_SERVER_ACCOUNT_NAME": "athena",
                 "MCP_EMAIL_SERVER_FULL_NAME": "Athena",
@@ -213,6 +214,8 @@ CATALOG: tuple[Integration, ...] = (
     ),
 )
 BY_ID = {i.id: i for i in CATALOG}
+# Settings of recommended servers that came after some had been set up, which those are given (add_later_settings).
+ADDED_LATER = ("arguments",)
 BUILTIN_SECTIONS = {i.section: i for i in CATALOG if i.builtin}
 
 # The settings of an MCP server that isn't in the catalog.
@@ -785,6 +788,30 @@ class Settings:
         assert section is not None
         _set(section, "on_demand", patterns + [n for n in names if not matches_any(n, patterns)])
         return self._save(doc, {})
+
+    def add_later_settings(self) -> list[str]:
+        """Give recommended servers set up before a setting of theirs came in (ADDED_LATER) that setting, as one
+        set up now would have, such as the email server's account. Returns the servers changed."""
+        if not self.editable:
+            return []
+        doc, raw = self._load()
+        servers = raw.get("mcp_servers", {})
+        changed = []
+        for integ in CATALOG:
+            if integ.builtin or integ.id not in servers:
+                continue
+            missing = [k for k in ADDED_LATER if k in integ.defaults and k not in servers[integ.id]]
+            if not missing:
+                continue
+            section = _section(doc, integ.section)
+            for key in missing:
+                value = tomlkit.inline_table()
+                value.update(copy.deepcopy(integ.defaults[key]))
+                _set(section, key, value)
+            changed.append(integ.id)
+        if changed:
+            self._save(doc, {})
+        return changed
 
     def remove_server(self, name: str) -> Config:
         doc, raw = self._load()

@@ -173,6 +173,24 @@ def test_switching_a_server_on_changes_one_line_and_keeps_the_comments(setup):
     assert stat.S_IMODE(config.stat().st_mode) == 0o644  # as it was
 
 
+def test_a_server_set_up_before_a_setting_came_in_is_given_it(setup):
+    """Such as the email server, which was set up before Athena named its account itself."""
+    settings, config, _ = setup
+    old = config.read_text().replace('arguments = { account_name = "athena" }', "")
+    config.write_text(old)
+    assert settings.add_later_settings() == ["email"]
+    assert changed_lines(old, config.read_text()) == ['+arguments = {account_name = "athena"}']
+    assert load_config(config).mcp_servers["email"].arguments == {"account_name": "athena"}
+    assert settings.add_later_settings() == [] and config.read_text().count("\narguments =") == 1  # just once
+
+
+def test_later_settings_arent_added_to_a_server_that_isnt_set_up(setup):
+    settings, config, _ = setup
+    config.write_text(config.read_text().split("# Email: an address")[0])
+    before = config.read_text()
+    assert settings.add_later_settings() == [] and config.read_text() == before
+
+
 def test_a_recommended_server_that_isnt_there_yet_is_added(setup, monkeypatch):
     settings, config, env = setup
     example = tomllib.loads(config.read_text())

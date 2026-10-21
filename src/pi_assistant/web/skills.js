@@ -23,12 +23,12 @@ function renderSkills() {
         "section.card.review",
         {},
         h("div.card-head", {}, h("h2", { text: "Suggested by Athena" }), h("span.aside", { text: plural(k.suggestions.length, "to review", "to review") })),
-        h("p.note", {}, icon("info"), h("span", { text: "Skills, and changes to them, that Athena made while it worked by itself. Nothing changes until you approve one." })),
+        h("p.note", {}, icon("info"), h("span", { text: "Made while Athena worked by itself. Nothing changes until you approve it." })),
         h("div.review-list", {}, k.suggestions.map(skillSuggestion))
       )
     );
   }
-  const after = k.reviews ? " After using one, it looks back at how that went, and suggests a change if one would help next time." : "";
+  const after = k.reviews ? " After using one, it suggests a change if one would help next time." : "";
   parts.push(
     h(
       "section.card",
@@ -40,14 +40,14 @@ function renderSkills() {
         icon("info"),
         h("span", {
           text:
-            "Athena sees each skill's name and when to use it in every conversation, and reads the rest when it needs it. " +
-            "It writes skills too: straight away when you ask it to, and as suggestions for you to approve when it's working by itself." +
+            "Athena sees each skill's name and when to use it in every message, and reads the rest when it needs it. " +
+            "It writes skills when you ask, and suggests them for you to approve when it's working by itself." +
             after,
         })
       ),
       k.skills.length
         ? h("div.task-list", {}, k.skills.map(skillCard))
-        : h("p.empty", { text: "No skills yet. Write one here, or tell Athena in Telegram, such as “that's how I like trip plans: make it a skill”." })
+        : h("p.empty", { text: "No skills yet. Write one, or tell Athena: “that's how I like trip plans: make it a skill”." })
     )
   );
   document.getElementById("tab-skills").replaceChildren(h("div.stack", {}, parts));
