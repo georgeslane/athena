@@ -1,6 +1,6 @@
 // The Tools tab: built-in tools and MCP servers, their settings and keys, and adding servers.
 
-import { ask, breakable, call, h, icon, now, state, toast } from "./core.js";
+import { ask, breakable, call, clock, h, icon, now, state, toast } from "./core.js";
 import { loadOverview } from "./dashboard.js";
 
 // -- the Tools tab --------------------------------------------------------------------------------------
@@ -178,6 +178,7 @@ class ToolCard {
     };
     const parts = [];
     if (d.held && d.held.length) parts.push(this.heldEditor());
+    if (d.security) parts.push(this.securityNotice());
     if (d.asks) parts.push(h("p.note", {}, icon("lock"), h("span", { text: d.asks })));
     if (d.setup) parts.push(h("p.note.setup", {}, icon("info"), h("span", { text: d.setup })));
     // A server you added runs either as a command on the Pi or at a URL: show the settings for whichever it is.
@@ -340,6 +341,53 @@ class ToolCard {
   }
 
   // Tools that are new or changed since you approved them: what changed, and a button to approve them.
+  // Its dependencies, as Athena last checked them for known vulnerabilities, and fixing them.
+  securityNotice() {
+    const s = this.data.security;
+    const when = clock(s.checked, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+    const fixes = s.fixed.map((line) => line.replace(" -> ", " → "));
+    const updated = fixes.length ? h("p.hint", { text: `Updated here for security fixes: ${fixes.join("; ")}.` }) : null;
+    if (s.clean === null) return h("div", {}, h("p.hint", { text: `Its dependencies couldn't be checked on ${when}: ${s.summary}.` }), updated);
+    if (s.clean) return h("div", {}, h("p.hint", { text: `Its dependencies were checked on ${when}: no known vulnerabilities.` }), updated);
+    const error = h("p.form-error", { role: "alert", text: s.error || "" });
+    const fixable = s.findings.some((f) => f.fixed);
+    const fix = h("button.button.primary", {
+      type: "button",
+      text: "Fix",
+      "data-save": true,
+      disabled: !this.editable,
+      onclick: async () => {
+        fix.disabled = true;
+        error.textContent = "";
+        try {
+          const data = await call("POST", `/api/tools/${encodeURIComponent(this.data.id)}/fix`, {});
+          showTools(data);
+          const now = data.tools.find((t) => t.id === this.data.id);
+          toast(now && now.security && now.security.clean ? "Fixed, and the server's restarted." : "Checked: see what's left.", !(now && now.security && now.security.clean));
+        } catch (e) {
+          error.textContent = e.message;
+          fix.disabled = !this.editable;
+        }
+      },
+    });
+    return h(
+      "section.held",
+      {},
+      h("p.note.setup", {}, icon("info"), h("span", { text: `On ${when}, Athena found known vulnerabilities in what this server uses.` + (fixable ? " Fix updates each to the version that fixes it, and nothing else, then restarts the server." : "") })),
+      s.findings.map((f) =>
+        h(
+          "div.held-tool",
+          {},
+          h("span.held-name", {}, breakable(`${f.package} ${f.version}`), h("span.tag", { text: f.fixed ? `Fixed in ${f.fixed}` : "No fix yet" })),
+          h("p.hint", { text: `${f.ids.join(", ")}: ${f.summary}` })
+        )
+      ),
+      updated,
+      error,
+      fixable ? h("div.tool-actions", {}, fix) : h("p.hint", { text: "There's no fixed version yet. Switch the server off if that worries you." })
+    );
+  }
+
   heldEditor() {
     const d = this.data;
     const pretty = (value) => JSON.stringify(value, null, 2);

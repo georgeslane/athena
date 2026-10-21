@@ -166,6 +166,14 @@ class TriggersConfig(_Section):
     max_per_hour: int = Field(default=30, ge=1)  # events taken in an hour, of every kind; more are refused
 
 
+class SecurityUpdatesConfig(_Section):
+    # Athena checks the MCP servers' locked packages for known vulnerabilities every day, and updates each one it
+    # can to the version that fixes it, then restarts the server and tells you (see README, "Security updates").
+    enabled: bool = True
+    every_hours: float = Field(default=24.0, ge=1)
+    automatic: bool = True  # false: just tell you, and you press Fix on the Tools tab
+
+
 class AlertsConfig(_Section):
     # Athena messages you when something it needs stops working, and when it's back (see README, "Alerts").
     enabled: bool = True
@@ -243,6 +251,7 @@ class _Config(_Section):
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     triggers: TriggersConfig = Field(default_factory=TriggersConfig)
+    security_updates: SecurityUpdatesConfig = Field(default_factory=SecurityUpdatesConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 

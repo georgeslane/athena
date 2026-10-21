@@ -892,3 +892,33 @@ async def test_watching_from_the_tasks_tab(athena):
         gone = (await http.delete(f"/api/watches/{item['id']}")).json()
         assert gone["watching"]["items"] == []
         assert (await http.delete(f"/api/watches/{item['id']}")).status_code == 404
+
+
+# -- security updates, on the Tools tab ---------------------------------------------------------------
+
+
+async def test_a_servers_vulnerable_dependencies_show_on_its_card(athena):
+    athena.security.results["demo"] = {
+        "checked": 1792500000.0,
+        "clean": False,
+        "summary": "Found 2 known vulnerabilities in 33 packages",
+        "findings": [
+            {
+                "package": "certifi",
+                "version": "2026.7.22",
+                "ids": ["GHSA-6q48"],
+                "summary": "Bad roots",
+                "fixed": "2026.10.19",
+            }
+        ],
+        "updated": [],
+        "error": None,
+        "fixed": [],
+    }
+    async with client(athena) as http:
+        demo = next(t for t in (await http.get("/api/tools")).json()["tools"] if t["id"] == "demo")
+        assert demo["state"] == "attention" and demo["detail"] == "Known vulnerability in certifi"
+        assert demo["security"]["findings"][0]["fixed"] == "2026.10.19"
+        # The demo server isn't started with uvx, so Athena doesn't lock its dependencies, or fix them.
+        refused = await http.post("/api/tools/demo/fix", json={})
+        assert refused.status_code == 404 and "started with uvx" in refused.json()["error"]

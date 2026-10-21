@@ -231,12 +231,24 @@ After changing servers by hand, send `/reload` in Telegram, which reads the tool
 
 Pinning `mcp-server-fetch==2026.8.18` pins the server, but not the 44 packages it depends on, which `uvx` would install at whatever version is newest. So Athena doesn't run servers through `uvx`. Each server whose `command` is `uvx` gets a small project of its own in `data/mcp/<name>/`, whose `uv.lock` records the exact version and hash of every package, and Athena runs the server from that.
 
-- **Reviewed locks:** the recommended servers' locks are in `mcp-locks/` in this repo, so any change to them shows up in a pull request. Athena uses one when it's for the version in your `config.toml`. Any other server is locked the first time it starts, and stays that way until you change its version.
+- **Reviewed locks:** the recommended servers' locks are in `mcp-locks/` in this repo, so any change to them shows up in a pull request. Athena uses one when it's for the version in your `config.toml`, and takes it again when it changes. Any other server is locked the first time it starts, and stays that way until you change its version, or a security update changes it.
 - **Installing:** every package's hash is checked, only ready-built packages (wheels) are installed, so no package's own code runs while it's installed, and uv asks [OSV](https://osv.dev) whether any of them is known malware first. If one is, or OSV can't be reached, the server isn't installed. That happens once for each lock: after that, starting a server needs no network.
-- **Known vulnerabilities:** `doctor` checks each server's locked packages against OSV, and so does CI, for Athena and the recommended servers, on every push and every Monday. A failure emails you.
+- **Known vulnerabilities:** Athena checks each server's locked packages against OSV every day, and updates any that have a fix ([Security updates](#security-updates)). So does `doctor`, and so does CI, for Athena and the recommended servers, on every push and every Monday. A failure emails you.
 - **What isn't locked:** servers started with `uvx` options other than `--from` (doctor says which), and servers started another way, such as `npx`, `ssh` or a URL.
 
 After changing a recommended server's version in `config.example.toml`, remake its lock with `uv run python -m pi_assistant.server_envs`.
+
+### Security updates
+
+Once a day (`[security_updates] every_hours`, 24), Athena asks [OSV](https://osv.dev) whether any package locked for a server started with `uvx` has a known vulnerability. For each that has a fixed version, it:
+
+1. updates just that package in the server's lock, to the lowest version that fixes every advisory against it, and nothing else
+2. restarts the server once Athena's finished what it's doing, which installs it again from the new lock with the usual checks: exact hashes, nothing built from source, and the malware check
+3. messages you what it updated and why, such as "🛡️ I updated certifi 2026.7.22 → 2026.10.19 for the “time” server…"
+
+A vulnerability with no fix yet, or an update that fails, is something you're told about once. Each server's card on the Tools tab shows when its dependencies were last checked, anything found, and what's been updated, with a **Fix** button that does the same straight away. With `automatic = false`, Athena only tells you, and you press **Fix**.
+
+When a reviewed lock in `mcp-locks/` changes, servers using it take it the next time they start, replacing any updates made here. An update made here is kept until then.
 
 ### When a server's tools change
 
@@ -713,7 +725,7 @@ The icon is `src/pi_assistant/assets/athena.svg`. The status board has its own c
 - No tool can send Athena's secrets, and tools that send to Claude's projects can't send your personal details: see [Privacy](#privacy).
 - `install.sh` turns off `git push` in the Pi's clone (`scripts/disable-git-push.sh`), so nothing in it can be pushed to GitHub. `git pull` still works.
 - Text from tools, such as fetched web pages, is untrusted: it can tell the model to send your data somewhere. That's why MCP tools ask first by default and the approval message shows their full arguments. Only set `confirm = []` on servers that can't send data off your network.
-- Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)).
+- Servers started with `uvx` run from locked environments: every package's version and hash is fixed, nothing is built from source, and new installs are checked for known malware ([How servers are installed](#how-servers-are-installed)). Athena checks those packages for known vulnerabilities every day, and updates any with a fix, telling you what it did ([Security updates](#security-updates)).
 - Local servers run in a [sandbox](#sandbox) without your home folder, so they can't read `.env`, your memories or your SSH keys, and without the network if they don't need it. A server with network access can reach anything the Pi can, though, so the approval before a tool runs is still what stops your data being sent somewhere.
 - A server's tools that are new or have changed since you approved them are held back from the model until you approve them on the dashboard ([When a server's tools change](#when-a-servers-tools-change)).
 - The Pi can push to one GitHub repository only, for [Projects for Claude](#projects-for-claude), if you set it up: its token reaches that repo alone, Athena refuses to push if it's public, and each push of requirements or answers asks you first in Telegram, showing everything it contains. A task can't be allowed to skip that. Starting Claude again only takes a label off a pull request and puts it back.

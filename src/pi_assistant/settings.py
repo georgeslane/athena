@@ -450,6 +450,8 @@ class Running:
     applying: bool = False  # changes are being applied
     # For each MCP server: its tools that are new or changed since you approved them, as the page shows them.
     held: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # For each MCP server whose dependencies have been checked: what was found (server_security.py).
+    security: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class Settings:
@@ -511,12 +513,17 @@ class Settings:
         connected, error, offered = running.servers.get(name, (False, None, []))
         held = running.held.get(name, []) if connected and enabled else []
         entry["held"] = held
+        security = running.security.get(name) if enabled else None
+        entry["security"] = security
+        vulnerable = [f["package"] for f in security["findings"]] if security and security["clean"] is False else []
         if not enabled:
             entry["state"], entry["detail"] = "off", "Off" if added else "Not set up yet"
         elif error:
             entry["state"], entry["detail"] = "error", error
         elif connected and held:
             entry["state"], entry["detail"] = "attention", f"{_count(len(held), 'tool')} changed: waiting for you"
+        elif vulnerable:
+            entry["state"], entry["detail"] = "attention", f"Known vulnerability in {', '.join(vulnerable)}"
         elif connected:
             on = [t for t, _ in offered if _tool_on(t, section)]
             entry["state"], entry["detail"] = "on", f"Connected · {_count(len(on), 'tool')}"

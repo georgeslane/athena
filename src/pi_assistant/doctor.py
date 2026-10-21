@@ -272,13 +272,20 @@ async def check_lock(envs: ServerEnvs, st: ServerStatus, report: Callable[[str, 
         return
     audit = await envs.audit(st.name)
     origin = "a reviewed lock (mcp-locks/)" if st.lock == "reviewed" else "a lock made when it was first used"
+    fixed = envs.fixed(st.name)
+    if fixed:
+        origin += f", with security updates ({'; '.join(fixed)})"
     if audit.clean:
         report(OK, f"{st.name}: dependencies pinned by {origin}; {audit.summary.lower()}")
     elif audit.clean is None:
         report(WARN, f"{st.name}: dependencies pinned by {origin}, but not checked: {audit.summary}")
     else:
-        found = f"{audit.summary} ({', '.join(audit.affected)})"
-        report(FAIL, f"{st.name}: {found}. For details, run `uv audit --frozen` in data/mcp/{st.name}")
+        found = "; ".join(
+            f.describe() + (f", fixed in {f.fixed}" if f.fixed else ", no fix yet") for f in audit.findings
+        )
+        report(FAIL, f"{st.name}: {audit.summary}: {found}")
+        if any(f.fixed for f in audit.findings):
+            report(WARN, f"{st.name}: press Fix on it in the dashboard's Tools tab, or Athena updates it within a day")
 
 
 def report_prompt(cost: PromptCost, report: Callable[[str, str], None]) -> None:
