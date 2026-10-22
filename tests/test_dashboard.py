@@ -13,11 +13,11 @@ import httpx
 import pytest
 from conftest import FakeEmbedder, FakeLLMServer, completion
 
-from pi_assistant.app import build_services
-from pi_assistant.config import load_config
-from pi_assistant.dashboard import COOKIE, FILES, SIGN_IN_TRIES
-from pi_assistant.doctor import FAIL, OK, WARN, check_dashboard
-from pi_assistant.tool_approvals import ToolVersion
+from athena.app import build_services
+from athena.config import load_config
+from athena.dashboard import COOKIE, FILES, SIGN_IN_TRIES
+from athena.doctor import FAIL, OK, WARN, check_dashboard
+from athena.tool_approvals import ToolVersion
 
 PASSWORD = "dashboard-password-123"
 DEMO = Path(__file__).parent / "fixtures" / "demo_mcp_server.py"
@@ -479,7 +479,7 @@ async def test_messages_wait_while_tools_change(athena):
         await gate.wait()
         return "slow result"
 
-    from pi_assistant.tools import Tool
+    from athena.tools import Tool
 
     athena.builtins.tools.append(Tool("slow", "Takes a while.", {"type": "object", "properties": {}}, slow))
     athena.agent.llm = FakeLLMServer([completion(None, [("slow", {})]), completion("Done slowly.")]).client(
@@ -550,7 +550,7 @@ async def test_doctor_explains_what_is_wrong(config):
     assert reported == [
         (FAIL, "its password, DASHBOARD_TOKEN in .env, must be at least 12 characters"),
         (WARN, "no password yet: Athena makes one, DASHBOARD_TOKEN in .env, when the service starts"),
-        (WARN, "not answering. It runs inside the bot: is the pi-assistant service running?"),
+        (WARN, "not answering. It runs inside the bot: is the athena service running?"),
         (WARN, "off ([dashboard] enabled = false)"),
     ]
 
@@ -584,7 +584,7 @@ def your_mac(tmp_path, monkeypatch):
 
 def point_at(athena, home):
     """Have Athena start the documents server here, in config.toml as you'd set it for SSH."""
-    args = ["-m", "pi_assistant.mac_documents", "--scope", str(home)]
+    args = ["-m", "athena.mac_documents", "--scope", str(home)]
     athena.config = athena.dashboard.settings.set_values({"documents.command": sys.executable, "documents.args": args})
     athena.documents.configure(athena.config.documents)
 
@@ -760,7 +760,7 @@ async def test_skills_from_the_dashboard(athena):
 async def test_the_board_from_the_dashboard(athena, tmp_path):
     from test_claude_projects import REPO, STORIES, Clock, FakeGitHub
 
-    from pi_assistant.claude_projects import BoardStore, ClaudeProjects, ClaudeProjectsConfig
+    from athena.claude_projects import BoardStore, ClaudeProjects, ClaudeProjectsConfig
 
     async with client(athena) as http:
         off = await http.get("/api/projects")
@@ -870,7 +870,7 @@ def test_every_route_has_a_handler_that_takes_its_parts():
     import inspect
     import re
 
-    from pi_assistant.dashboard import ROUTES, DashboardServer
+    from athena.dashboard import ROUTES, DashboardServer
 
     for method, path, handler in ROUTES:
         assert method in (None, "GET", "POST", "DELETE"), path

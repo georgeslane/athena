@@ -7,15 +7,10 @@ import sqlite3
 import pytest
 from conftest import DIMS, FakeEmbedder
 
-from pi_assistant import memory as memory_module
-from pi_assistant.config import MemoryConfig
-from pi_assistant.memory import (
-    MAX_WORDS,
-    IndexedDocument,
-    MemoryService,
-    MemoryStore,
-    words_query,
-)
+from athena.config import MemoryConfig
+from athena.memory import IndexedDocument, MemoryService, MemoryStore, words_query
+from athena.memory import store as memory_store
+from athena.memory.search import MAX_WORDS
 
 
 @pytest.mark.parametrize(
@@ -124,7 +119,7 @@ async def test_memories_from_before_the_index_are_added_to_it(tmp_path):
 
 
 async def test_without_fts5_memory_is_searched_by_meaning_alone(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(memory_module, "WORDS_TOKENIZER", "no_such_tokenizer")  # creating the index fails
+    monkeypatch.setattr(memory_store, "WORDS_TOKENIZER", "no_such_tokenizer")  # creating the index fails
     store = MemoryStore(tmp_path / "m.db", DIMS, "fake-embed")
     assert not store.words and "Searching memory by its words is off" in caplog.text
     service = MemoryService(store, FakeEmbedder(), MemoryConfig())

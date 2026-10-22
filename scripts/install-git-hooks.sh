@@ -13,7 +13,7 @@ MARK="# installed by scripts/install-git-hooks.sh"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 if [[ "$(git config --get remote.origin.pushurl || true)" == "pushing-is-disabled-on-this-machine" ]]; then
-  echo "Pushing is turned off on this machine (scripts/disable-git-push.sh), so there's nothing to check." >&2
+  echo "Pushing is turned off for this checkout, so there's nothing to check." >&2
   exit 1
 fi
 if [[ -n "$(git config --get core.hooksPath || true)" ]]; then

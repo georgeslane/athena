@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from pi_assistant.config import MCPServerConfig
-from pi_assistant.mcp_manager import MCPManager
-from pi_assistant.tool_approvals import ToolApprovals, ToolVersion
+from athena.config import MCPServerConfig
+from athena.mcp_manager import MCPManager
+from athena.tool_approvals import ToolApprovals, ToolVersion
 
 DEMO = str(Path(__file__).parent / "fixtures" / "demo_mcp_server.py")
 

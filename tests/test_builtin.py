@@ -6,20 +6,21 @@ from pathlib import Path
 
 import httpx
 
-from pi_assistant import app
-from pi_assistant.builtin import FAIL, OK, Builtin, Section, Unavailable
-from pi_assistant.catalog import Integration
-from pi_assistant.config import Config, LLMConfig
-from pi_assistant.integrations import BUILTINS
-from pi_assistant.news import NewsReader
-from pi_assistant.settings import BY_ID, CATALOG
-from pi_assistant.tools import Tool
+from athena import app
+from athena.builtin import FAIL, OK, Builtin, Section, Unavailable
+from athena.catalog import Integration
+from athena.config import Config, LLMConfig
+from athena.integrations import BUILTINS
+from athena.news import NewsReader
+from athena.resources import CONFIG_EXAMPLE
+from athena.settings import BY_ID, CATALOG
+from athena.tools import Tool
 
 REPO = Path(__file__).resolve().parents[1]
 
 
 def test_each_built_in_is_everywhere_it_should_be():
-    example = tomllib.loads((REPO / "config.example.toml").read_text())
+    example = tomllib.loads(CONFIG_EXAMPLE.read_text())
     for kind in BUILTINS:
         assert issubclass(kind, Builtin)
         # Its section of config.toml, with its settings, there by default and in the example.

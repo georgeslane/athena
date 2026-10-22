@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pi_assistant.cron import Cron, CronError
+from athena.cron import Cron, CronError
 
 LONDON = ZoneInfo("Europe/London")
 THURSDAY = datetime(2026, 10, 15, 12, 0, tzinfo=LONDON)  # a Thursday, at noon

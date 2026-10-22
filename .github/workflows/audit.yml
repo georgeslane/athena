@@ -1,4 +1,4 @@
-# Checks the locked dependencies of Athena and of the recommended MCP servers (mcp-locks/) for
+# Checks the locked dependencies of Athena and of the recommended MCP servers (resources/mcp-locks/) for
 # known vulnerabilities, using OSV. It runs on every push and pull request, and every Monday too,
 # since new vulnerabilities are found in code that hasn't changed. A failure emails you.
 name: Audit
@@ -27,7 +27,7 @@ jobs:
       - name: Audit Athena and each MCP server
         run: |
           status=0
-          for project in . mcp-locks/*/; do
+          for project in . src/athena/resources/mcp-locks/*/; do
             echo "::group::$project"
             uv audit --project "$project" --frozen --preview-features audit-command || status=1
             echo "::endgroup::"

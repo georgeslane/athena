@@ -7,9 +7,9 @@ import pytest
 from conftest import completion
 from test_tasks import LONDON, athena  # noqa: F401 - athena is a fixture
 
-from pi_assistant.tasks import NOTHING
-from pi_assistant.tools import ToolError, Turn, begin_turn
-from pi_assistant.watching import MAX_WATCHES, WatchStore, describe, watch_tool
+from athena.tasks import NOTHING
+from athena.tools import ToolError, Turn, begin_turn
+from athena.watching import MAX_WATCHES, WatchStore, describe, watch_tool
 
 
 def days(n: float) -> float:
@@ -78,7 +78,7 @@ def test_whats_watched_from_before_no_end_was_possible_is_kept(tmp_path):
 def test_until_the_end_of_a_day():
     from datetime import datetime
 
-    from pi_assistant.watching import end_of
+    from athena.watching import end_of
 
     end = datetime.fromtimestamp(end_of("2026-11-02", LONDON), LONDON)
     assert (end.date().isoformat(), end.hour, end.minute) == ("2026-11-02", 23, 59)

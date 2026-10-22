@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from pi_assistant.app import build_services
-from pi_assistant.databases import Databases, SQLiteConfig, _first_word, _ReadOnly
-from pi_assistant.tools import ToolError
+from athena.app import build_services
+from athena.databases import Databases, SQLiteConfig, _first_word, _ReadOnly
+from athena.tools import ToolError
 
 
 def make_db(path: Path) -> Path:

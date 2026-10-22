@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 from conftest import FakeEmbedder
 
-from pi_assistant.config import DocumentsConfig, MemoryConfig
-from pi_assistant.documents import DocumentIndex, DocumentsError
-from pi_assistant.memory import MemoryService, MemoryStore
+from athena.config import DocumentsConfig, MemoryConfig
+from athena.documents import DocumentIndex, DocumentsError
+from athena.memory import MemoryService, MemoryStore
 
 DIMS = 256
 
@@ -36,7 +36,7 @@ def athena(tmp_path, mac):
     store = MemoryStore(tmp_path / "pi" / "assistant.db", DIMS, "fake-embed")
     memory = MemoryService(store, FakeEmbedder(), MemoryConfig(chunk_chars=50))  # notes.md is two passages
     cfg = DocumentsConfig(
-        command=sys.executable, args=["-m", "pi_assistant.mac_documents", "--scope", str(mac)], folders=["~/Documents"]
+        command=sys.executable, args=["-m", "athena.mac_documents", "--scope", str(mac)], folders=["~/Documents"]
     )
     index = DocumentIndex(cfg, memory, tmp_path / "pi" / "logs")
     yield index
@@ -200,9 +200,9 @@ async def test_athena_finds_and_reads_documents(athena, mac):
 
 
 async def test_doctor_checks_the_mac_and_whats_indexed(config, mac):
-    from pi_assistant.doctor import FAIL, OK, WARN, check_documents
+    from athena.doctor import FAIL, OK, WARN, check_documents
 
-    server = ["-m", "pi_assistant.mac_documents", "--scope", str(mac)]
+    server = ["-m", "athena.mac_documents", "--scope", str(mac)]
     config.documents = DocumentsConfig(command=sys.executable, args=server, folders=["~/Documents"])
     seen = []
     await check_documents(config, lambda mark, msg: seen.append((mark, msg)))

@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from pi_assistant.config import MCPServerConfig
-from pi_assistant.mcp_manager import MCPManager
-from pi_assistant.sandbox import SSH_INCLUDES, Sandbox, SandboxError
+from athena.config import MCPServerConfig
+from athena.mcp_manager import MCPManager
+from athena.sandbox import SSH_INCLUDES, Sandbox, SandboxError
 
 REPO = Path(__file__).resolve().parents[1]
 DEMO = str(REPO / "tests" / "fixtures" / "demo_mcp_server.py")
@@ -122,7 +122,7 @@ def test_ssh_doesnt_see_the_settings_it_would_refuse(home, tmp_path, monkeypatch
     # /etc/ssh/ssh_config.d unless root or you own them. systemd puts one there on the Pi.
     includes = tmp_path / "ssh_config.d"
     includes.mkdir()
-    monkeypatch.setattr("pi_assistant.sandbox.SSH_INCLUDES", includes)
+    monkeypatch.setattr("athena.sandbox.SSH_INCLUDES", includes)
     sandbox = Sandbox("/usr/bin/bwrap", home)
     for ssh in ("ssh", "/usr/bin/ssh"):
         args = sandbox.wrap([ssh, "athena-mac", "apple"], network=True)

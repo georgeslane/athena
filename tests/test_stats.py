@@ -2,7 +2,7 @@
 
 import sqlite3
 
-from pi_assistant.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
+from athena.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 
 
 def test_counts_per_session_and_in_total(tmp_path):

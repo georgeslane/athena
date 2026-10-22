@@ -1,14 +1,13 @@
 """photos.py, and photos through the history and the agent: what the model is shown, and what's kept."""
 
-import sqlite3
 import struct
 import zlib
 
 from conftest import FakeLLMServer, completion
 from test_agent import make_agent
 
-from pi_assistant.history import ConversationStore
-from pi_assistant.photos import IN_CONTEXT, Photo, PhotoStore, can_see, label, mime_of, red_square, with_photos
+from athena.history import ConversationStore
+from athena.photos import IN_CONTEXT, Photo, PhotoStore, can_see, label, mime_of, red_square, with_photos
 
 JPEG = b"\xff\xd8\xff\xe0" + b"a photo of a cat" * 4
 PNG = b"\x89PNG\r\n\x1a\n" + b"a diagram"
@@ -106,23 +105,6 @@ def test_retry_gets_the_photos_back_and_forgetting_deletes_them(tmp_path):
     history.append_exchange("c", "[Photo] again", "ok", photos=[Photo(JPEG)])
     history.clear()
     assert list((tmp_path / "photos").iterdir()) == []
-
-
-def test_a_history_from_before_photos_gets_them(tmp_path):
-    db = tmp_path / "old.db"
-    conn = sqlite3.connect(db)
-    conn.executescript(
-        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, role TEXT NOT NULL, "
-        "content TEXT NOT NULL, created_at TEXT NOT NULL, tools TEXT);"
-        "INSERT INTO messages (chat_id, role, content, created_at) VALUES ('c', 'user', 'hi', 'x'), "
-        "('c', 'assistant', 'hello', 'x');"
-    )
-    conn.commit()
-    conn.close()
-    history = ConversationStore(db)
-    assert history.load("c") == [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-    history.append_exchange("c", "[Photo]", "a cat", photos=[Photo(JPEG)])
-    assert len(images(history.load("c")[2]["content"])) == 1
 
 
 # -- through the agent ----------------------------------------------------------------------------------

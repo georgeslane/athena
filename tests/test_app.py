@@ -7,9 +7,9 @@ import os
 import pytest
 from conftest import FakeEmbedder, FakeLLMServer, completion
 
-from pi_assistant.app import build_services, reread_config
-from pi_assistant.config import ConfigError, load_config
-from pi_assistant.llm import LLMClient
+from athena.app import build_services, reread_config
+from athena.config import ConfigError, load_config
+from athena.llm import LLMClient
 
 CONFIG = """
 [llm]

@@ -7,10 +7,10 @@ import time
 import pandas as pd
 import pytest
 
-from pi_assistant.builtin import Unavailable
-from pi_assistant.config import Config, LLMConfig
-from pi_assistant.markets import MAX_ROWS, Markets, MarketsConfig
-from pi_assistant.tools import ToolError
+from athena.builtin import Unavailable
+from athena.config import Config, LLMConfig
+from athena.markets import MAX_ROWS, Markets, MarketsConfig
+from athena.tools import ToolError
 
 APPLE = {
     "shortName": "Apple Inc.",

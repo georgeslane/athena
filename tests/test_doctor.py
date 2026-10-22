@@ -1,4 +1,4 @@
-"""`pi-assistant doctor`'s measurement of the prompt the model reads before every reply."""
+"""`athena doctor`'s measurement of the prompt the model reads before every reply."""
 
 import asyncio
 from types import SimpleNamespace
@@ -6,11 +6,11 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeLLMServer, completion
 
-from pi_assistant import doctor
-from pi_assistant.databases import Databases
-from pi_assistant.doctor import FAIL, OK, WARN, PromptCost, check_prompt, measure_prompt, report_prompt
-from pi_assistant.tools import Tool, ToolRegistry
-from pi_assistant.trading212 import Trading212
+from athena import doctor
+from athena.databases import Databases
+from athena.doctor import FAIL, OK, WARN, PromptCost, check_prompt, measure_prompt, report_prompt
+from athena.tools import Tool, ToolRegistry
+from athena.trading212 import Trading212
 
 SCHEMAS = [{"type": "function", "function": {"name": "x", "description": "y", "parameters": {"type": "object"}}}]
 

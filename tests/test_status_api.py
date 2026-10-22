@@ -9,12 +9,11 @@ import time
 import httpx
 import pytest
 
-from pi_assistant.app import build_services
-from pi_assistant.cli import main
-from pi_assistant.config import DisplayConfig
-from pi_assistant.doctor import FAIL, OK, WARN, check_status_api
-from pi_assistant.status import Snapshot, State, StatusTracker
-from pi_assistant.status_api import StatusServer, is_loopback
+from athena.app import build_services
+from athena.config import DisplayConfig
+from athena.doctor import FAIL, OK, WARN, check_status_api
+from athena.status import Snapshot, State, StatusTracker
+from athena.status_api import StatusServer, is_loopback
 
 
 async def serve(tracker=None, **settings):
@@ -191,26 +190,15 @@ async def test_the_assistant_serves_it_and_doctor_checks_it(config):
 
     reported = []
     await check_status_api(config, lambda mark, msg: reported.append((mark, msg)))
-    assert reported[0][0] == WARN and "is the pi-assistant service running?" in reported[0][1]
+    assert reported[0][0] == WARN and "is the athena service running?" in reported[0][1]
 
 
 async def test_doctor_explains_settings_that_cannot_work(config):
     reported = []
-    config.display = DisplayConfig(host="0.0.0.0", led=True)
+    config.display = DisplayConfig(host="0.0.0.0")
     await check_status_api(config, lambda mark, msg: reported.append((mark, msg)))
-    assert reported == [
-        (WARN, "[display] led is no longer used here: set led in pi-display-microservice's config.toml instead"),
-        (FAIL, "it won't listen on 0.0.0.0 without [display] token"),
-    ]
+    assert reported == [(FAIL, "it won't listen on 0.0.0.0 without [display] token")]
 
 
 def test_snapshots_start_idle():
     assert Snapshot().state is State.IDLE
-
-
-@pytest.mark.parametrize("args", [[], ["--demo"], ["--preview", "board.png", "--once"]])
-def test_the_old_display_command_says_where_the_board_went(args, capsys):
-    with pytest.raises(SystemExit) as exited:
-        main(["display", *args])
-    assert exited.value.code == 1
-    assert "pi-display-microservice" in capsys.readouterr().err

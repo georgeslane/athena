@@ -4,9 +4,9 @@ import pytest
 from conftest import FakeLLMServer, completion
 from test_agent import make_agent
 
-from pi_assistant.config import PrivacyConfig
-from pi_assistant.privacy import Privacy, TermStore, check_terms, identifying, strings, term_pattern
-from pi_assistant.tools import Tool
+from athena.config import PrivacyConfig
+from athena.privacy import Privacy, TermStore, check_terms, identifying, strings, term_pattern
+from athena.tools import Tool
 
 # Made up, or made for examples: Ofcom's numbers for drama, a test card, the IBAN in the standard's examples.
 KEY = "sk-" + "x" * 32  # shaped like an API key, built here so the file holds none

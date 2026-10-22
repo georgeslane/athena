@@ -8,13 +8,13 @@ from conftest import FakeLLMServer, completion
 from test_agent import make_agent
 from test_dashboard import athena, client, wait_applied  # noqa: F401  (athena is a fixture)
 
-from pi_assistant.llm import ToolCall
-from pi_assistant.mcp_manager import RESERVED_NAMES
-from pi_assistant.privacy import Verdict
-from pi_assistant.settings import Settings, SettingsError
-from pi_assistant.stats import UsageStats
-from pi_assistant.tool_search import FIND_TOOLS, USE_TOOL, find, meta_tools, summary, unwrap
-from pi_assistant.tools import Tool, ToolError, ToolRegistry
+from athena.llm import ToolCall
+from athena.mcp_manager import RESERVED_NAMES
+from athena.privacy import Verdict
+from athena.settings import Settings, SettingsError
+from athena.stats import UsageStats
+from athena.tool_search import FIND_TOOLS, USE_TOOL, find, meta_tools, summary, unwrap
+from athena.tools import Tool, ToolError, ToolRegistry
 
 
 def tool(name, description, asks=False, calls=None):
@@ -219,7 +219,7 @@ async def test_a_tool_used_through_use_tool_still_asks_first_and_is_checked_for_
 
 
 async def test_a_secret_stops_a_tool_used_through_use_tool_as_it_would_by_name(config, memory):
-    from pi_assistant.privacy import Finding
+    from athena.privacy import Finding
 
     calls = []
     server = FakeLLMServer(

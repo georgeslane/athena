@@ -1,4 +1,4 @@
-from pi_assistant.formatting import markdown_to_speech, markdown_to_telegram_html, split_message
+from athena.formatting import markdown_to_speech, markdown_to_telegram_html, split_message
 
 
 def test_basic_markdown():

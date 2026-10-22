@@ -14,11 +14,11 @@ import httpx
 import pytest
 from conftest import FakeLLMServer, completion
 
-from pi_assistant.agent import Agent
-from pi_assistant.app import build_services
-from pi_assistant.history import ConversationStore
-from pi_assistant.tools import ToolError, ToolRegistry
-from pi_assistant.trading212 import Order, Trading212, Trading212Config
+from athena.agent import Agent
+from athena.app import build_services
+from athena.history import ConversationStore
+from athena.tools import ToolError, ToolRegistry
+from athena.trading212 import Order, Trading212, Trading212Config
 
 APPLE = {"ticker": "AAPL_US_EQ", "name": "Apple Inc", "currency": "USD", "isin": "US0378331005"}
 VANGUARD = {"ticker": "VUSAl_EQ", "name": "Vanguard S&P 500", "currency": "GBX", "isin": "IE00B3XXRP09"}

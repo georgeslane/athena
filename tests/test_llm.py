@@ -3,8 +3,8 @@
 import pytest
 from conftest import FakeLLMServer, completion
 
-from pi_assistant.config import LLMConfig
-from pi_assistant.llm import request_options
+from athena.config import LLMConfig
+from athena.llm import request_options
 
 
 @pytest.mark.parametrize(

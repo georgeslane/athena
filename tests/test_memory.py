@@ -1,6 +1,6 @@
 import pytest
 
-from pi_assistant.memory import MemoryStore, MemoryStoreError, chunk_text, fit_dimensions, iter_text_files
+from athena.memory import MemoryStore, MemoryStoreError, chunk_text, fit_dimensions, iter_text_files
 
 
 async def test_remember_and_search(memory):
@@ -78,7 +78,7 @@ def test_broken_vectors_are_refused_rather_than_saved(vector):
 
 def test_changing_embedding_model_is_detected(tmp_path):
     MemoryStore(tmp_path / "m.db", 8, "model-a").close()
-    with pytest.raises(MemoryStoreError, match="switch-embeddings.sh model-b"):
+    with pytest.raises(MemoryStoreError, match="athena embeddings switch model-b"):
         MemoryStore(tmp_path / "m.db", 8, "model-b")
     with pytest.raises(MemoryStoreError, match="dimension"):
         MemoryStore(tmp_path / "m.db", 16, "model-a")
@@ -108,7 +108,7 @@ async def test_memory_tools(memory):
 
 
 def chats(tmp_path, *exchanges):
-    from pi_assistant.history import ConversationStore
+    from athena.history import ConversationStore
 
     history = ConversationStore(tmp_path / "history.db")
     for question, answer in exchanges:
@@ -207,7 +207,7 @@ def test_documents_move_out_of_the_facts_index(tmp_path):
     """Before documents had an index of their own, they shared the facts' one."""
     import sqlite_vec
 
-    from pi_assistant.memory import connect_db
+    from athena.memory import connect_db
 
     store = MemoryStore(tmp_path / "m.db", 4, "model")
     store.add("A fact.", [1, 0, 0, 0], "fact")
@@ -231,7 +231,7 @@ def test_documents_move_out_of_the_facts_index(tmp_path):
 
 
 def test_a_document_is_replaced_whole(tmp_path):
-    from pi_assistant.memory import IndexedDocument
+    from athena.memory import IndexedDocument
 
     store = MemoryStore(tmp_path / "m.db", 4, "model")
     store.put_document(IndexedDocument("/Users/g/a.txt", "~", 10, 1.0), [("one", [1, 0, 0, 0]), ("two", [0, 1, 0, 0])])
@@ -247,7 +247,7 @@ def test_a_document_is_replaced_whole(tmp_path):
 
 
 async def test_what_athena_remembers_by_itself_waits_for_you(memory):
-    from pi_assistant.tools import Turn, begin_turn
+    from athena.tools import Turn, begin_turn
 
     remember = next(t for t in memory.tools() if t.name == "remember").handler
     known_id, _ = await memory.remember("George's sister is called Anna.")

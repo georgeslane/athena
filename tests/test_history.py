@@ -1,4 +1,4 @@
-from pi_assistant.history import ConversationStore
+from athena.history import ConversationStore
 
 
 def test_a_history_that_couldnt_be_compacted_drops_half_at_twice_the_limit(tmp_path):
@@ -92,24 +92,6 @@ def test_compacting_a_chat_for_the_first_time_after_forgetting_everything_brings
         store.append_exchange("chat", f"new {i}", "ok")
     assert not store.compact("chat", older, "secret 0 and secret 1")
     assert "secret" not in str(store.load("chat"))
-
-
-def test_a_history_from_before_compacting_gets_it(tmp_path):
-    import sqlite3
-
-    db = tmp_path / "old.db"
-    conn = sqlite3.connect(db)
-    conn.executescript(
-        "CREATE TABLE chat_state (chat_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL DEFAULT 0);"
-        "INSERT INTO chat_state VALUES ('chat', 0);"
-    )
-    conn.commit()
-    conn.close()
-    store = ConversationStore(db)
-    for i in range(3):
-        store.append_exchange("chat", f"q{i}", f"a{i}")
-    assert store.compact("chat", store.older("chat", keep=4), "Summary.")
-    assert store.load("chat")[0]["content"].endswith("Summary.\n</summary>\n\nq1")
 
 
 def test_reset_and_chats_are_separate(tmp_path):

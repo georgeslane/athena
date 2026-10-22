@@ -44,4 +44,6 @@ jobs:
           sudo apt-get install -y -qq bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           echo "# Like the one systemd puts here on the Pi" | sudo tee /etc/ssh/ssh_config.d/20-like-systemd.conf
+      # A headless Chromium, for the dashboard's tests in a real browser (tests/test_dashboard_browser.py).
+      - run: uv run playwright install --with-deps --only-shell chromium
       - run: uv run python -m pytest

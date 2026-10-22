@@ -1,7 +1,8 @@
-"""Run by systemd as Athena, under deploy/pi-assistant.service, by tests/test_hardening.py: tries what Athena
-must be able to do there, and what it mustn't, and writes what happened to probe-results.json in its data folder.
+"""Run by systemd as Athena, under its unit (resources/systemd/athena.service), by tests/test_hardening.py: tries
+what Athena must be able to do there, and what it mustn't, and writes what happened to probe-results.json in
+its data folder.
 
-It reads what to try from probe.json, in the folder it's started in (the test's repo).
+It reads what to try from probe.json, in the folder it's started in: Athena's home folder.
 """
 
 import asyncio
@@ -14,11 +15,11 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from pi_assistant.sandbox import Sandbox
-from pi_assistant.settings import write_private
+from athena.config_files import write_private
+from athena.sandbox import Sandbox
 
-repo = Path.cwd()
-plan = json.loads((repo / "probe.json").read_text())
+athena_home = Path.cwd()
+plan = json.loads((athena_home / "probe.json").read_text())
 data = Path(plan["data"])
 home = Path.home()
 results: dict[str, str] = {}  # what was tried: "yes" if it worked, else why not
@@ -71,17 +72,18 @@ def uv_venv():
 
 # What Athena does: its data, config.toml and .env (as the dashboard does), uv's cache, /tmp and the network.
 attempt("write its data", create(data / "probe-file"))
-attempt("change config.toml", lambda: write_private(repo / "config.toml", (repo / "config.toml").read_text() + "\n"))
-attempt("change .env", lambda: write_private(repo / ".env", (repo / ".env").read_text() + "SET_BY_PROBE=yes\n"))
+config, env = athena_home / "config.toml", athena_home / ".env"
+attempt("change config.toml", lambda: write_private(config, config.read_text() + "\n"))
+attempt("change .env", lambda: write_private(env, env.read_text() + "SET_BY_PROBE=yes\n"))
 attempt("write uv's cache", create(home / ".cache" / "uv" / "probe-file"))
 attempt("make an environment with uv", uv_venv)
 attempt("write /tmp", create("/tmp/probe-file"))
 attempt("connect to the network", connect(plan["port"]))
 
-# What it mustn't: its code, scripts and environment, files in the repo, your home folder, sudo.
-attempt("add a file to the repo", create(repo / "uv.toml"))
-attempt("change a script", change(repo / "scripts" / "update.sh"))
-attempt("change its environment", create(repo / ".venv" / "bin" / "probe-file"))
+# What it mustn't: its code and environment, which uv keeps in its tools folder, your home folder, sudo.
+code = Path(plan["code"])
+attempt("change its code", change(code / "bin" / "athena"))
+attempt("add a file to its environment", create(code / "bin" / "probe-file"))
 attempt("write to your home folder", create(home / f".athena-probe-{os.getpid()}"))
 attempt("change ~/.bashrc", change(home / ".bashrc"))
 attempt("see the system's /tmp", lambda: os.stat(plan["tmp_canary"]))
@@ -151,10 +153,10 @@ asyncio.run(sandboxed())
 # Athena itself: its services, with an MCP server in its sandbox, its database and its dashboard, which makes
 # itself a password in .env.
 async def athena():
-    from pi_assistant.app import build_services
-    from pi_assistant.config import load_config
+    from athena.app import build_services
+    from athena.config import load_config
 
-    services = build_services(load_config(repo / "config.toml"))
+    services = build_services(load_config(athena_home / "config.toml"))
     await services.start()
     try:
         for _ in range(120):
@@ -174,7 +176,7 @@ async def athena():
         health = await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=5).read())
         if health != b"ok":
             raise RuntimeError(f"the dashboard said {health!r}")
-        if "DASHBOARD_TOKEN=" not in (repo / ".env").read_text():
+        if "DASHBOARD_TOKEN=" not in (athena_home / ".env").read_text():
             raise RuntimeError("the dashboard's password isn't in .env")
     finally:
         await services.close()
