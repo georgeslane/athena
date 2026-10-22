@@ -277,10 +277,10 @@ async def test_tasks_from_the_dashboard(athena):
     class Telegram:
         chat_id = "111"
 
-        async def tell(self, text):
+        async def tell(self, text, *, session=None):
             said.append(text)
 
-        async def ask(self, tool, args, summary, *, why, timeout):
+        async def ask(self, tool, args, summary, *, why, timeout, session=None):
             return False
 
     athena.channel = Telegram()
@@ -779,7 +779,7 @@ async def test_the_board_from_the_dashboard(athena, tmp_path):
         class Telegram:
             chat_id = "111"
 
-            async def tell(self, text):
+            async def tell(self, text, *, session=None):
                 said.append(text)
 
         athena.channel = Telegram()

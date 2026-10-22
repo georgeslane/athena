@@ -113,13 +113,16 @@ class FakeChannel:
     def __init__(self, allow=True):
         self.said: list[str] = []
         self.asked: list[tuple[str, str]] = []
+        self.sessions: list[int | None] = []  # what each was told or asked about
         self.allow = allow
 
-    async def tell(self, text):
+    async def tell(self, text, *, session=None):
         self.said.append(text)
+        self.sessions.append(session)
 
-    async def ask(self, tool, args, summary, *, why, timeout):
+    async def ask(self, tool, args, summary, *, why, timeout, session=None):
         self.asked.append((tool, why))
+        self.sessions.append(session)
         return self.allow
 
 
@@ -179,21 +182,24 @@ def athena(config, memory, tmp_path):
     return make
 
 
-async def test_a_task_reports_what_it_found_in_your_chat(athena):
+async def test_a_task_reports_what_it_found_in_its_session(athena):
     a = athena([completion(None, [("look", {})]), completion("Rain at 4pm, so take an umbrella.")])
     task = a["scheduler"].add("Weather", "Check the weather for my commute.", "30 7 * * *", [], created_by="you")
+    assert task.session_id == a["history"].session.id  # the current session, unless it's given another
     await a["scheduler"].run(task)
 
     assert a["channel"].said == ["📋 **Weather**\n\nRain at 4pm, so take an umbrella."]
+    assert a["channel"].sessions == [task.session_id]
     assert a["looked"] == [{}]
-    # It's in your chat, so you can ask about it, and in the task's own, for its next run.
-    assert a["history"].load(a["history"].current_chat)[-2:] == [
-        {"role": "user", "content": "(Your task “Weather” ran.)"},
+    # It's in the session's conversation, so you can ask about it, and its next run reads it.
+    assert a["history"].load(a["history"].current_chat) == [
+        {"role": "user", "content": "(Your task “Weather”) Check the weather for my commute."},
         {"role": "assistant", "content": "Rain at 4pm, so take an umbrella."},
     ]
-    assert a["history"].load(f"task:{task.id}")[0]["content"] == "Check the weather for my commute."
+    [said, _] = a["history"].messages(task.session_id)[0]
+    assert said.channel == "Task"
     first = a["server"].requests[0]
-    assert "a task you're doing by yourself" in first["messages"][-1]["content"]
+    assert "This is your task “Weather”" in first["messages"][-1]["content"]
     assert first["chat_template_kwargs"] == {"enable_thinking": True}  # tasks think, whatever [llm] says
     saved = a["scheduler"].store.get(task.id)
     assert (saved.runs, saved.last_outcome, saved.status) == (1, "told you", "active")
@@ -246,6 +252,7 @@ async def test_nothing_to_report_stays_quiet(athena):
     task = a["scheduler"].add("Servers", "Find MCP servers.", "now", [], created_by="athena")
     await a["scheduler"].run(task)
     assert a["channel"].said == []
+    assert a["history"].messages(task.session_id)[0] == []  # nor does it fill the session
     saved = a["scheduler"].store.get(task.id)
     assert (saved.last_outcome, saved.status, saved.next_run) == ("nothing new", "done", None)
 
@@ -543,9 +550,9 @@ async def test_the_model_schedules_tasks_with_your_ok(athena):
         "tools": ["publish"],
     }
     summary = await schedule.preview(args)
-    assert (
-        summary
-        == "A task, “Papers”, every Monday at 08:00:\nFind new papers on X.\n It may use publish without asking you."
+    assert summary == (
+        "A task, “Papers”, every Monday at 08:00, in the current session:\nFind new papers on X.\n"
+        " It may use publish without asking you."
     )
     with pytest.raises(ToolError, match="The hour must be 0-23"):
         await schedule.preview({**args, "schedule": "0 24 * * mon"})
@@ -567,3 +574,154 @@ async def test_the_model_schedules_tasks_with_your_ok(athena):
         await change({"id": 1, "action": "delete"})  # deleting is only for you
     scheduler.delete(1)
     assert await tools["list_tasks"].handler({}) == "There are no tasks."
+
+
+# -- in sessions --------------------------------------------------------------------------------------
+
+
+async def test_a_task_works_with_what_its_session_knows_and_carries_it_on(athena):
+    a = athena([completion("Two new jobs: a data role at Acme, and one at Initech.")])
+    history = a["history"]
+    jobs = history.current_chat
+    history.rename(history.session.id, "Job hunting")
+    history.append_exchange(jobs, "My CV: Python, data, five years.", "Got it.", channel="Dashboard")
+    elsewhere = history.new_session()  # you've moved on to something else since
+    task = a["scheduler"].add("Find jobs", "Look for new postings.", "0 9 * * *", [], "you", session=1)
+    await a["scheduler"].run(task)
+
+    asked = a["server"].requests[0]["messages"]
+    assert asked[1] == {"role": "user", "content": "My CV: Python, data, five years."}  # the session's, to go on
+    assert a["channel"].said == [
+        "📋 **Find jobs** · Job hunting\n\nTwo new jobs: a data role at Acme, and one at Initech."
+    ]
+    assert [m.text for m in history.messages(1)[0]][-1].startswith("Two new jobs")
+    assert history.messages(elsewhere.id)[0] == []
+    # Its session is the current one now, so what you say next, wherever you say it, carries on from it.
+    assert history.session.id == 1
+
+
+async def test_a_report_doesnt_take_you_from_a_session_youre_talking_in(athena):
+    a = athena([])
+    agent, history = a["agent"], a["history"]
+
+    def reply(body):
+        agent.answering_you = 1  # you've started talking to Athena as the task finishes
+        return completion("Done.")
+
+    a["server"].replies = reply
+    task = a["scheduler"].add("Errand", "Do it.", "now", [], "you")
+    yours = history.new_session()
+    await a["scheduler"].run(task)
+    agent.answering_you = 0
+    assert history.session.id == yours.id and a["channel"].said == ["📋 **Errand**\n\nDone."]
+
+
+async def test_you_can_talk_in_a_session_while_its_task_is_working_in_it(athena, config):
+    let_go = asyncio.Event()
+
+    async def wait_here(args):
+        await let_go.wait()
+        return "Waited."
+
+    def model(body):
+        last = body["messages"][-1]
+        if last["role"] == "tool":
+            return completion("The task's done.")
+        if "This is your task" in last["content"]:
+            return completion(None, [("wait_here", {})])
+        return completion("Hello to you.")
+
+    a = athena([], quiet_minutes=0)
+    a["server"].replies = model
+    a["agent"].tools.add(Tool("wait_here", "Waits.", {"type": "object", "properties": {}}, wait_here))
+    task = a["scheduler"].add("Slow", "Take your time.", "now", [], "you")
+    running = asyncio.create_task(a["scheduler"].run(task))
+    for _ in range(200):
+        if a["status"].snapshot().step == "Using wait_here":
+            break
+        await asyncio.sleep(0.01)
+    # Yours is answered while the task's waiting, not after it: neither waits on the other.
+    answer = await asyncio.wait_for(a["agent"].respond(a["history"].current_chat, "Hi"), 2)
+    assert answer.text == "Hello to you."
+    let_go.set()
+    await asyncio.wait_for(running, 2)
+    assert [m.text for m in a["history"].messages(task.session_id)[0]] == [
+        "Hi",
+        "Hello to you.",
+        "(Your task “Slow”) Take your time.",
+        "The task's done.",
+    ]
+
+
+async def test_a_task_asks_for_your_ok_in_its_session(athena):
+    a = athena([completion(None, [("publish", {})]), completion("Done.")], FakeChannel(allow=False))
+    task = a["scheduler"].add("Post", "Publish the notes.", "now", [], "you")
+    a["history"].new_session()
+    await a["scheduler"].run(task)
+    assert a["channel"].asked == [("publish", "For your task “Post”")]
+    assert a["channel"].sessions[0] == task.session_id
+
+
+async def test_tasks_belong_to_sessions_that_exist(athena):
+    a = athena([])
+    scheduler, history = a["scheduler"], a["history"]
+    with pytest.raises(ValueError, match="no session #9"):
+        scheduler.add("A", "Do it.", "now", [], "you", session=9)
+    other = history.new_session("Research", current=False)
+    task = scheduler.add("A", "Do it.", "now", [], "you")
+    moved = scheduler.change(task.id, "A", "Do it.", "now", [], session=other.id)
+    assert moved.session_id == other.id and scheduler.in_session(other.id) == [scheduler.store.get(task.id)]
+    # One whose session's gone runs in a new one, named after it.
+    history.delete_session(other.id)
+    a["server"].replies = [completion("Done.")]
+    await scheduler.run(scheduler.store.get(task.id))
+    again = scheduler.store.get(task.id)
+    assert again.session_id not in (None, other.id) and history.title(again.session_id) == "A"
+
+
+async def test_a_task_athena_schedules_runs_in_the_session_its_asked_in(athena):
+    from athena.tools import Turn, begin_turn
+
+    a = athena([])
+    history = a["history"]
+    history.rename(1, "Maths")
+    history.new_session()
+    schedule = {t.name: t for t in a["scheduler"].tools()}["schedule_task"]
+    args = {"title": "Primes", "instructions": "Look for patterns.", "schedule": "0 8 * * mon"}
+    end = begin_turn(Turn(chat="session:1"))
+    try:
+        assert "in “Maths”" in await schedule.preview(args)
+        await schedule.handler(args)
+    finally:
+        end()
+    assert a["scheduler"].store.get(1).session_id == 1
+
+
+async def test_tasks_from_before_sessions_get_sessions_of_their_own(config, memory):
+    history = ConversationStore(config.db_path)
+    store = TaskStore(config.db_path)
+    store.add("Briefing", "Brief me.", "30 7 * * *", [], "you", None)
+    store.add("Never ran", "Something.", "now", [], "you", None)
+    history.append_exchange("task:1", "Brief me.", "Dentist at 2.")
+    history.append_exchange("task:1", "Brief me.", NOTHING)
+    history.append_exchange("task:1", "Brief me.", "Rain later.")
+    yours = history.session
+    history.append_exchange(yours.chat_id, "Hello", "Hi")
+    agent = Agent(config.agent, None, ToolRegistry(), history, memory)
+    scheduler = Scheduler(TasksConfig(), store, agent, timezone="Europe/London", channel=lambda: None, tools=lambda: [])
+    first, second = scheduler.store.all()
+    assert first.session_id and second.session_id and first.session_id != second.session_id
+    assert history.title(first.session_id) == "Briefing" and history.title(second.session_id) == "Never ran"
+    said = history.messages(first.session_id)[0]
+    assert [(m.role, m.text, m.channel) for m in said] == [
+        ("user", "(Your task “Briefing”) Brief me.", "Task"),
+        ("assistant", "Dentist at 2.", ""),
+        ("user", "(Your task “Briefing”) Brief me.", "Task"),
+        ("assistant", "Rain later.", ""),
+    ]
+    assert history.load("task:1") == [] and len(history.load(f"session:{first.session_id}")) == 4
+    assert history.session.id == yours.id  # yours is still the current one
+    assert [s.id for s in history.sessions()][0] == yours.id
+    # Done once: they're not moved again.
+    Scheduler(TasksConfig(), store, agent, timezone="Europe/London", channel=lambda: None, tools=lambda: [])
+    assert [t.session_id for t in store.all()] == [first.session_id, second.session_id]

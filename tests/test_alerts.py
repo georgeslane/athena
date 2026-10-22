@@ -22,7 +22,7 @@ class Checks:
     async def check(self):
         return dict(self.now)
 
-    async def tell(self, text):
+    async def tell(self, text, *, session=None):
         if self.can_tell:
             self.said.append(text)
         return self.can_tell
@@ -172,7 +172,7 @@ async def test_alerts_go_to_telegram_once_it_has_started(services):
         chat_id = "1"
         said: list[str] = []
 
-        async def tell(self, text):
+        async def tell(self, text, *, session=None):
             self.said.append(text)
 
     services.channel = Telegram()

@@ -1,12 +1,13 @@
 """Tasks: work Athena does by itself, on a schedule, and tells you about.
 
-A task is instructions, when to carry them out, and the tools it may use without asking you each
-time: a briefing every weekday morning, research to do now while you get on with something else,
-a weekly look for MCP servers that would help with what you've been asking about, or something to
-do when an event comes in, such as you arriving home ("on arrive-home": see triggers.py). Athena works
-on it as it would a message from you, with more steps, more time and thinking on, then messages
-you what it found, unless there was nothing worth saying. That message goes into your chat as
-well, so you can reply to it.
+A task is instructions, when to carry them out, the session it belongs to, and the tools it may use
+without asking you each time: a briefing every weekday morning, research to do now while you get on
+with something else, a weekly look for MCP servers that would help with what you've been asking
+about, or something to do when an event comes in, such as you arriving home ("on arrive-home": see
+triggers.py). Athena works on it in its session, as it would a message from you there, with
+everything said there to go on, more steps, more time and thinking on, then messages you what it
+found, unless there was nothing worth saying, which isn't kept. What it found is kept in the
+session, which becomes the current one, so you can reply to it.
 
 You come first:
   - A task doesn't start while Athena's answering you, or within [tasks] quiet_minutes of your

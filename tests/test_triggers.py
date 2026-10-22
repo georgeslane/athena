@@ -179,7 +179,7 @@ async def test_a_shortcut_starts_a_task_through_the_dashboards_address(tmp_path,
     class Telegram:
         chat_id = "111"
 
-        async def tell(self, text):
+        async def tell(self, text, *, session=None):
             said.append(text)
 
     services.channel = Telegram()

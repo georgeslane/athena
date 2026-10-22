@@ -18,16 +18,26 @@ log = logging.getLogger(__name__)
 
 
 class Channel(Protocol):
-    async def tell(self, text: str) -> None:
-        """Send you ``text``, in Markdown."""
+    async def tell(self, text: str, *, session: int | None = None) -> None:
+        """Send you ``text``, in Markdown: what was said in ``session``, if it's given, such as what a task found."""
         ...
 
     async def send_file(self, noted: str) -> None:
         """Send you a file from the workspace, as send_file noted it (files.py)."""
         ...
 
-    async def ask(self, tool: str, args: dict[str, Any], summary: str | None, *, why: str, timeout: float) -> bool:
-        """Ask you to allow a tool call, saying ``why`` it's wanted. False if you deny it or don't answer in time."""
+    async def ask(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        summary: str | None,
+        *,
+        why: str,
+        timeout: float,
+        session: int | None = None,
+    ) -> bool:
+        """Ask you to allow a tool call, saying ``why`` it's wanted, and for ``session`` if it's for something in one.
+        False if you deny it or don't answer in time."""
         ...
 
 
@@ -38,8 +48,8 @@ class Reach:
     def __init__(self, services: Services):
         self.s = services
 
-    async def tell(self, text: str) -> None:
-        await self.s.notify(text)
+    async def tell(self, text: str, *, session: int | None = None) -> None:
+        await self.s.notify(text, session=session)
 
     async def send_file(self, noted: str) -> None:
         if self.s.channel is None:  # the dashboard has nowhere to keep it
@@ -47,8 +57,17 @@ class Reach:
             return
         await self.s.channel.send_file(noted)
 
-    async def ask(self, tool: str, args: dict[str, Any], summary: str | None, *, why: str, timeout: float) -> bool:
+    async def ask(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        summary: str | None,
+        *,
+        why: str,
+        timeout: float,
+        session: int | None = None,
+    ) -> bool:
         if self.s.channel is not None:  # in Telegram, and on the dashboard
-            return await self.s.channel.ask(tool, args, summary, why=why, timeout=timeout)
+            return await self.s.channel.ask(tool, args, summary, why=why, timeout=timeout, session=session)
         approvals = self.s.approvals
-        return await approvals.wait(approvals.open(tool, args, summary, timeout=timeout, why=why))
+        return await approvals.wait(approvals.open(tool, args, summary, timeout=timeout, why=why, session=session))

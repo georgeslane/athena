@@ -29,6 +29,7 @@ class Task:
     runs: int = 0
     failures: int = 0  # in a row, for this run
     last_steps: list[dict[str, str]] = field(default_factory=list)  # the tools it used last time (steps())
+    session_id: int | None = None  # the session it runs in (history.py): None only before tasks had one
 
 
 class TaskStore:
@@ -55,16 +56,20 @@ class TaskStore:
                     last_result TEXT NOT NULL DEFAULT '',
                     runs INTEGER NOT NULL DEFAULT 0,
                     failures INTEGER NOT NULL DEFAULT 0,
-                    last_steps TEXT NOT NULL DEFAULT '[]'
+                    last_steps TEXT NOT NULL DEFAULT '[]',
+                    session_id INTEGER
                 )
                 """
             )
-            if "last_steps" not in {row[1] for row in self._conn.execute("PRAGMA table_info(tasks)")}:
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(tasks)")}
+            if "last_steps" not in columns:
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN last_steps TEXT NOT NULL DEFAULT '[]'")
+            if "session_id" not in columns:
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN session_id INTEGER")
 
     _COLUMNS = (
         "id, title, instructions, schedule, allowed_tools, status, created_by, created_at, "
-        "next_run, last_run, last_outcome, last_result, runs, failures, last_steps"
+        "next_run, last_run, last_outcome, last_result, runs, failures, last_steps, session_id"
     )
 
     def _task(self, row: tuple[Any, ...]) -> Task:
@@ -73,13 +78,29 @@ class TaskStore:
         return Task(*values)
 
     def add(
-        self, title: str, instructions: str, schedule: str, allowed_tools: list[str], created_by: str, next_run: float
+        self,
+        title: str,
+        instructions: str,
+        schedule: str,
+        allowed_tools: list[str],
+        created_by: str,
+        next_run: float | None,
+        session_id: int | None = None,
     ) -> Task:
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO tasks (title, instructions, schedule, allowed_tools, created_by, created_at, next_run) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (title, instructions, schedule, json.dumps(allowed_tools), created_by, time.time(), next_run),
+                "INSERT INTO tasks (title, instructions, schedule, allowed_tools, created_by, created_at, next_run, "
+                "session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    title,
+                    instructions,
+                    schedule,
+                    json.dumps(allowed_tools),
+                    created_by,
+                    time.time(),
+                    next_run,
+                    session_id,
+                ),
             )
         task = self.get(int(cur.lastrowid))  # type: ignore[arg-type]
         assert task is not None
@@ -114,8 +135,8 @@ class TaskStore:
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE tasks SET title = ?, instructions = ?, schedule = ?, allowed_tools = ?, status = ?, "
-                "next_run = ?, last_run = ?, last_outcome = ?, last_result = ?, runs = ?, failures = ?, last_steps = ? "
-                "WHERE id = ?",
+                "next_run = ?, last_run = ?, last_outcome = ?, last_result = ?, runs = ?, failures = ?, "
+                "last_steps = ?, session_id = ? WHERE id = ?",
                 (
                     task.title,
                     task.instructions,
@@ -129,6 +150,7 @@ class TaskStore:
                     task.runs,
                     task.failures,
                     json.dumps(task.last_steps),
+                    task.session_id,
                     task.id,
                 ),
             )

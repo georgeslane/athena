@@ -40,6 +40,13 @@ const ICONS = {
   stop: "M7 7h10v10H7z",
   shield: "M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6zM9 12l2 2 4-4",
   bell: "M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20a2 2 0 0 0 4 0",
+  bell_off: "M6 16V11a6 6 0 0 1 9.4-4.9M18 11v5l1.5 2H9M10 20a2 2 0 0 0 4 0M4 4l16 16",
+  clip: "M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 0 1 4.8 4.8l-8.5 8.5a1.8 1.8 0 0 1-2.5-2.5l7.8-7.8",
+  slash: "M15 4L9 20",
+  more: "M6 12h.01M12 12h.01M18 12h.01",
+  clock: "M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z",
+  file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5",
+  close: "M6 6l12 12M18 6L6 18",
   chevron_down: "M6 9l6 6 6-6",
 };
 
@@ -170,7 +177,7 @@ export function ask({ title, body, confirm, danger, ready, watch }) {
     if (watch) watch.addEventListener("input", () => (ok.disabled = !ready()));
     dialog.onclose = () => resolve(false);
     dialog.replaceChildren(h("h2", { text: title }), ...body, h("div.tool-actions", {}, cancel, ok));
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal(); // or it's asked in the dialog that's open, such as a session's
     (watch || cancel).focus();
   });
 }

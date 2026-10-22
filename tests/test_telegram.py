@@ -514,7 +514,8 @@ def task_scheduler(config):
     from athena.config import TasksConfig
     from athena.tasks import Scheduler, TaskStore
 
-    agent = SimpleNamespace(answering_you=0, last_answered_you=float("-inf"))
+    history = ConversationStore(config.db_path)
+    agent = SimpleNamespace(answering_you=0, last_answered_you=float("-inf"), history=history)
     return Scheduler(TasksConfig(), TaskStore(config.db_path), agent, timezone="Europe/London",
                      channel=lambda: None, tools=lambda: [])  # fmt: skip
 

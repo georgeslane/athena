@@ -1,13 +1,16 @@
 """A small HTTP/1.1 server for the assistant's own endpoints: Siri's, the status API's and the dashboard's.
 
 Standard library only. Each connection carries one request, which is read in full,
-within limits on its size and how long it may take, answered, and closed.
+within limits on its size and how long it may take, answered, and closed. A server can
+let a request take more, by what it is and who it's from (body_limit), as the dashboard
+does for photos and files sent in its chat.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, unquote
 
@@ -85,10 +88,15 @@ class Server:
     async def handle(self, request: Request) -> Response:
         raise HTTPError(404, "Not found.")
 
+    def body_limit(self, method: str, path: str, headers: dict[str, str]) -> tuple[int, float]:
+        """How long a request's body may be, and how many seconds reading the request may take, from what it
+        is: its method, path and headers, names in lower case."""
+        return MAX_REQUEST_BYTES, READ_TIMEOUT_SECONDS
+
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             try:
-                response = await self.handle(await read_request(reader, writer))
+                response = await self.handle(await read_request(reader, writer, self.body_limit))
             except HTTPError as exc:
                 response = Response(exc.text, status=exc.status)
             except (ValueError, asyncio.IncompleteReadError):  # malformed, too long, or cut short
@@ -112,8 +120,13 @@ class Server:
                 await writer.wait_closed()
 
 
-async def read_request(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> Request:
-    async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+async def read_request(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    limit: Callable[[str, str, dict[str, str]], tuple[int, float]] | None = None,
+) -> Request:
+    async with asyncio.timeout(READ_TIMEOUT_SECONDS) as timeout:
+        started = asyncio.get_running_loop().time()
         method, target, version = (await reader.readline()).decode("latin-1").rstrip("\r\n").split(" ")
         if not version.startswith("HTTP/1."):
             raise HTTPError(400, "Bad request.")
@@ -123,7 +136,10 @@ async def read_request(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             if not colon or len(headers) >= MAX_HEADERS:
                 raise HTTPError(400, "Bad request.")
             headers[name.strip().lower()] = value.strip()
-        body = await _read_body(reader, writer, headers)
+        most, seconds = limit(method, unquote(target.partition("?")[0]), headers) if limit else (MAX_REQUEST_BYTES, 0)
+        if seconds > READ_TIMEOUT_SECONDS:
+            timeout.reschedule(started + seconds)
+        body = await _read_body(reader, writer, headers, most)
     path, _, query = target.partition("?")
     params: dict[str, str] = {}
     for name, value in parse_qsl(query):
@@ -131,14 +147,16 @@ async def read_request(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     return Request(method, unquote(path), params, headers, body)
 
 
-async def _read_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str]) -> bytes:
+async def _read_body(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str], most: int
+) -> bytes:
     if headers.get("expect", "").lower() == "100-continue":
         writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
         await writer.drain()
     if "chunked" in headers.get("transfer-encoding", "").lower():
         body = b""
         while size := int((await reader.readline()).split(b";")[0].strip(), 16):
-            if len(body) + size > MAX_REQUEST_BYTES:
+            if len(body) + size > most:
                 raise HTTPError(413, "That's too long for me.")
             body += await reader.readexactly(size)
             await reader.readline()  # the line break after each chunk
@@ -148,7 +166,7 @@ async def _read_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     length = int(headers.get("content-length", "0"))
     if length < 0:
         raise ValueError("negative Content-Length")
-    if length > MAX_REQUEST_BYTES:
+    if length > most:
         # Read it anyway, up to a point: closing with data still arriving would reset the
         # connection, and the client would never see this reply.
         with contextlib.suppress(asyncio.IncompleteReadError):

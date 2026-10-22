@@ -207,3 +207,119 @@ async def test_the_page_hears_of_new_messages_as_it_does_the_status(chat):
         after = (await asyncio.wait_for(waiting, 2)).json()
         assert after["version"] != before["version"]
         assert after["chat"]["last"]["role"] == "assistant"  # so the page can say Athena's written
+
+
+async def test_naming_and_deleting_sessions(chat):
+    async with client(chat) as http:
+        await http.post("/api/chat/1", json={"text": "My CV: Python and data."})
+        await answered(http)
+        renamed = await http.post("/api/chat/1/name", json={"name": "  Job   hunting "})
+        assert renamed.json()["name"] == "Job hunting"
+        assert (await http.post("/api/chat/1/name", json={"name": 3})).status_code == 400
+        assert (await http.post("/api/chat/9/name", json={"name": "x"})).status_code == 404
+        state = (await http.get("/api/chat")).json()
+        assert state["sessions"][0]["title"] == "Job hunting" and state["sessions"][0]["last"] > 0
+        task = chat.tasks.add("Find jobs", "Look for new postings.", "0 9 * * *", [], "you", session=1)
+        assert (await http.get("/api/chat")).json()["sessions"][0]["tasks"] == 1
+        assert [t["title"] for t in (await http.get("/api/chat/1")).json()["tasks"]] == ["Find jobs"]
+
+        # Deleted while it's being answered: no.
+        await http.post("/api/chat/1", json={"text": "Please use wait_here"})
+        refused = await http.delete("/api/chat/1")
+        assert refused.status_code == 409 and "answering you in that session" in refused.json()["error"]
+        chat.let_go.set()
+        await answered(http)
+        await until(lambda: chat.memory.store.count().get("conversation") == 2)  # what was said, in memory
+
+        state = (await http.delete("/api/chat/1")).json()
+        assert [s["id"] for s in state["sessions"]] == [2] and state["current"] == 2  # a new one
+        assert (await http.get("/api/chat/1")).status_code == 404
+        assert chat.tasks.store.get(task.id) is None  # its tasks go with it
+        assert chat.memory.store.count().get("conversation", 0) == 0  # and out of it
+        assert (await http.delete("/api/chat/1")).status_code == 404
+
+
+async def test_deleting_an_earlier_session_leaves_the_current_one(chat):
+    async with client(chat) as http:
+        await http.post("/api/chat/1", json={"text": "Hello"})
+        await answered(http)
+        await http.post("/api/chat", json={})
+        await http.post("/api/chat/2", json={"text": "Please use wait_here"})
+        state = (await http.delete("/api/chat/1")).json()  # while Athena's answering in another: that's fine
+        assert state["current"] == 2 and [s["id"] for s in state["sessions"]] == [2]
+        chat.let_go.set()
+        await answered(http)
+
+
+async def test_photos_and_files_come_with_a_message(chat):
+    import base64
+
+    from athena.photos import red_square
+
+    photo = red_square()
+    seen = []
+    chat.llm = chat.agent.llm = FakeLLMServer(lambda body: seen.append(body) or completion("A red square.")).client(
+        chat.config.llm
+    )
+    attach = [
+        {"name": "square.png", "data": base64.b64encode(photo.data).decode()},
+        {"name": "notes.md", "data": base64.b64encode(b"# Notes\nBuy milk.").decode()},
+    ]
+    async with client(chat) as http:
+        sent = await http.post("/api/chat/1", json={"text": "What's this?", "attachments": attach})
+        assert sent.status_code == 200, sent.text
+        await answered(http)
+        [question, _] = (await http.get("/api/chat/1")).json()["messages"]
+        assert question["text"] == "[Photo] [File: inbox/notes.md] What's this?" and question["photos"] == [photo.name]
+        parts = seen[0]["messages"][-1]["content"]
+        assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")  # the model sees it
+        assert (chat.config.resolve(chat.config.data_dir) / "workspace" / "inbox" / "notes.md").read_bytes() == (
+            b"# Notes\nBuy milk."
+        )
+        shown = await http.get(f"/api/photos/{photo.name}")
+        assert shown.content == photo.data and shown.headers["content-type"] == "image/png"
+        assert (await http.get("/api/photos/" + "0" * 32 + ".png")).status_code == 404
+        assert (await http.post("/api/chat/1", json={"text": "", "attachments": attach[:1]})).status_code == 200
+        await answered(http)
+
+        for wrong, why in (
+            ([{"name": "a.exe", "data": base64.b64encode(b"MZ").decode()}], "PDFs and text files"),
+            ([{"name": "a.heic", "data": base64.b64encode(b"....ftypheic").decode()}], "JPEG, PNG, WebP and GIF"),
+            ([{"name": "a.md", "data": "not base64!"}], "didn't arrive whole"),
+            ([{"name": "a.md"}], "Send photos and files"),
+            (attach[:1] * 6, "up to 5 photos"),
+        ):
+            response = await http.post("/api/chat/1", json={"text": "Hi", "attachments": wrong})
+            assert response.status_code == 400 and why in response.json()["error"], (why, response.text)
+        command = await http.post("/api/chat/1", json={"text": "/help", "attachments": attach[:1]})
+        assert command.status_code == 400 and "by itself" in command.json()["error"]
+
+
+async def test_only_a_message_from_you_can_be_large(chat):
+    larger = {"text": "Hi", "attachments": [{"name": "larger.md", "data": "QUFB" * 100_000}]}  # 400 KB
+    async with client(chat, signed_in=False) as http:
+        assert (await http.post("/api/chat/1", json=larger)).status_code == 413  # it's not taken in
+    async with client(chat) as http:
+        assert (await http.post("/api/chat/1/name", json={"name": "x" * 20_000})).status_code == 413
+        assert (await http.post("/api/chat/1", json=larger)).status_code == 200
+        await answered(http)
+        big = {"text": "Hi", "attachments": [{"name": "big.md", "data": "QUFB" * 2_500_000}]}  # 10 MB
+        assert (await http.post("/api/chat/1", json=big)).status_code == 200
+        await answered(http)
+
+
+async def test_tasks_are_added_in_a_session_or_a_new_one(chat):
+    async with client(chat) as http:
+        listed = (await http.get("/api/tasks")).json()
+        assert listed["sessions"] == [{"id": 1, "title": ""}] and listed["current"] == 1
+        task = {"title": "Primes", "instructions": "Look for patterns.", "schedule": "0 8 * * mon", "tools": []}
+        added = (await http.post("/api/tasks", json={**task, "session": "Maths research"})).json()
+        [made] = added["tasks"]
+        assert made["session"] == 2 and chat.history.title(2) == "Maths research"
+        assert chat.history.session.id == 1  # a new one for a task isn't the current session
+        assert (await http.post("/api/tasks", json={**task, "session": 9})).status_code == 400
+        assert (await http.post("/api/tasks", json={**task, "session": True})).status_code == 400
+        assert (await http.post("/api/tasks", json={**task, "title": "", "session": "Empty"})).status_code == 400
+        assert [s["title"] for s in (await http.get("/api/tasks")).json()["sessions"]] == ["", "Maths research"]
+        moved = await http.post(f"/api/tasks/{made['id']}", json={**task, "session": 1})
+        assert moved.json()["tasks"][0]["session"] == 1

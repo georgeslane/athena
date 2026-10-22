@@ -31,6 +31,7 @@ class Turn:
     """
 
     alone: str | None = None  # None: answering you. Else what it's doing, such as "your task “Briefing”"
+    chat: str | None = None  # the chat it's in, such as "session:3"
     # What tools noted, such as {"skills": ["Trip plans"], "suggested": ["memory", "memory"]}.
     notes: dict[str, list[str]] = field(default_factory=dict)
 

@@ -19,10 +19,10 @@ A personal AI assistant that runs on your own hardware. A small Linux computer, 
 - **Chat in Telegram**, with photos and files, or **ask by voice** through Siri.
 - **Tools**: any MCP server, on the Pi, your Mac or the web, plus built-in news, markets, Trading 212, SQLite databases, files and PDFs, and Python it runs in a sandbox. Anything that can change something or send your data elsewhere asks you first.
 - **Memory**: facts it saves, your past conversations and your Mac's documents, searched by meaning and by words.
-- **Tasks and watching**: briefings and research on a schedule or when an event comes in, and things it keeps an eye on for you. It never works while you're chatting.
+- **Sessions and tasks**: each session is something it does for you, such as finding you a job, with tasks that work on it by themselves, on a schedule or when an event comes in, with everything said there to go on. It keeps an eye on things for you too, and never works while you're chatting.
 - **Skills**: how you like things done, which it reads before doing them, and improves with your approval.
 - **Projects for Claude**: coding projects it hands to Claude as pull requests, followed on a board.
-- **A dashboard** to chat with it in any of your sessions, with notifications on your iPhone and Mac, and for its status, what it's done, tasks, memory, skills and tools, over Tailscale.
+- **A dashboard** to chat with it in any of your sessions, with photos and files, and notifications on your iPhone and Mac, and for its status, what it's done, tasks, memory, skills and tools, over Tailscale.
 - **Private by design**: secrets stay in one file, MCP servers and code run in sandboxes, and the service can't change its own code. See [Privacy and security](docs/privacy-and-security.md).
 
 ## Install

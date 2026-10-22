@@ -120,7 +120,7 @@ async def test_adding_a_task_and_changing_its_schedule(athena, browser):  # noqa
     await page.wait_for_selector("article.task >> text=Every weekday at 07:30")
 
     await page.click("article.task >> text=Edit")
-    await page.fill("dialog input[type=text]", "Weekly briefing")
+    await page.get_by_label("Title").fill("Weekly briefing")
     await page.click("dialog >> text=Fridays 18:00")  # a suggested schedule fills the field
     assert await page.input_value("dialog input[aria-label=When]") == "0 18 * * 5"
     await page.click("dialog button[type=submit]")
@@ -295,7 +295,7 @@ async def test_chatting_approving_and_carrying_on_an_earlier_session(talking, br
     await page.wait_for_selector(".msg.note >> text=Just send me a message.")
 
     # A new chat, then back to the first, which says sending carries it on.
-    await page.click("text=New chat")
+    await page.click(".chat-sessions-head >> text=New session")
     await page.wait_for_selector(".chat-empty")
     await page.fill(".composer textarea", "Second conversation")
     await page.press(".composer textarea", "Enter")
@@ -342,7 +342,7 @@ async def test_on_a_phone_the_shield_opens_the_menu(talking, browser):
     await page.click('.tab[data-tab="chat"]')
     await page.wait_for_selector("#tabs", state="hidden")
     await page.wait_for_selector("#brand-where:text-is('Chat')")
-    assert page.url.endswith("#chat")
+    await page.wait_for_function("location.hash === '#chat/1'")  # the current session, at its own address
     await page.click("#brand")
     await page.keyboard.press("Escape")
     await page.wait_for_selector("#tabs", state="hidden")
@@ -369,7 +369,7 @@ async def test_while_athena_answers_enter_doesnt_stop_it_and_the_button_does(tal
     await page.press(".composer textarea", "Enter")  # nothing: one message at a time
     await page.wait_for_timeout(300)
     assert talking.chat.replying is not None and await page.input_value(".composer textarea") == "And another thing"
-    assert await page.is_disabled("text=New chat")
+    assert await page.is_disabled(".chat-sessions-head >> text=New session")
 
     await page.click(".chat-send")  # Stop
     await page.wait_for_selector(".msg.failed >> text=Didn't get an answer: You stopped it.")
@@ -415,14 +415,172 @@ async def test_turning_notifications_on_testing_them_and_off(talking, browser):
     await page.wait_for_function("navigator.serviceWorker.controller !== null || navigator.serviceWorker.ready")
     assert await page.evaluate("navigator.serviceWorker.ready.then((r) => r.active.scriptURL)") == f"{base}/sw.js"
 
-    await page.click(".chat-head .bell")
-    await page.click("dialog >> text=Turn on")
-    await page.wait_for_selector(".chat-head .bell[data-on=true]")
+    # The Chat tab offers them, until they're on.
+    await page.click(".chat-banner >> text=Turn on")
+    await page.wait_for_selector(".chat-banner", state="hidden")
     assert talking.push.subscribed(device.subscription["endpoint"]) == 1
-    await page.click("dialog >> text=Send a test")  # the dialog says they're on, and offers a test
+    # The Status tab's bell says they're on, and offers a test, or turning them off.
+    await page.goto(f"{base}/#status")
+    await page.click("#tab-status .bell[data-on=true]")
+    await page.click("dialog >> text=Send a test")
     await page.wait_for_selector("#toast >> text=Sent.")
     assert received[0]["body"].startswith("Notifications are on.")
     await page.click("dialog >> text=Turn off")
-    await page.wait_for_selector(".chat-head .bell[data-on=false]")
+    await page.wait_for_selector("#tab-status .bell[data-on=false]")
     assert talking.push.subscribed() == 0
+    await page.keyboard.press("Escape")
+    await page.goto(f"{base}/#chat")
+    await page.wait_for_selector(".chat-banner >> text=Turn on")  # offered again
+    await page.click(".chat-banner [aria-label='Not on this device']")
+    await page.wait_for_selector(".chat-banner", state="hidden")
+    await page.reload()
+    await page.wait_for_selector(".chat-main")
+    assert await page.is_hidden(".chat-banner")  # and it stays that way
     await context.close()
+
+
+async def test_the_tools_button_says_what_it_is_and_never_null(talking, browser):
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.wait_for_selector(".chat-main")
+    assert await page.inner_text(".chat-tools") == "Tools"
+    assert "null" not in await page.inner_text("#tab-chat")
+    assert errors == []
+
+
+async def test_commands_from_their_button(talking, browser):
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.click(".chat-icon[aria-label=Commands]")
+    await page.wait_for_selector(".chat-suggest:not([hidden]) >> text=/remember")
+    await page.click(".chat-suggest >> text=/help")  # needs nothing more: it runs
+    await page.wait_for_selector(".msg.note >> text=Just send me a message.")
+    await page.wait_for_selector(".chat-suggest", state="hidden")
+    await page.click(".chat-icon[aria-label=Commands]")
+    await page.click(".chat-suggest >> text=/remember")  # needs what to remember: it's typed for you
+    assert await page.input_value(".composer textarea") == "/remember "
+    await page.click(".chat-icon[aria-label=Commands]")
+    await page.click(".chat-log")  # anywhere else closes it
+    await page.wait_for_selector(".chat-suggest", state="hidden")
+    assert errors == []
+
+
+async def test_sending_photos_and_files(talking, browser):
+    from athena.photos import red_square
+
+    photo = red_square()
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.wait_for_selector(".chat-main")
+    await page.set_input_files(
+        ".composer input[type=file]",
+        files=[
+            {"name": "square.png", "mimeType": "image/png", "buffer": photo.data},
+            {"name": "notes.md", "mimeType": "text/markdown", "buffer": b"# Notes"},
+        ],
+    )
+    await page.wait_for_selector(".attached >> text=notes.md")
+    assert await page.locator(".attached img").count() == 1
+    assert await page.is_enabled(".chat-send")  # a photo needs nothing written with it
+    await page.click('.attached-remove[aria-label="Don\'t send notes.md"]')
+    await page.wait_for_selector(".attached >> text=notes.md", state="detached")
+    notes = {"name": "notes.md", "mimeType": "text/markdown", "buffer": b"# Notes"}
+    await page.set_input_files(".composer input[type=file]", files=[notes])
+    await page.wait_for_selector(".attached >> text=notes.md")
+    await page.fill(".composer textarea", "What are these?")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.theirs >> text=Hello there.")
+    await page.wait_for_selector(".chat-attached", state="hidden")
+    mine = page.locator(".msg.mine").last
+    assert await mine.locator("img").get_attribute("src") == f"/api/photos/{photo.name}"
+    assert await mine.locator(".file-chip").inner_text() == "notes.md"
+    assert await mine.locator(".msg-text").inner_text() == "What are these?"
+    assert await page.evaluate("document.querySelector('.msg.mine img').naturalWidth") == 64  # it's shown
+    assert errors == []
+
+
+async def test_naming_muting_and_deleting_a_session(talking, browser):
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.fill(".composer textarea", "Find me a job in data")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.theirs >> text=Hello there.")
+
+    await page.click(".chat-more")
+    await page.get_by_label("Name").fill("Job hunting")
+    await page.click("dialog >> text=Save")
+    await page.wait_for_selector(".chat-title:text-is('Job hunting')")
+    await page.wait_for_selector(".session-title:text-is('Job hunting')")
+
+    assert await page.get_attribute(".chat-head .bell", "aria-pressed") == "true"  # every session notifies you
+    await page.click(".chat-head .bell")
+    await page.wait_for_selector(".chat-head .bell[aria-pressed=false]")
+    await page.wait_for_selector(".session [aria-label=Muted]")
+    assert talking.history.get_session(1).muted
+
+    talking.tasks.add("Find jobs", "Look for new postings.", "0 9 * * *", [], "you", session=1)
+    await page.click(".chat-sessions-head >> text=New session")
+    await page.wait_for_selector(".chat-empty")
+    await page.goto(f"{base}/#chat/1")
+    await page.click(".chat-more")
+    await page.click("dialog >> text=Delete session")
+    await page.wait_for_selector("dialog >> text=and so is its task")
+    await page.click("dialog button:text-is('Delete')")
+    await page.wait_for_selector("#toast >> text=Deleted.")
+    await page.wait_for_selector(".session-title:text-is('Job hunting')", state="detached")
+    await page.wait_for_function("location.hash === '#chat/2'")
+    assert talking.history.get_session(1) is None and talking.tasks.store.all() == []
+    assert errors == []
+
+
+async def test_a_sessions_tasks_and_what_they_find(talking, browser):
+    from conftest import FakeLLMServer, completion
+
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.fill(".composer textarea", "My CV: Python, five years")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.theirs >> text=Hello there.")
+    await page.click(".chat-sub >> text=Add a task")
+    await page.click("dialog >> text=New task")
+    await page.get_by_label("Title").fill("Find jobs")
+    await page.get_by_label("What to do").fill("Look for new postings that fit my CV.")
+    await page.fill("dialog input[aria-label=When]", "0 9 * * *")
+    assert await page.input_value("dialog select[aria-label=Session]") == "1"  # this one
+    await page.click("dialog button[type=submit]")
+    await page.wait_for_selector(".chat-sub >> text=1 task")
+    [task] = talking.tasks.store.all()
+    assert task.session_id == 1
+
+    # It runs, in this session, while you're looking at another: that one's marked as having something new.
+    await page.click(".chat-sessions-head >> text=New session")
+    await page.wait_for_selector(".chat-empty")
+    talking.llm = talking.agent.llm = FakeLLMServer([completion("Two new jobs at Acme.")]).client(talking.config.llm)
+    talking.tasks.cfg.quiet_minutes = 0  # rather than wait until you've been quiet for a while
+    await talking.tasks.run(task)
+    await page.wait_for_selector(".session[data-unread=true] >> text=My CV: Python, five years")
+    await page.click(".session >> text=My CV: Python, five years")
+    await page.wait_for_selector(".msg-task >> text=Your task “Find jobs” ran")
+    await page.wait_for_selector(".msg.theirs >> text=Two new jobs at Acme.")
+    await page.wait_for_selector(".session[data-unread=true]", state="detached")
+    assert errors == []
+
+
+async def test_tasks_are_listed_by_session_and_can_start_one(athena, browser):  # noqa: F811
+    athena.history.rename(1, "Job hunting")
+    athena.tasks.add("Find jobs", "Look for new postings.", "0 9 * * *", [], "you")
+    page, base, errors = await signed_in(browser, athena)
+    await page.goto(f"{base}/#tasks")
+    await page.wait_for_selector(".task-group-head >> text=Job hunting")
+    await page.click("text=New task")
+    await page.get_by_label("Title").fill("Primes")
+    await page.get_by_label("What to do").fill("Look for patterns.")
+    await page.fill("dialog input[aria-label=When]", "0 8 * * mon")
+    await page.select_option("dialog select[aria-label=Session]", "new")
+    assert await page.input_value('dialog input[aria-label="The new session\'s name"]') == "Primes"
+    await page.fill('dialog input[aria-label="The new session\'s name"]', "Maths research")
+    await page.click("dialog button[type=submit]")
+    await page.wait_for_selector(".task-group-head >> text=Maths research")
+    await page.click(".task-group:has-text('Maths research') >> text=Open chat")
+    await page.wait_for_selector(".chat-title:text-is('Maths research')")
+    assert errors == []
