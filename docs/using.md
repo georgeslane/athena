@@ -6,7 +6,7 @@ Send any message, a [photo](#photos), or a PDF or text file (see [Files](tools.m
 
 | Command | What it does |
 |---|---|
-| `/new` | Start a new agent, as the main one: a new conversation, which the model starts afresh. Memories are kept, earlier conversations can still be searched, and the dashboard can carry them on. `/session` and `/reset` do the same. |
+| `/new` | Start the conversation afresh: the model doesn't see what was said before, though it's all still on the dashboard, and memories are kept and earlier conversations can still be searched. `/session` and `/reset` do the same. |
 | `/stop` | Stop the answer Athena is working on, and any messages waiting their turn. |
 | `/compact` | Summarise the conversation so far, keeping the last two exchanges, to make room in the model's context. Athena also does this by itself: see [Agents and context](#agents-and-context). |
 | `/retry` | Answer your last message again, say after changing how much Athena thinks. An answer already given is taken out of the conversation and memory first. |
@@ -33,11 +33,11 @@ It needs a model that can see, such as Qwen 3.6 35B-A3B. Some MLX conversions of
 
 Athena keeps the conversation going, so each reply can build on the last. All of it counts towards the model's context, and the more there is, the longer the model takes to read it.
 
-- **An agent** is something Athena keeps an eye on or does for you, such as finding you jobs, with a conversation of its own. Telegram, Siri and `athena chat` talk to the main agent, the one with the latest news, from you or from Athena, so you can carry on in one what you started in another. Send `/new`, or press **New agent** on the dashboard, to start another: the model starts it afresh, with Athena's memories. On the dashboard you can talk to any agent, which makes it the main one, and name, mute or delete it. Every exchange is kept in memory too, so Athena can search earlier conversations from any agent.
-- **Its DAG** is what it does by itself: tasks, on a schedule or when something happens, with its guidance and what its last run kept to go on. What they find goes into its chat. See [Agents](agents.md).
+- **An agent** is something Athena keeps an eye on or does for you, such as finding you jobs, with a conversation of its own. Telegram, Siri and `athena chat` talk to the master agent, which hears the other agents' news, so you can ask about it wherever you are. Press **New agent** on the dashboard to make another, and talk to it there, or name, mute or delete it. Every exchange is kept in memory too, so Athena can search earlier conversations from any agent.
+- **Its DAG** is what it does by itself: tasks, on a schedule or when something happens, with its guidance, its files and what its last run kept to go on. What they find goes into its chat, and news to the master agent's too. See [Agents](agents.md) and [Writing DAGs](dags.md).
 - **Compacting** keeps a long conversation going without filling the context. Once it's `max_history_messages` long (40), or an answer fills `compact_at` of the context window (80%), Athena has the model summarise all but the last two exchanges, in the background. From then on the model sees the summary, then the messages since. `/compact` does it straight away.
-- **Context**, on the dashboard, is what Athena reads with your next message: the system prompt, the tools' descriptions and the main agent's conversation. The limit comes from the model server. If yours doesn't say, set `llm.context_window`.
-- **Forget everything**, on the dashboard's Status tab, deletes every memory and the conversation history, empties Athena's folder, and forgets what agents' runs found and kept and what checks noted. The agents, their DAGs and what's watched stay. It starts a new agent. Usage statistics stay, as they're only counts and timings.
+- **Context**, on the dashboard, is what Athena reads with your next message: the system prompt, the tools' descriptions and the master agent's conversation. The limit comes from the model server. If yours doesn't say, set `llm.context_window`.
+- **Forget everything**, on the dashboard's Status tab, deletes every memory and the conversation history, empties Athena's folder, with agents' files, and forgets what agents' runs found and kept. The agents and their DAGs stay. Usage statistics stay, as they're only counts and timings.
 
 ## Prompt caching
 
@@ -102,7 +102,7 @@ On an M1 Pro with 32 GB, mixture-of-experts models with about 3–4B active para
 
 | Command | What it does |
 |---|---|
-| `athena chat` | Chat in the terminal, in the current session, with the same tools, memory and commands. |
+| `athena chat` | Chat in the terminal, with the master agent, with the same tools, memory and commands. |
 | `athena doctor` | Check the model server, embeddings, database, MCP servers, Telegram and the dashboard. |
 | `athena ingest PATH...` | Add `.md` or `.txt` files or folders to memory. Running it again on a file replaces it. |
 | `athena reindex` | Re-embed everything with the configured embeddings model. |
