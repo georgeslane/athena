@@ -13,6 +13,9 @@ ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
 ToolProvider = Callable[[], Iterable["Tool"]]
 
 _INVALID_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
+# Tools that always ask you first, even where others may be allowed without asking (a task's, or a session's):
+# starting more tasks, and pushing to GitHub.
+NEVER_UNASKED = frozenset({"schedule_task", "hand_to_claude", "answer_claude", "extend_claude_project"})
 
 
 class ToolError(Exception):

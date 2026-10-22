@@ -82,7 +82,7 @@ def test_chatting_in_the_terminal(config, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "athena> Hello from the model." in out.replace("Athena>", "athena>")
     assert "- remember [" in out  # /tools lists them
-    assert "(session 2: the conversation so far is cleared" in out
+    assert "Started session 2. I've cleared our conversation from my context." in out
 
 
 def test_athena_starts_with_its_config_brought_up_to_date(config, monkeypatch):

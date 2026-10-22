@@ -293,7 +293,7 @@ async def test_files_the_answer_sends_come_after_it_and_a_link_isnt_sent(config,
     (tmp_path / ".env").write_text("secret")
     sent = [json.dumps({"path": "out/report.pdf", "caption": "March"}), json.dumps({"path": "out/env", "caption": ""})]
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         return AgentResult(text="Here's the report.", saved=True, notes={SENT: sent})
 
     bot = make_bot(config, respond)

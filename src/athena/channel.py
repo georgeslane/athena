@@ -8,11 +8,6 @@ from typing import Any, Protocol
 
 
 class Channel(Protocol):
-    @property
-    def chat_id(self) -> str:
-        """Your chat, where what's said is kept, so you can reply to it."""
-        ...
-
     async def tell(self, text: str) -> None:
         """Send you ``text``, in Markdown."""
         ...

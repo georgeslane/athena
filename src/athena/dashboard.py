@@ -73,6 +73,7 @@ from urllib.parse import urlsplit
 from athena.config import Config
 from athena.config_files import EnvFile
 from athena.documents import DocumentsError
+from athena.history import Busy
 from athena.memory import KINDS, relevance
 from athena.settings import Running, Settings, SettingsError, hand_written
 from athena.status import StatusFeed
@@ -287,7 +288,10 @@ class DashboardServer(Server):
         return _json(self.status())
 
     def _new_session(self, request: Request, method: str) -> Response:
-        session = self.s.new_session()
+        try:
+            session = self.s.new_session()
+        except Busy as exc:
+            raise HTTPError(409, str(exc)) from None
         log.info("Dashboard: started session %d", session.id)
         return _json(self.overview())
 

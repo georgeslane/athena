@@ -138,7 +138,7 @@ async def test_the_heartbeat_checks_everything_at_once_and_tells_you_only_what_m
     await scheduler.heartbeat()
     assert a["channel"].said == ["👀 Claude has finished the bank project: merge it when you're ready."]
     assert [w.id for w in scheduler.watches.all()] == [1]  # the one that happened is off the list
-    assert a["history"].load("111")[-2:] == [
+    assert a["history"].load(a["history"].current_chat)[-2:] == [
         {"role": "user", "content": "(You checked what I asked you to watch.)"},
         {"role": "assistant", "content": "Claude has finished the bank project: merge it when you're ready."},
     ]

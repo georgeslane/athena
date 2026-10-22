@@ -23,7 +23,7 @@ from athena.tasks.schedules import Schedule
 from athena.tasks.store import Task, TaskStore
 from athena.tasks.tools import task_tools
 from athena.timeline import CHECK, TASK, Timeline, steps
-from athena.tools import Tool
+from athena.tools import NEVER_UNASKED, Tool
 from athena.watching import WatchStore
 from athena.watching import describe as describe_watch
 
@@ -36,8 +36,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 NOTHING = "NOTHING TO REPORT"  # what a task replies when there's nothing worth telling you
-# Tools a task can't be allowed to use without asking: starting more tasks, and pushing to GitHub.
-NEVER_UNASKED = {"schedule_task", "hand_to_claude", "answer_claude", "extend_claude_project"}
 MISSED_GRACE = timedelta(hours=6)  # a regular run missed by more than this (Athena was off) is skipped
 RETRIES = (600, 1800)  # after a run fails: try again in 10 minutes, then 30, then give up on that run
 FIRST_WAIT, LONGEST_WAIT = 60.0, 900.0  # waiting for you to finish chatting: 1 minute, doubling to 15
@@ -258,9 +256,6 @@ class Scheduler:
         step = self._stepper(lambda: self._free(task), self.cfg.max_minutes, f"Task {task.id}")
 
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
-            if tool in task.allowed_tools and tool not in NEVER_UNASKED:
-                log.info("Task %d used %s without asking, as it may", task.id, tool)
-                return True
             channel = self.channel()
             if channel is None:
                 return False
@@ -276,13 +271,14 @@ class Scheduler:
             source=f"your task “{task.title}”",
         )
         log.info("Running task %d (%s)", task.id, task.title)
-        taken, on_tool = steps(allowed=set(task.allowed_tools) - NEVER_UNASKED)
+        taken, on_tool = steps()
         started = self.clock.time()
         self._run = asyncio.create_task(
             self.agent.respond(
                 f"task:{task.id}",
                 task.instructions,
                 confirm=confirm,
+                allowed=task.allowed_tools,
                 on_tool=on_tool,
                 note=self._note(task, schedule, self._events.get(task.id)),
                 channel="Task",
@@ -420,9 +416,10 @@ class Scheduler:
         except Exception as exc:
             log.warning("Couldn't send a task's message: %s", exc)
             return
-        if keep:  # in your chat too, so you can ask about it
+        if keep:  # in your conversation too, the current session, so you can ask about it
             yours, said = keep
-            self.agent.history.append_exchange(channel.chat_id, yours, said)
+            history = self.agent.history
+            history.append_exchange(history.current_chat, yours, said, channel="Athena")
 
     async def _send_files(self, noted: list[str]) -> None:
         """Send you the files a task sent with what it found (send_file, in files.py)."""
@@ -470,12 +467,9 @@ class Scheduler:
             f"This is your regular check, every {self._heartbeat_minutes():g} minutes, not a message from {user}. "
             f"They aren't watching, so don't ask them anything. Your earlier checks are above."
         )
-        allowed = set(self.cfg.heartbeat_tools) - NEVER_UNASKED
         started = self.clock.time()
 
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
-            if tool in allowed:
-                return True
             channel = self.channel()
             if channel is None:
                 return False
@@ -491,12 +485,13 @@ class Scheduler:
         )
         log.info("Checking on %d watched thing%s", len(watching), "" if len(watching) == 1 else "s")
         self.checking = True
-        taken, on_tool = steps(allowed=allowed)
+        taken, on_tool = steps()
         self._run = asyncio.create_task(
             self.agent.respond(
                 "heartbeat",
                 text,
                 confirm=confirm,
+                allowed=self.cfg.heartbeat_tools,
                 on_tool=on_tool,
                 note=note,
                 channel="Heartbeat",

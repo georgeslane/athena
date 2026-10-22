@@ -9,6 +9,7 @@ from conftest import FakeEmbedder, FakeLLMServer, completion
 
 from athena.app import build_services, reread_config
 from athena.config import ConfigError, load_config
+from athena.history import Busy
 from athena.llm import LLMClient
 
 CONFIG = """
@@ -112,19 +113,40 @@ async def test_a_message_with_nowhere_to_go_isnt_logged_either(services, caplog)
 
 
 async def test_a_new_session_and_forgetting_everything(services):
-    await services.agent.respond("chat", "hello")
-    await services.memory.remember("George's locker is number 42.")
     first = services.history.session
+    await services.agent.respond(first.chat_id, "hello")
+    await services.memory.remember("George's locker is number 42.")
 
     session = services.new_session()
-    assert session.id == first.id + 1 and services.history.load("chat") == []
+    assert session.id == first.id + 1 and services.history.load(services.history.current_chat) == []
+    assert services.rewarm.is_set()  # the model server reads the new conversation
 
     session = await services.forget_everything()
     assert session.id == first.id + 2
     assert services.memory.store.count() == {} and services.history.exchanges_after(0) == []
     assert services.stats.summary()["queries"] == 1  # the statistics stay
-    await services.agent.respond("chat", "after")  # and it carries on
-    assert services.history.load("chat")[-1]["content"] == "OK."
+    await services.agent.respond(session.chat_id, "after")  # and it carries on
+    assert services.history.load(session.chat_id)[-1]["content"] == "OK."
+
+
+async def test_sessions_cant_change_while_athena_is_answering_you(services):
+    first = services.history.session
+    services.new_session()
+    services.agent.answering_you = 1  # as while a message of yours is being answered
+    with pytest.raises(Busy, match="still answering"):
+        services.use_session(first.id)
+    with pytest.raises(Busy):
+        services.new_session()
+    assert services.use_session(first.id + 1).id == first.id + 1  # carrying on in the current one is fine
+    services.agent.answering_you = 0
+    assert services.use_session(first.id).id == first.id == services.history.session.id
+
+
+async def test_what_athena_tells_you_by_itself_goes_into_your_conversation(services):
+    services.new_session()
+    services.keep("(Your task “Briefing” ran.)", "All quiet.")
+    [message, reply], _ = services.history.messages(services.history.session.id)
+    assert (message.text, message.channel, reply.text) == ("(Your task “Briefing” ran.)", "Athena", "All quiet.")
 
 
 async def test_forgetting_everything_forgets_what_tasks_found_but_keeps_them(services):
@@ -209,8 +231,8 @@ async def test_taking_back_the_last_reply_takes_it_out_of_memory_too(services):
     await asyncio.sleep(0.2)
     assert services.memory.store.count().get("conversation") == 1
 
-    services.new_session()
-    assert await services.take_back_last_exchange("chat") is None
+    services.new_session()  # a new conversation has nothing to take back yet
+    assert await services.take_back_last_exchange(services.history.current_chat) is None
 
 
 # -- the model's context window ------------------------------------------------------------------------

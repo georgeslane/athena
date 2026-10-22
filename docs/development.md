@@ -54,7 +54,8 @@ uv run python -m athena.server_envs
 | `src/athena/setup_wizard.py`, `service.py` | `athena setup`; the systemd service, updating, and moving from a checkout |
 | `src/athena/config.py`, `config_files.py` | Settings, read from `~/.athena`; editing `config.toml` and `.env`, keeping their comments |
 | `src/athena/app.py` | Builds and runs Athena's services |
-| `src/athena/agent.py`, `llm.py`, `compaction.py`, `history.py` | The agent loop, the model client, compacting and the conversation history |
+| `src/athena/agent.py`, `llm.py`, `compaction.py`, `history.py` | The agent loop, the model client, compacting, and sessions and their conversations |
+| `src/athena/commands.py`, `approvals.py`, `channel.py` | The commands every front end has, requests for your OK wherever they're answered, and how Athena reaches you |
 | `src/athena/tools.py`, `tool_search.py`, `privacy.py` | Tools, those found when needed, and keeping personal details out of what they send |
 | `src/athena/mcp_manager.py`, `server_envs.py`, `server_security.py`, `tool_approvals.py`, `sandbox.py` | MCP servers: connecting, their locked environments and security updates, the tools you've approved, and the sandbox |
 | `src/athena/builtin.py`, `integrations.py`, `catalog.py`, `recommended.py`, `settings.py` | Built-in tools, the recommended servers, and what the Tools tab can change |

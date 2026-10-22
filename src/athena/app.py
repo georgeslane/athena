@@ -13,11 +13,12 @@ from dotenv import dotenv_values
 
 from athena.agent import Agent
 from athena.alerts import HealthMonitor, check_health
+from athena.approvals import Approvals
 from athena.builtin import Builtin, Unavailable
 from athena.config import THINKING, Config, parse_config
 from athena.dashboard import DashboardServer
 from athena.documents import DocumentIndex
-from athena.history import ConversationStore, Exchange, Session
+from athena.history import Busy, ConversationStore, Exchange, Session, session_of
 from athena.integrations import BUILTINS
 from athena.llm import LLMClient
 from athena.mcp_manager import MCPManager
@@ -107,6 +108,8 @@ class Services:
         self.rewarm = asyncio.Event()
         # How Athena reaches you when you haven't just asked it something: Telegram sets itself here.
         self.channel: Channel | None = None
+        # Tools waiting for your OK, which Telegram or the dashboard can give (approvals.py).
+        self.approvals = Approvals()
         # Tasks Athena does by itself, on a schedule, and tells you about (tasks.py).
         self.tasks: Scheduler | None = None
         if self.config.tasks.enabled:
@@ -206,9 +209,14 @@ class Services:
             return False
         return await self.notify(text)
 
+    def keep(self, yours: str, said: str) -> None:
+        """Keep something Athena told you by itself in your conversation, the current session, so you can reply to
+        it: ``yours`` is a line for your side, such as "(Your task “Briefing” ran.)"."""
+        self.history.append_exchange(self.history.current_chat, yours, said, channel="Athena")
+
     def _chat_name(self, chat_id: str) -> str:
         """Who a chat is with, for recent_work: you, or a task by its title."""
-        if not chat_id.startswith("task:"):
+        if session_of(chat_id) is not None or not chat_id.startswith("task:"):
             return "you"
         task = self.tasks.store.get(int(chat_id[5:])) if self.tasks and chat_id[5:].isdigit() else None
         return f"task “{task.title}”" if task else "a task"
@@ -228,8 +236,8 @@ class Services:
                 log.warning("Couldn't read Claude's projects: %s", exc)
                 news = []
         for text in news:
-            if await self.notify(text) and self.channel:  # in your chat too, so you can reply to it
-                self.history.append_exchange(self.channel.chat_id, "(Claude's projects changed.)", text)
+            if await self.notify(text):  # in your chat too, so you can reply to it
+                self.keep("(Claude's projects changed.)", text)
         return projects.board()
 
     async def _watch_projects(self) -> None:
@@ -240,8 +248,8 @@ class Services:
             await asyncio.sleep(max(1.0, projects.cfg.poll_minutes if projects else 5.0) * 60)
 
     async def _tell_security(self, text: str) -> None:
-        if await self.notify(text) and self.channel:  # in your chat too, so you can ask about it
-            self.history.append_exchange(self.channel.chat_id, "(You checked the MCP servers' dependencies.)", text)
+        if await self.notify(text):  # in your chat too, so you can ask about it
+            self.keep("(You checked the MCP servers' dependencies.)", text)
 
     async def _restart(self, names: set[str]) -> None:
         """Restart these MCP servers, once Athena's finished answering, holding new messages meanwhile."""
@@ -337,10 +345,24 @@ class Services:
         return exchange
 
     def new_session(self) -> Session:
-        """Clear the conversation from the model's context, in every chat. Memories are kept."""
+        """Start a new conversation, as the current session. Memories are kept. Busy if Athena's answering you."""
+        self._not_answering()
         session = self.history.new_session()
         self.rewarm.set()
         return session
+
+    def use_session(self, session_id: int) -> Session:
+        """Carry on an earlier conversation: make it the current session. Busy if Athena's answering you in
+        another, so messages can't pile up; KeyError if there's no such session."""
+        if session_id != self.history.session.id:
+            self._not_answering()
+        session = self.history.use_session(session_id)
+        self.rewarm.set()  # the model server reads it now, rather than when you send the next message
+        return session
+
+    def _not_answering(self) -> None:
+        if self.agent.answering_you:
+            raise Busy()
 
     async def forget_everything(self) -> Session:
         """Delete every memory, the conversation history, the code's workspace, what tasks found and the timeline,
