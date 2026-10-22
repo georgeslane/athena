@@ -200,9 +200,10 @@ async def test_approving_here_and_allowing_tools_without_asking(chat):
 async def test_the_page_hears_of_new_messages_as_it_does_the_status(chat):
     async with client(chat) as http:
         before = (await http.get("/api/status")).json()
-        assert before["chat"] == {"current": 1, "busy": False, "approvals": 0}
+        assert before["chat"] == {"current": 1, "busy": False, "approvals": 0, "last": None}
         waiting = asyncio.create_task(http.get(f"/api/status?after={before['version']}&wait=10"))
         await asyncio.sleep(0.05)
         chat.keep("(Your task “Briefing” ran.)", "All quiet.")  # nothing's changed about what Athena's doing
         after = (await asyncio.wait_for(waiting, 2)).json()
         assert after["version"] != before["version"]
+        assert after["chat"]["last"]["role"] == "assistant"  # so the page can say Athena's written

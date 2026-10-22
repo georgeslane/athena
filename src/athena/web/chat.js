@@ -5,6 +5,7 @@
 
 import { call, clock, h, icon, isoDay, now, plural, state, toast } from "./core.js";
 import { markdown } from "./md.js";
+import { bell } from "./notifications.js";
 
 const MAX_CHARS = 4000; // as chat.py takes
 const chat_ = {
@@ -20,6 +21,7 @@ const chat_ = {
   timer: null, // counting down requests for your OK
   list: false, // on a phone: the list of sessions rather than a conversation
   scrollDown: false, // to the newest message, when it's next drawn
+  last: null, // the newest message in your conversation, as the status said last
   els: null, // the tab's parts, made once so what you're typing stays
 };
 
@@ -96,6 +98,12 @@ async function showEarlier(event) {
 
 // Athena's status has changed, or something in your conversation: the Chat tab's count, and the tab itself.
 export function followChat(status) {
+  // Athena's written in your conversation, while you're on another tab.
+  const last = status.chat && status.chat.last;
+  if (last && chat_.last && last.id > chat_.last.id && last.role === "assistant" && !location.hash.startsWith("#chat")) {
+    toast(`${state.overview ? state.overview.assistant.name : "Athena"}'s written to you. It's in Chat.`);
+  }
+  if (status.chat) chat_.last = last || { id: 0 };
   const count = status.chat ? status.chat.approvals : 0;
   const link = document.querySelector('.tab[data-tab="chat"]');
   let badge = link && link.querySelector(".tab-count");
@@ -119,7 +127,7 @@ function build() {
   e.title = h("h2.chat-title");
   e.sub = h("p.chat-sub");
   e.tools = h("button.button.small.chat-tools", { type: "button", onclick: chooseTools });
-  e.head = h("header.chat-head", {}, e.back, h("div.chat-heading", {}, e.title, e.sub), e.tools);
+  e.head = h("header.chat-head", {}, e.back, h("div.chat-heading", {}, e.title, e.sub), bell(), e.tools);
   e.log = h("ol.chat-log", { role: "log", "aria-live": "polite", "aria-label": "Conversation" });
   e.text = h("textarea", {
     rows: 1,

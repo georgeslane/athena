@@ -12,6 +12,7 @@ import { loadBoard } from "./board.js";
 import { loadTasks } from "./tasks.js";
 import { loadActivity } from "./activity.js";
 import { followChat, loadChat } from "./chat.js";
+import { setUpNotifications } from "./notifications.js";
 
 // -- signing in -------------------------------------------------------------------------------------------
 
@@ -54,6 +55,9 @@ async function start() {
   setUpMenu();
   followViewport();
   document.addEventListener("visibilitychange", () => !document.hidden && appShown() && refresh());
+  for (const [target, event] of [[document, "visibilitychange"], [window, "focus"], [window, "blur"]]) {
+    target.addEventListener(event, lookingChanged);
+  }
   setInterval(tick, 1000);
   setInterval(() => !document.hidden && appShown() && refresh(), 30000);
   for (;;) {
@@ -74,6 +78,7 @@ async function showApp() {
   document.getElementById("app").hidden = false;
   showTab();
   if (!state.watching) watchStatus();
+  setUpNotifications();
 }
 
 function refresh() {
@@ -181,6 +186,25 @@ function setOffline(offline) {
   renderStatus();
 }
 
+// Whether you're looking at the page: then Athena doesn't notify your devices of what it shows (push.py).
+const looking = () => document.visibilityState === "visible" && document.hasFocus();
+let wasLooking = null;
+
+function lookingChanged() {
+  const now_ = looking();
+  if (now_ === wasLooking || !appShown()) return;
+  wasLooking = now_;
+  fetch("/api/presence", {
+    method: "POST",
+    credentials: "same-origin",
+    keepalive: true, // it's sent even as the page goes away
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ looking: now_ }),
+  }).catch(() => {});
+  if (state.watching) state.watching.abort(); // so the next wait says so too
+  watchStatus();
+}
+
 // Follow what Athena is doing: each request waits until something changes, or 25 seconds pass.
 async function watchStatus() {
   const controller = new AbortController();
@@ -189,7 +213,8 @@ async function watchStatus() {
   while (!controller.signal.aborted) {
     try {
       const wait = version ? "&wait=25" : "";
-      const data = await call("GET", `/api/status?after=${encodeURIComponent(version)}${wait}`, undefined, controller.signal);
+      const seen = looking() ? "&looking=1" : "";
+      const data = await call("GET", `/api/status?after=${encodeURIComponent(version)}${wait}${seen}`, undefined, controller.signal);
       const was = state.status && state.status.status.state;
       setStatus(data);
       setOffline(false);

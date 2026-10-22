@@ -39,6 +39,7 @@ const ICONS = {
   send: "M5 12h13M13 6l6 6-6 6",
   stop: "M7 7h10v10H7z",
   shield: "M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6zM9 12l2 2 4-4",
+  bell: "M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20a2 2 0 0 0 4 0",
   chevron_down: "M6 9l6 6 6-6",
 };
 

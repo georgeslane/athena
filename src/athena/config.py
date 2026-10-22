@@ -142,6 +142,8 @@ class DashboardConfig(_Section):
     port: int = 8092
     # Its password. Athena makes one in .env, as DASHBOARD_TOKEN, if there isn't one.
     token: str = Field(default_factory=lambda: os.environ.get("DASHBOARD_TOKEN", ""))
+    # Notifications on your devices show the start of the message. False: only that there's something new.
+    notification_text: bool = True
 
 
 class TasksConfig(_Section):

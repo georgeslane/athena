@@ -24,6 +24,15 @@ Each session is a conversation, which Telegram, Siri and the terminal share: wha
 - **If Athena couldn't answer,** your message stays, to try again or change.
 - Files Athena sends go to Telegram, as a task's do.
 
+## Notifications
+
+Athena can notify your iPhone and Mac when it answers a message you sent on the dashboard, a task has news, something it needs stops working, or it needs your OK. It doesn't while you're looking at the dashboard, which shows it anyway.
+
+1. **On an iPhone or iPad,** add the dashboard to your Home Screen first (in Safari, Share > Add to Home Screen), and open it from there: iOS only notifies web apps you've added. On a Mac, Safari and other browsers can take them as they are, or File > Add to Dock makes it an app.
+2. Press the bell, on the Chat tab or in Connections on the Status tab, then **Turn on**, and allow notifications when asked. **Send a test** checks they arrive.
+
+They come through your device's push service, Apple's for Safari, which needs the dashboard over HTTPS, as Tailscale Serve gives it. Each is encrypted so that only your device can read it, and signed with a key Athena keeps in its data folder, so no one else can notify you as Athena. Each shows the start of the message: `notification_text = false` under `[dashboard]` shows only that there's something new.
+
 ## Set it up
 
 Athena serves the dashboard on the Pi only, at `http://127.0.0.1:8092`. Tailscale Serve makes it reachable from your own devices, and from nowhere else, over HTTPS:
@@ -55,7 +64,7 @@ Every `every_minutes` (5), Athena checks that:
 - each MCP server that's switched on is connected, and each built-in tool started;
 - there's more than `min_free_gb` (1 GB) free where its data is.
 
-Once something has failed `after_failures` (2) checks in a row, you get a message in Telegram saying what and why, and another when it works again. Set these under `[alerts]`, or `enabled = false` to stop them.
+Once something has failed `after_failures` (2) checks in a row, you get a message in Telegram, and a notification on your devices, saying what and why, and another when it works again. Set these under `[alerts]`, or `enabled = false` to stop them.
 
 When Athena itself stops, it can't tell you, so systemd does: `athena-stopped` watches what happens next.
 

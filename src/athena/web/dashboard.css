@@ -944,3 +944,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .msg { max-width: 88%; }
   .chat-log { padding: 12px 10px; }
 }
+
+/* Notifications on this device: the bell, filled while they're on (notifications.js). */
+.bell svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.bell[data-on="true"] { color: var(--accent); }
+.bell[data-on="true"] svg { fill: currentColor; }

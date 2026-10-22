@@ -2,6 +2,7 @@
 
 import { ago, ask, call, clock, day, duration, h, now, number, plural, seconds, state, toast, when } from "./core.js";
 import { signOut } from "./dashboard.js";
+import { bell, bellLabel } from "./notifications.js";
 
 // -- the Status tab ---------------------------------------------------------------------------------------
 
@@ -287,6 +288,7 @@ function connectionsCard(o) {
         h("span.is", { text: tools.applying ? "Applying changes…" : `${plural(tools.count, "tool")}, ${servers}` }),
         h("a.button.small.end", { href: "#tools", text: "Manage" })
       ),
+      h("li", {}, h("span.what", { text: "Notifications" }), bellLabel(), h("span.end", {}, bell())),
       h("li", {}, h("span.what", { text: "Dashboard" }), h("span.is", { text: "Signed in" }), h("button.button.small.end", { type: "button", text: "Sign out", onclick: signOut }))
     )
   );

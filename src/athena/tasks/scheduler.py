@@ -415,7 +415,6 @@ class Scheduler:
             await channel.tell(text)
         except Exception as exc:
             log.warning("Couldn't send a task's message: %s", exc)
-            return
         if keep:  # in your conversation too, the current session, so you can ask about it
             yours, said = keep
             history = self.agent.history

@@ -13,8 +13,9 @@ from dotenv import dotenv_values
 
 from athena.agent import Agent
 from athena.alerts import HealthMonitor, check_health
-from athena.approvals import Approvals
+from athena.approvals import Approval, Approvals
 from athena.builtin import Builtin, Unavailable
+from athena.channel import Reach
 from athena.chat import DashboardChat
 from athena.config import THINKING, Config, parse_config
 from athena.dashboard import DashboardServer
@@ -25,6 +26,7 @@ from athena.llm import LLMClient
 from athena.mcp_manager import MCPManager
 from athena.memory import Embedder, MemoryService, MemoryStore
 from athena.privacy import Privacy, TermStore
+from athena.push import Push
 from athena.resources import SYSTEM_PROMPT
 from athena.sandbox import Sandbox
 from athena.server_envs import ServerEnvs
@@ -119,7 +121,7 @@ class Services:
                 TaskStore(self.config.db_path),
                 self.agent,
                 timezone=self.config.agent.timezone,
-                channel=lambda: self.channel,
+                channel=lambda: self.reach,
                 tools=self.tools.all,
                 on_ran=self.rewarm.set,  # your chat has the report in it now
                 watches=WatchStore(self.config.db_path),  # what it keeps an eye on for you (watching.py)
@@ -159,6 +161,17 @@ class Services:
         self.documents = DocumentIndex(self.config.documents, self.memory, self.config.log_dir)
         self.chat = DashboardChat(self)  # chatting on the dashboard (chat.py)
         self.dashboard = DashboardServer(self) if self.config.dashboard.enabled else None
+        # Notifications on your devices, for the dashboard installed as an app (push.py).
+        self.push: Push | None = None
+        if self.dashboard:
+            data = self.config.resolve(self.config.data_dir)
+            show_text = self.config.dashboard.notification_text
+            self.push = Push(self.config.db_path, data / "push-key.pem", show_text=show_text)
+            self.chat.on_answer = self._answered_on_the_dashboard
+            self.approvals.listeners.append(self._asking)
+        self._notifying: set[asyncio.Task[Any]] = set()
+        # How Athena reaches you, through everything it has (channel.py).
+        self.reach = Reach(self)
         self.applying = False  # changes to the tools are being applied
         self._apply_lock = asyncio.Lock()
         self._indexer: asyncio.Task[None] | None = None
@@ -194,21 +207,54 @@ class Services:
         self._security = asyncio.create_task(self.security.forever(), name="security-updates")
 
     async def notify(self, text: str) -> bool:
-        """Tell you something you didn't ask about, such as what a task found. Logged if there's no channel.
-        False if it couldn't be sent."""
+        """Tell you something you didn't ask about, such as what a task found: in Telegram, and on your devices
+        unless you're looking at the dashboard. False if it couldn't reach you."""
+        told = await self.notify_devices(self.config.agent.assistant_name, text, url="#chat", tag="athena")
         if self.channel is None:
-            log.warning("Nowhere to send a message of %d characters", len(text))  # not what it says: it can be personal
-            return False
+            if not told:  # not what it says: it can be personal
+                log.warning("Nowhere to send a message of %d characters", len(text))
+            return told
         try:
             await self.channel.tell(text)
         except Exception as exc:
             log.warning("Couldn't send a message: %s", exc)
-            return False
+            return told
         return True
 
-    async def _alert(self, text: str) -> bool:
-        if self.channel is None:  # Telegram hasn't started: try again next time
+    async def notify_devices(self, title: str, text: str, *, url: str, tag: str, urgent: bool = False) -> bool:
+        """Notify your devices, unless you're looking at the dashboard, which shows it already. True if you were
+        looking, or a device was reached."""
+        if self.dashboard and self.dashboard.looking:
+            return True
+        if self.push is None:
             return False
+        try:
+            return await self.push.send(title, text, url=url, tag=tag, urgent=urgent) > 0
+        except Exception:  # a notification mustn't stop anything
+            log.exception("Couldn't send a notification")
+            return False
+
+    def _later(self, notifying: Any) -> None:
+        task = asyncio.create_task(notifying, name="notify")
+        self._notifying.add(task)
+        task.add_done_callback(self._notifying.discard)
+
+    def _answered_on_the_dashboard(self, reply: Any, result: Any) -> None:
+        """Your devices hear of an answer to a message sent on the dashboard, in case you've gone."""
+        name, session = self.config.agent.assistant_name, reply.session
+        self._later(self.notify_devices(name, result.text, url=f"#chat/{session}", tag=f"reply-{session}"))
+
+    def _asking(self, approval: Approval) -> None:
+        """Your devices hear when Athena's waiting for your OK."""
+        if approval.verdict:  # answered
+            return
+        said = f"{approval.why}: allow {approval.tool}?" if approval.why else f"Allow {approval.tool}?"
+        if approval.summary:
+            said += f" {approval.summary}"
+        title = f"{self.config.agent.assistant_name} needs your OK"
+        self._later(self.notify_devices(title, said, url="#chat", tag=f"ask-{approval.id}", urgent=True))
+
+    async def _alert(self, text: str) -> bool:
         return await self.notify(text)
 
     def keep(self, yours: str, said: str) -> None:
@@ -297,6 +343,10 @@ class Services:
             self.stats.close()
         if self.timeline:
             self.timeline.close()
+        for task in self._notifying:
+            task.cancel()
+        if self.push:
+            await self.push.close()
 
     # -- changes, from Telegram and the dashboard ---------------------------------------------
 

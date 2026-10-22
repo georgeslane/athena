@@ -378,3 +378,51 @@ async def test_while_athena_answers_enter_doesnt_stop_it_and_the_button_does(tal
     await page.wait_for_selector(".msg.theirs >> text=Done: Waited.")
     await page.wait_for_selector(".msg.failed", state="detached")
     assert errors == []
+
+
+async def test_turning_notifications_on_testing_them_and_off(talking, browser):
+    import json
+
+    import httpx
+    from test_push import Device
+
+    device, received = Device(), []
+    talking.push.http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: received.append(device.read(r.content)) or httpx.Response(201))
+    )
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    # The browser's push service, which headless Chromium hasn't: a subscription as Safari would give, once you've
+    # allowed notifications, which headless Chromium can't ask you.
+    sub = json.dumps(device.subscription)
+    await context.add_init_script(
+        f"""
+        const sub = {sub};
+        let current = null;
+        const made = {{ endpoint: sub.endpoint, options: {{}}, toJSON: () => sub,
+                        unsubscribe: async () => {{ current = null; return true; }} }};
+        PushManager.prototype.subscribe = async function () {{ return (current = made); }};
+        PushManager.prototype.getSubscription = async function () {{ return current; }};
+        Object.defineProperty(Notification, "permission", {{ get: () => "granted" }});
+        Notification.requestPermission = async () => "granted";
+        """
+    )
+    page = await context.new_page()
+    base = f"http://127.0.0.1:{talking.dashboard.port}"
+    await page.goto(f"{base}/")
+    await page.fill("#password", PASSWORD)
+    await page.click("#sign-in-form button[type=submit]")
+    await page.goto(f"{base}/#chat")
+    await page.wait_for_function("navigator.serviceWorker.controller !== null || navigator.serviceWorker.ready")
+    assert await page.evaluate("navigator.serviceWorker.ready.then((r) => r.active.scriptURL)") == f"{base}/sw.js"
+
+    await page.click(".chat-head .bell")
+    await page.click("dialog >> text=Turn on")
+    await page.wait_for_selector(".chat-head .bell[data-on=true]")
+    assert talking.push.subscribed(device.subscription["endpoint"]) == 1
+    await page.click("dialog >> text=Send a test")  # the dialog says they're on, and offers a test
+    await page.wait_for_selector("#toast >> text=Sent.")
+    assert received[0]["body"].startswith("Notifications are on.")
+    await page.click("dialog >> text=Turn off")
+    await page.wait_for_selector(".chat-head .bell[data-on=false]")
+    assert talking.push.subscribed() == 0
+    await context.close()
