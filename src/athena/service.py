@@ -17,10 +17,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
-from athena.config import athena_home, find_config, load_config
+from athena.config import athena_home, find_config
 from athena.resources import TELL_STOPPED, UNITS
 
 UNIT_NAMES = ("athena.service", "athena-stopped.service")
@@ -63,9 +64,8 @@ def install(
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run, config: str | Path | None = None
 ) -> list[str]:
     """Install the units that have changed, and enable Athena. Returns the units written."""
-    cfg = load_config(find_config(config))
-    home = cfg.base_dir
-    data_dir = cfg.resolve(cfg.data_dir)
+    path = find_config(config)
+    home, data_dir = path.parent, data_dir_of(path)
     data_dir.mkdir(parents=True, exist_ok=True)
     for cache in (Path.home() / ".cache" / "uv", Path.home() / ".local" / "share" / "uv"):
         cache.mkdir(parents=True, exist_ok=True)  # so systemd can let Athena write there
@@ -80,6 +80,19 @@ def install(
         run(["sudo", "systemctl", "daemon-reload"], check=True)
     run(["sudo", "systemctl", "enable", "athena"], check=True, capture_output=True)
     return written
+
+
+def data_dir_of(path: Path) -> Path:
+    """Where Athena keeps its data, from config.toml's data_dir: read by itself, so the service can be installed
+    while the rest of the config isn't right yet."""
+    try:
+        data_dir = str(tomllib.loads(path.read_text()).get("data_dir") or "data")
+    except FileNotFoundError:
+        raise SystemExit(f"There's no config file at {path}: run `athena setup` to make one.") from None
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"{path} isn't valid TOML: {exc}") from None
+    folder = Path(data_dir).expanduser()
+    return (folder if folder.is_absolute() else path.parent / folder).resolve()
 
 
 def uninstall(run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> None:

@@ -168,3 +168,14 @@ def test_moving_wont_overwrite_athenas_folder(pi, checkout):
     with pytest.raises(SystemExit, match="already has a config.toml"):
         service.move_from(checkout, Recorder())
     assert (checkout / "config.toml").exists()
+
+
+def test_the_service_can_be_installed_before_the_config_is_right(pi):
+    """It only needs data_dir, so a config that doesn't load yet, or has data_dir under ~, is fine."""
+    home, athena_home, units, _ = pi
+    (athena_home / "config.toml").write_text('data_dir = "~/athena data"\n[telegram]\nallowed_user_ids = [42]\n')
+    assert service.install(Recorder()) == ["athena.service", "athena-stopped.service"]
+    assert f'ReadWritePaths="{athena_home}" "{home / "athena data"}"' in (units / "athena.service").read_text()
+    (athena_home / "config.toml").unlink()
+    with pytest.raises(SystemExit, match="run `athena setup`"):
+        service.install(Recorder())
