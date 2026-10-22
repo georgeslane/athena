@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from openai import AuthenticationError
 
 from athena.app import build_services
 from athena.builtin import FAIL, OK, WARN
-from athena.config import Config
+from athena.config import Config, unsendable
 from athena.dashboard import MIN_TOKEN_CHARS as MIN_PASSWORD_CHARS
 from athena.documents import DOCUMENTS_INDEXED, DocumentsError, connect_mac
 from athena.integrations import BUILTINS
@@ -95,7 +96,7 @@ async def run_doctor(cfg: Config) -> bool:
         report(OK, f"working; {len(vec)} dimensions")
     except Exception as exc:
         report(FAIL, await describe_embeddings_error(exc, cfg.embeddings))
-        if ":11434" not in cfg.embeddings.base_url:
+        if ":11434" not in cfg.embeddings.base_url and not isinstance(exc, AuthenticationError):
             report(WARN, "Check the model server serves the embeddings model too (docs/memory.md).")
     finally:
         await embedder.close()
@@ -375,6 +376,9 @@ async def check_dashboard(cfg: Config, report: Callable[[str, str], None]) -> No
         return
     if not dashboard.token:
         report(WARN, "no password yet: Athena makes one, DASHBOARD_TOKEN in .env, when the service starts")
+    elif bad := unsendable(dashboard.token):
+        report(FAIL, f"its password, DASHBOARD_TOKEN in .env, has a {bad!r} in it: remove it, or `athena setup` again")
+        return
     elif len(dashboard.token) < MIN_PASSWORD_CHARS:
         report(FAIL, f"its password, DASHBOARD_TOKEN in .env, must be at least {MIN_PASSWORD_CHARS} characters")
         return

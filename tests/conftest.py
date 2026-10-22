@@ -134,7 +134,7 @@ class FakeEmbeddingsServer:
 
     "fake-a" and "fake-b" are bag-of-words models that find the same things, but put words in different
     places, so their vectors don't match. "fake-noise" ignores meaning, "fake-nan" returns NaN, and any
-    other model isn't found.
+    other model isn't found. With a ``key``, it refuses requests without it, as oMLX does.
     """
 
     def __init__(self) -> None:
@@ -147,6 +147,8 @@ class FakeEmbeddingsServer:
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 server.requests.append(body)
+                if server.key and self.headers.get("authorization") != f"Bearer {server.key}":
+                    return self._send(401, {"error": {"message": "Invalid API key", "type": "authentication_error"}})
                 model, texts = body["model"], body["input"]
                 if model not in {"fake-a", "fake-b", "fake-noise", "fake-nan"}:
                     return self._send(404, {"error": {"message": f'model "{model}" not found, try pulling it first'}})
@@ -175,6 +177,7 @@ class FakeEmbeddingsServer:
                 pass
 
         self.requests: list[dict] = []
+        self.key = ""
         self._http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self._http.server_address[1]}/v1"
         threading.Thread(target=self._http.serve_forever, daemon=True).start()

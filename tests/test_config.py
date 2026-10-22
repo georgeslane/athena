@@ -1,9 +1,13 @@
+import asyncio
 from pathlib import Path
 
 import pytest
+from conftest import DIMS
 
-from athena.config import ConfigError, MCPServerConfig, load_config
+from athena.config import ConfigError, MCPServerConfig, load_config, unsendable
+from athena.memory import Embedder
 from athena.resources import CONFIG_EXAMPLE
+from athena.search_eval import describe_embeddings_error
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -118,3 +122,44 @@ def test_env_values_are_taken_as_they_are(tmp_path, monkeypatch):
     p.write_text('[llm]\nmodel = "m"\n[siri]\ntoken = "${SIRI_TOKEN}"\n')
     (tmp_path / ".env").write_text("SIRI_TOKEN='abc${HOME}def'\n")
     assert load_config(p).siri.token == "abc${HOME}def"
+
+
+def test_embeddings_on_the_models_server_use_its_key(tmp_path, monkeypatch, embeddings_server):
+    """Whether its address is left empty or written out, as the old setup did, the model's server takes its key."""
+    embeddings_server.key = "sk-mac"
+    monkeypatch.setenv("LLM_API_KEY", "sk-mac")
+    llm = f'[llm]\nbase_url = "{embeddings_server.url}"\nmodel = "m"\napi_key = "${{LLM_API_KEY}}"\n'
+    path = tmp_path / "config.toml"
+
+    def embed(embeddings: str) -> str:
+        """ "ok", or what `athena doctor` would say is wrong."""
+        path.write_text(f'{llm}[embeddings]\nmodel = "fake-a"\ndimensions = {DIMS}\n{embeddings}')
+        cfg = load_config(path).embeddings
+
+        async def run():
+            embedder = Embedder(cfg)
+            try:
+                await embedder.embed_one("hello", "query")
+                return "ok"
+            except Exception as exc:
+                return await describe_embeddings_error(exc, cfg)
+            finally:
+                await embedder.close()
+
+        return asyncio.run(run())
+
+    assert embed("") == "ok"
+    assert embed(f'base_url = "{embeddings_server.url}/"\n') == "ok"
+    assert embed(f'base_url = "{embeddings_server.url}"\napi_key = "wrong"\n') == (
+        f"the embeddings server ({embeddings_server.url}) refused its API key. Leave [embeddings] base_url empty "
+        "to use the model's server and key, or set its own api_key"
+    )
+    other = embeddings_server.url.replace("127.0.0.1", "localhost")
+    path.write_text(f'{llm}[embeddings]\nbase_url = "{other}"\n')
+    assert load_config(path).embeddings.api_key == ""  # another server isn't sent the model's key
+
+
+def test_secrets_that_cant_be_sent():
+    assert unsendable("0123abcd-_.~!:") is None
+    assert unsendable("a" * 48 + "\u2588") == "\u2588"  # a terminal's cursor, copied with it
+    assert unsendable("open sesame") == " "

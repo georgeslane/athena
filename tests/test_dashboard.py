@@ -542,6 +542,8 @@ async def test_doctor_explains_what_is_wrong(config):
 
     config.dashboard.token = "short"
     await check_dashboard(config, report)
+    config.dashboard.token = "0123456789abcdef\u2588"
+    await check_dashboard(config, report)
     config.dashboard.token = ""
     config.dashboard.port = 9  # nothing listens there
     await check_dashboard(config, report)
@@ -549,6 +551,7 @@ async def test_doctor_explains_what_is_wrong(config):
     await check_dashboard(config, report)
     assert reported == [
         (FAIL, "its password, DASHBOARD_TOKEN in .env, must be at least 12 characters"),
+        (FAIL, "its password, DASHBOARD_TOKEN in .env, has a '\u2588' in it: remove it, or `athena setup` again"),
         (WARN, "no password yet: Athena makes one, DASHBOARD_TOKEN in .env, when the service starts"),
         (WARN, "not answering. It runs inside the bot: is the athena service running?"),
         (WARN, "off ([dashboard] enabled = false)"),
