@@ -48,7 +48,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 async def _chat(args: argparse.Namespace) -> int:
     from athena import commands
     from athena.app import build_services
-    from athena.timeline import ToolEvent
+    from athena.steps import ToolEvent
 
     cfg = load_config(args.config)
     services = build_services(cfg)

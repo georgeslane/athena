@@ -1,15 +1,19 @@
-"""Watching: what Athena keeps an eye on for you, and the heartbeat that checks on it (watching.py, tasks.py)."""
+"""Watching: what Athena keeps an eye on for you, and the hourly check on it (watching.py, dags/scheduler.py)."""
 
 import asyncio
 import time
+from zoneinfo import ZoneInfo
 
 import pytest
 from conftest import completion
-from test_tasks import LONDON, athena  # noqa: F401 - athena is a fixture
+from test_dags import athena  # noqa: F401 - athena is a fixture
 
-from athena.tasks import NOTHING
+from athena.dags.scheduler import NOTHING
 from athena.tools import ToolError, Turn, begin_turn
-from athena.watching import MAX_WATCHES, WatchStore, describe, watch_tool
+from athena.watching import MAX_WATCHES, WatchStore, describe, slug, watch_tool
+
+LONDON = ZoneInfo("Europe/London")
+CHECK = "Check on what George asked you to keep an eye on"
 
 
 def days(n: float) -> float:
@@ -91,7 +95,10 @@ async def test_the_model_adds_only_when_youre_there_and_can_note_and_finish(tmp_
     changed = []
     watch = watch_tool(store, LONDON, 30, lambda: changed.append(1)).handler
     said = await watch({"action": "add", "what": "Claude finishing the bank project", "days": 3})
-    assert said.startswith("Watching #1: Claude finishing the bank project. You'll check on it every 30 minutes")
+    assert said.startswith(
+        "Watching #1 (claude-finishing-bank): Claude finishing the bank project. You'll check on it every 30 minutes"
+    )
+    assert "trigger “watch:claude-finishing-bank”" in said
     assert store.get(1).by == "athena" and changed == [1]
     forever = await watch({"action": "add", "what": "my inbox, every time", "forever": True})
     assert "with no end" in forever and store.get(2).until is None
@@ -104,7 +111,7 @@ async def test_the_model_adds_only_when_youre_there_and_can_note_and_finish(tmp_
         with pytest.raises(ToolError, match="only start watching something while you're answering"):
             await watch({"action": "add", "what": "anything"})
         assert await watch({"action": "note", "id": 1, "note": "S3 of 4 done."}) == "Noted on #1, for next time."
-        assert "#1: Claude finishing the bank project" in await watch({"action": "list"})
+        assert "#1 (claude-finishing-bank): Claude finishing the bank project" in await watch({"action": "list"})
         assert await watch({"action": "done", "id": 1}) == "Stopped watching #1: Claude finishing the bank project."
     finally:
         end()
@@ -114,80 +121,130 @@ async def test_the_model_adds_only_when_youre_there_and_can_note_and_finish(tmp_
             await watch(bad)
 
 
-async def test_the_heartbeat_checks_everything_at_once_and_tells_you_only_what_matters(athena):  # noqa: F811
-    a = athena(
-        [
-            completion(None, [("look", {}), ("watch", {"action": "note", "id": 1, "note": "Gold at 4,190."})]),
-            completion(NOTHING),
-            completion(None, [("watch", {"action": "done", "id": 2})]),
-            completion("Claude has finished the bank project: merge it when you're ready."),
-        ]
+def test_each_watch_has_a_key_dags_are_triggered_by(tmp_path):
+    store = WatchStore(tmp_path / "w.db")
+    assert slug("Any new emails about jobs, please") == "new-emails-about"
+    assert store.add("new emails about jobs", None, by="you").key == "new-emails-about"
+    assert store.add("new emails about jobs at Acme", None, by="you").key == "new-emails-about-2"
+    named = store.add("the parcel", None, by="you", key="parcel")
+    assert named.key == "parcel"
+    with pytest.raises(ValueError, match="lower case"):
+        store.add("x", None, by="you", key="Not A Key")
+    with pytest.raises(ValueError, match="choose another key"):
+        store.change(named.id, "the parcel", None, key="new-emails-about")
+    assert store.change(named.id, "the big parcel", None).key == "parcel"  # kept unless it's changed
+    assert describe(store.get(named.id), LONDON, ["Deliveries"]).startswith(
+        "#3 (parcel): the big parcel (since"
+    ) and "it starts the DAG of “Deliveries”" in describe(store.get(named.id), LONDON, ["Deliveries"])
+
+
+def test_watches_from_before_keys_get_them(tmp_path):
+    import sqlite3
+
+    db = sqlite3.connect(tmp_path / "w.db")
+    db.execute(
+        "CREATE TABLE watches (id INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL, created REAL NOT NULL, "
+        "until REAL, by TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', checked REAL)"
     )
-    scheduler = a["scheduler"]
-    scheduler.watches.add("if gold drops below 4,000", days(7), by="you")
-    scheduler.watches.add("when Claude finishes the bank project", days(7), by="athena")
+    db.executemany("INSERT INTO watches (what, created, by) VALUES (?, 1, 'you')", [("the parcel",), ("the parcel",)])
+    db.commit()
+    db.close()
+    assert [w.key for w in WatchStore(tmp_path / "w.db").all()] == ["parcel", "parcel-2"]
 
-    await scheduler.heartbeat()
+
+async def test_the_check_looks_at_everything_at_once_and_tells_you_only_what_matters(athena):  # noqa: F811
+    a = athena(
+        {
+            CHECK: [
+                completion(None, [("look", {}), ("watch", {"action": "note", "id": 1, "note": "Gold at 4,190."})]),
+                completion(NOTHING),
+                completion(None, [("watch", {"action": "done", "id": 2})]),
+                completion("Claude has finished the bank project: merge it when you're ready."),
+            ]
+        }
+    )
+    dags = a["dags"]
+    dags.watches.add("if gold drops below 4,000", days(7), by="you")
+    dags.watches.add("when Claude finishes the bank project", days(7), by="athena")
+
+    await dags.heartbeat()
     first = a["server"].requests[0]["messages"]
-    assert "#1: if gold drops below 4,000" in first[-1]["content"]
-    assert "#2: when Claude finishes the bank project" in first[-1]["content"]
-    assert "your regular check, every 30 minutes" in first[-1]["content"]
-    assert a["channel"].said == [] and scheduler.check_result["outcome"] == "nothing new"
-    assert scheduler.watches.get(1).note == "Gold at 4,190." and scheduler.watches.get(1).checked
+    assert "#1 (gold-drops-below): if gold drops below 4,000" in first[-1]["content"]
+    assert "#2 (claude-finishes-bank): when Claude finishes the bank project" in first[-1]["content"]
+    assert "your regular check, every 60 minutes" in first[-1]["content"]
+    assert a["channel"].said == [] and dags.check_result["outcome"] == "nothing new"
+    assert dags.watches.get(1).note == "Gold at 4,190." and dags.watches.get(1).checked
 
-    await scheduler.heartbeat()
-    assert a["channel"].said == ["👀 Claude has finished the bank project: merge it when you're ready."]
-    assert [w.id for w in scheduler.watches.all()] == [1]  # the one that happened is off the list
+    await dags.heartbeat()
+    assert a["channel"].said == [("👀 Claude has finished the bank project: merge it when you're ready.", None)]
+    assert [w.id for w in dags.watches.all()] == [1]  # the one that happened is off the list
     assert a["history"].load(a["history"].current_chat)[-2:] == [
         {"role": "user", "content": "(You checked what I asked you to watch.)"},
         {"role": "assistant", "content": "Claude has finished the bank project: merge it when you're ready."},
     ]
-    assert scheduler.check_result["outcome"] == "told you" and a["ran"] == [1, 1]
-    assert [step["tool"] for step in scheduler.check_result["steps"]] == ["watch"]  # what this check did
+    assert dags.check_result["outcome"] == "told you"
+    assert [step["tool"] for step in dags.check_result["steps"]] == ["watch"]  # what this check did
 
 
-async def test_the_heartbeat_asks_before_tools_it_may_not_use_and_lets_go_of_old_watches(athena):  # noqa: F811
-    a = athena([completion(None, [("publish", {})]), completion(NOTHING)], heartbeat_tools=[])
-    scheduler = a["scheduler"]
-    old = scheduler.watches.add("something long ago", days(1), by="you")
-    scheduler.watches.add("the parcel", days(1), by="you")
-    with scheduler.watches._lock, scheduler.watches._conn:
-        scheduler.watches._conn.execute("UPDATE watches SET until = ? WHERE id = ?", (time.time() - 1, old.id))
-    await scheduler.heartbeat()
-    assert a["channel"].said == ["👀 I've stopped watching for this, as it was only until today: something long ago"]
-    assert a["channel"].asked == [("publish", "While checking what you asked me to watch")]
-
-    allowed = athena([completion(None, [("publish", {})]), completion(NOTHING)], heartbeat_tools=["publish"])
-    allowed["scheduler"].watches.add("the parcel", days(1), by="you")
-    await allowed["scheduler"].heartbeat()
-    assert allowed["channel"].asked == [] and allowed["published"] == [{}]
+async def test_the_check_starts_the_dags_waiting_for_what_happened(athena):  # noqa: F811
+    a = athena({CHECK: [completion(None, [("watch", {"action": "happened", "id": 1, "what": "Acme wrote."})]),
+                        completion(NOTHING)]})  # fmt: skip
+    dags = a["dags"]
+    a["history"].rename(1, "Job hunting")
+    dags.save(1, "with DAG(triggers=['watch:job-emails']):\n    a = Task(prompt='Apply.')\n")
+    dags.watches.add("new emails about jobs", None, by="you", key="job-emails")
+    await dags.heartbeat()
+    asked = a["server"].requests[0]["messages"][-1]["content"]
+    assert "When it happens, it starts the DAG of “Job hunting”" in asked
+    assert [(p.trigger, p.input) for p in dags.queue] == [("watch:job-emails", "Acme wrote.")]
+    assert dags.check_result["outcome"] == "nothing new" and a["channel"].said == []
 
 
-async def test_the_heartbeat_runs_only_when_theres_something_to_watch_and_youre_not_chatting(athena):  # noqa: F811
-    a = athena([completion(NOTHING)] * 3, heartbeat_minutes=30)
-    scheduler = a["scheduler"]
-    scheduler.last_check = time.time() - 31 * 60
-    assert not scheduler._heartbeat_due()  # nothing to watch: no check, so it costs nothing
-    scheduler.watches.add("the parcel", days(1), by="you")
-    assert scheduler._heartbeat_due()
-    scheduler.last_check = time.time()
-    assert not scheduler._heartbeat_due()
-    scheduler.check_now()
-    assert scheduler._heartbeat_due()
-    scheduler.cfg.heartbeat_minutes = 0
-    assert not scheduler._heartbeat_due()
-    scheduler.cfg.heartbeat_minutes = 1
-    assert scheduler._heartbeat_minutes() == 10  # never more often than every 10 minutes
+async def test_the_check_asks_before_tools_it_may_not_use_and_lets_go_of_old_watches(athena):  # noqa: F811
+    a = athena({CHECK: [completion(None, [("publish", {})]), completion(NOTHING)]}, heartbeat_tools=[])
+    dags = a["dags"]
+    old = dags.watches.add("something long ago", days(1), by="you")
+    dags.watches.add("the parcel", days(1), by="you")
+    with dags.watches._lock, dags.watches._conn:
+        dags.watches._conn.execute("UPDATE watches SET until = ? WHERE id = ?", (time.time() - 1, old.id))
+    await dags.heartbeat()
+    assert a["channel"].said == [
+        ("👀 I've stopped watching for this, as it was only until today: something long ago", None)
+    ]
+    assert a["channel"].asked == [("publish", "While checking what you asked me to watch", None)]
 
-    scheduler.cfg.heartbeat_minutes = 30
-    scheduler.start()
+    allowed = athena({CHECK: [completion(None, [("publish", {})]), completion(NOTHING)]}, heartbeat_tools=["publish"])
+    allowed["dags"].watches.add("the parcel", days(1), by="you")
+    await allowed["dags"].heartbeat()
+    assert allowed["channel"].asked == [] and allowed["dags"].check_result["steps"][0]["outcome"] == "ran"
+
+
+async def test_the_check_runs_only_when_theres_something_to_watch_and_youre_not_chatting(athena):  # noqa: F811
+    a = athena({CHECK: NOTHING}, heartbeat_minutes=60)
+    dags = a["dags"]
+    dags.last_check = time.time() - 61 * 60
+    assert not dags._heartbeat_due()  # nothing to watch: no check, so it costs nothing
+    dags.watches.add("the parcel", days(1), by="you")
+    assert dags._heartbeat_due()
+    dags.last_check = time.time()
+    assert not dags._heartbeat_due()
+    dags.check_now()
+    assert dags._heartbeat_due()
+    dags.cfg.heartbeat_minutes = 0
+    assert not dags._heartbeat_due()
+    dags.cfg.heartbeat_minutes = 1
+    assert dags._heartbeat_minutes() == 60  # never more often than every hour
+
+    dags.cfg.heartbeat_minutes = 60
+    dags.start()
     try:
         async with asyncio.timeout(3):
-            while scheduler.check_result is None:
+            while dags.check_result is None:
                 await asyncio.sleep(0.01)
-        assert scheduler.check_result["outcome"] == "nothing new" and not scheduler._check_now
+        assert dags.check_result["outcome"] == "nothing new" and not dags._check_now
     finally:
-        await scheduler.stop()
-    watching = scheduler.watching()
-    assert [i["what"] for i in watching["items"]] == ["the parcel"] and watching["every_minutes"] == 30
-    assert watching["next"] == pytest.approx(scheduler.last_check + 1800)
+        await dags.stop()
+    watching = dags.watching()
+    assert [i["what"] for i in watching["items"]] == ["the parcel"] and watching["every_minutes"] == 60
+    assert watching["items"][0]["key"] == "parcel" and watching["items"][0]["starts"] == []
+    assert watching["next"] == pytest.approx(dags.last_check + 3600)

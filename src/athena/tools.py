@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,7 +15,7 @@ ToolProvider = Callable[[], Iterable["Tool"]]
 _INVALID_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 # Tools that always ask you first, even where others may be allowed without asking (a task's, or a session's):
 # starting more tasks, and pushing to GitHub.
-NEVER_UNASKED = frozenset({"schedule_task", "hand_to_claude", "answer_claude", "extend_claude_project"})
+NEVER_UNASKED = frozenset({"change_dag", "hand_to_claude", "answer_claude", "extend_claude_project"})
 
 
 class ToolError(Exception):
@@ -32,6 +32,7 @@ class Turn:
 
     alone: str | None = None  # None: answering you. Else what it's doing, such as "your task “Briefing”"
     chat: str | None = None  # the chat it's in, such as "session:3"
+    dag: Any = None  # the DAG run it's in, if it is: what trigger_task triggers tasks in (dags/runner.py)
     # What tools noted, such as {"skills": ["Trip plans"], "suggested": ["memory", "memory"]}.
     notes: dict[str, list[str]] = field(default_factory=dict)
 
@@ -99,7 +100,8 @@ class ToolRegistry:
     between requests, which keeps the model server's prompt cache warm.
 
     Tools ``on_demand`` names are found by the model when it needs them, rather than sent with every
-    request: find_tools and use_tool are sent in their place (tool_search.py).
+    request: find_tools and use_tool are sent in their place (tool_search.py). An agent's DAG can keep more out
+    of its runs' prompts as well: the ``hidden`` patterns each method takes.
     """
 
     def __init__(self) -> None:
@@ -125,25 +127,27 @@ class ToolRegistry:
                     tools.append(tool)
         return tools
 
-    def get(self, name: str) -> Tool | None:
+    def get(self, name: str, hidden: Sequence[str] = ()) -> Tool | None:
         """Any tool by its name: one that's found when needed, or find_tools itself, as well."""
         for tool in self.all():
             if tool.name == name:
                 return tool
-        return next((t for t in self._meta_tools() if t.name == name), None)
+        return next((t for t in self._meta_tools(hidden) if t.name == name), None)
 
-    def deferred(self) -> list[Tool]:
+    def deferred(self, hidden: Sequence[str] = ()) -> list[Tool]:
         """The tools found when they're needed, rather than sent with every request."""
-        return [t for t in self.all() if matches_any(t.name, self.on_demand)]
+        patterns = [*self.on_demand, *hidden]
+        return [t for t in self.all() if matches_any(t.name, patterns)]
 
-    def in_prompt(self) -> list[Tool]:
+    def in_prompt(self, hidden: Sequence[str] = ()) -> list[Tool]:
         """The tools sent with every request: all but those found when needed, and what finds them."""
-        return [t for t in self.all() if not matches_any(t.name, self.on_demand)] + self._meta_tools()
+        patterns = [*self.on_demand, *hidden]
+        return [t for t in self.all() if not matches_any(t.name, patterns)] + self._meta_tools(hidden)
 
-    def _meta_tools(self) -> list[Tool]:
+    def _meta_tools(self, hidden: Sequence[str] = ()) -> list[Tool]:
         from athena.tool_search import meta_tools  # it builds on Tool, from here
 
-        return meta_tools(self.deferred()) if self.on_demand else []
+        return meta_tools(self.deferred(hidden)) if self.on_demand or hidden else []
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [t.schema() for t in self.in_prompt()]
+    def schemas(self, hidden: Sequence[str] = ()) -> list[dict[str, Any]]:
+        return [t.schema() for t in self.in_prompt(hidden)]

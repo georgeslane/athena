@@ -8,7 +8,7 @@ from conftest import FakeLLMServer, completion
 from test_agent import make_agent
 
 from athena.approvals import ALLOWED, DENIED, NO_ANSWER, STOPPED, Approvals
-from athena.timeline import steps
+from athena.steps import steps
 from athena.tools import Tool
 
 
@@ -54,13 +54,13 @@ def tools():
     params = {"type": "object", "properties": {}}
     return [
         Tool("send_email", "Sends.", params, ran, needs_confirmation=True),
-        Tool("schedule_task", "Schedules.", params, ran, needs_confirmation=True),
+        Tool("change_dag", "Changes a DAG.", params, ran, needs_confirmation=True),
     ]
 
 
 async def test_tools_allowed_here_run_without_asking_but_some_always_ask(config, memory):
     server = FakeLLMServer(
-        [completion(None, [("send_email", {}), ("schedule_task", {})]), completion("Sent, and asked about the task.")]
+        [completion(None, [("send_email", {}), ("change_dag", {})]), completion("Sent, and asked about the DAG.")]
     )
     agent = make_agent(config, memory, server, extra_tools=tools())
     asked = []
@@ -70,12 +70,12 @@ async def test_tools_allowed_here_run_without_asking_but_some_always_ask(config,
         return False
 
     taken, on_tool = steps()
-    allowed = ["send_email", "schedule_task"]
+    allowed = ["send_email", "change_dag"]
     await agent.respond("chat", "Email Sam, and remind me", confirm=confirm, allowed=allowed, on_tool=on_tool)
-    assert asked == ["schedule_task"]  # never without asking, even when allowed
+    assert asked == ["change_dag"]  # never without asking, even when allowed
     assert [(s["tool"], s["outcome"], s["approval"]) for s in taken] == [
         ("send_email", "ran", "allowed"),
-        ("schedule_task", "declined", "you"),
+        ("change_dag", "declined", "you"),
     ]
 
 

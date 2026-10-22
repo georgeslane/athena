@@ -9,8 +9,8 @@ Handing a project over (`hand_to_claude`, which always asks you first, showing e
 
 Claude pushes its work to the branch, with `status.json` saying where the project and each story are,
 and `Solution.md` when it's done. Athena reads the pull requests every poll_minutes (and when you ask, on
-the dashboard), shows each project as an epic of stories on the Board tab, and tells you in Telegram
-when one is done, or Claude's stuck. You merge the pull request when you're happy with it.
+the dashboard), and tells you in Telegram when one is done, or Claude's stuck: a project that's done starts
+the agents' DAGs waiting for "claude-done" too. You merge the pull request when you're happy with it.
 
 More work on a project (`extend_claude_project`, which asks first too) adds stories to its Requirements.md,
 numbered on from the last, under "## Changes, <date>". While its pull request is open, that's on the same
@@ -163,7 +163,7 @@ class ClaudeProjects(Builtin):
     entry = Integration(
         "claude_projects",
         "Projects for Claude",
-        "Hands coding projects to Claude through a private GitHub repo, and shows them on the Board tab.",
+        "Hands coding projects to Claude through a private GitHub repo, and tells you, and agents, when they're done.",
         "claude_projects",
         builtin=True,
         fields=(
@@ -211,6 +211,7 @@ class ClaudeProjects(Builtin):
         self.checked = 0.0
         self.error: str | None = None
         self.projects: list[Project] = []
+        self.finished: list[Project] = []  # those the last refresh found Claude had finished: they start DAGs
         if kept := store.board():
             self.checked, self.error = kept.get("checked", 0.0), kept.get("error")
             self.projects = [project_from(p) for p in kept.get("projects", [])]
@@ -294,10 +295,13 @@ class ClaudeProjects(Builtin):
         watches = self.store.watches()
         first = not watches
         news: list[str] = []
+        self.finished = []
         for project, head in read:
             watch = watches.setdefault(project.folder, Watch())
             if not first and project.status in ("done", "blocked") and watch.status != project.status:
                 news.append(self.tell(project))
+                if project.status == "done":
+                    self.finished.append(project)
             watch.status = project.status
             try:
                 news += await self._keep_going(project, head, watch)
@@ -345,8 +349,8 @@ class ClaudeProjects(Builtin):
             watch.gave_up = project.gave_up = True
             return [
                 f"⚠️ Claude still hasn't {'carried on with' if started else 'started on'} “{project.title}” after "
-                f"{watch.restarts} tries. Check its routine at claude.ai/code/routines, then press Restart on the "
-                f"Board tab.\n{project.url}"
+                f"{watch.restarts} tries. Check its routine at claude.ai/code/routines, then ask me to start it again."
+                f"\n{project.url}"
             ]
         project.next_restart = since + wait
         if now < since + wait:
@@ -373,7 +377,7 @@ class ClaudeProjects(Builtin):
         return [f"{said}\n{project.url}"]
 
     async def restart(self, folder: str) -> Project:
-        """Start Claude again on a project now, as you asked on the dashboard."""
+        """Start Claude again on a project now, as you asked."""
         project = next((p for p in self.projects if p.folder == folder), None)
         if project is None or project.pr != "open":
             raise ToolError(f"There's no open project {folder}.")
@@ -581,8 +585,8 @@ class ClaudeProjects(Builtin):
             project = await self.hand_over(args)
             return (
                 f"Handed to Claude as pull request #{project.number}, {project.folder}, with {len(project.stories)} "
-                f"stor{'y' if len(project.stories) == 1 else 'ies'}. It's on the dashboard's Board tab, and the user "
-                f"hears when it's done. {project.url}"
+                f"stor{'y' if len(project.stories) == 1 else 'ies'}. The user hears when it's done, and so do the "
+                f"agents waiting for claude-done. {project.url}"
             )
 
         async def answer_preview(args: dict[str, Any]) -> str:
@@ -629,7 +633,11 @@ class ClaudeProjects(Builtin):
             if not self.projects:
                 return "There are no projects for Claude." + (f" ({self.error})" if self.error else "")
             if str(args.get("project") or "").strip():
-                return self._describe(self._find(str(args["project"])), detail=True)
+                project = self._find(str(args["project"]))
+                if args.get("restart") is True:
+                    project = await self.restart(project.folder)
+                    return f"Started Claude again on “{project.title}”.\n" + self._describe(project, detail=True)
+                return self._describe(project, detail=True)
             return "\n".join(self._describe(p) for p in self.projects[:30])
 
         story = {
@@ -705,9 +713,13 @@ class ClaudeProjects(Builtin):
                 name="claude_projects",
                 description=(
                     "How Claude's getting on with the coding projects you've handed it: each project's status and "
-                    "stories. Give a project's name for its stories and Claude's notes."
+                    "stories. Give a project's name for its stories and Claude's notes, and restart: true to start "
+                    "Claude on it again, when it's stopped."
                 ),
-                parameters={"type": "object", "properties": {"project": {"type": "string"}}},
+                parameters={
+                    "type": "object",
+                    "properties": {"project": {"type": "string"}, "restart": {"type": "boolean"}},
+                },
                 handler=claude_projects,
             ),
         ]

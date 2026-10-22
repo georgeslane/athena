@@ -1,7 +1,6 @@
 """Files in the workspace: reading, writing and sending them without anything there leading Athena outside it, PDFs
 read and made in the sandbox, and files coming and going in Telegram."""
 
-import asyncio
 import json
 import os
 from pathlib import Path
@@ -305,21 +304,16 @@ async def test_files_the_answer_sends_come_after_it_and_a_link_isnt_sent(config,
     assert tg.sent[-1].text.startswith("I couldn't send you env:")  # the link, which isn't followed
 
 
-async def test_a_task_sends_the_files_it_made(athena_tasks):
-    a, channel = athena_tasks
-    assert channel.files == [json.dumps({"path": "summary.md", "caption": ""})]
-
-
-@pytest.fixture
-async def athena_tasks(config, memory):
-    """A task that writes a file and sends it, run by the scheduler."""
+async def test_a_dag_task_sends_the_files_it_made(config, memory):
+    """A task that writes a file and sends it, in a DAG run."""
     from conftest import FakeLLMServer, completion
-    from test_tasks import FakeChannel
+    from test_dags import FakeChannel
 
     from athena.agent import Agent
     from athena.config import TasksConfig
+    from athena.dags.scheduler import Dags
+    from athena.dags.store import AgentStore
     from athena.history import ConversationStore
-    from athena.tasks import Scheduler, TaskStore
     from athena.tools import ToolRegistry
 
     tools = ToolRegistry()
@@ -331,29 +325,16 @@ async def athena_tasks(config, memory):
             completion(None, [("send_file", {"path": "summary.md"})]),
             completion("Here's the summary."),
         ]
+        + [completion("NO CHANGES")] * 6
     )
     agent = Agent(config.agent, server.client(config.llm), tools, ConversationStore(config.db_path), memory)
-
-    class Channel(FakeChannel):
-        def __init__(self):
-            super().__init__()
-            self.files = []
-
-        async def send_file(self, noted):
-            self.files.append(noted)
-
-    channel = Channel()
-    scheduler = Scheduler(TasksConfig(quiet_minutes=0), TaskStore(config.db_path), agent, timezone="Europe/London",
-                          channel=lambda: channel, tools=tools.all, poll_seconds=0.01)  # fmt: skip
-    scheduler.add("Summary", "Write a summary and send it.", "now", [], created_by="you")
-    scheduler.start()
-    try:
-        async with asyncio.timeout(5):
-            while not channel.files:
-                await asyncio.sleep(0.01)
-    finally:
-        await scheduler.stop()
-    yield scheduler, channel
+    agent.gate.grace = 0.0
+    channel = FakeChannel()
+    dags = Dags(TasksConfig(quiet_minutes=0), AgentStore(config.db_path), agent, timezone="Europe/London",
+                channel=lambda: channel, tools=tools, poll_seconds=0.01)  # fmt: skip
+    dags.save(1, "with DAG():\n    summary_file = Task(prompt='Write a summary and send it.')\n")
+    await dags.runner.run(1, "manual")
+    assert channel.files == [json.dumps({"path": "summary.md", "caption": ""})]
 
 
 def test_the_files_builtin_is_there_and_kept_apart_from_an_old_files_server():

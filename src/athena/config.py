@@ -147,22 +147,23 @@ class DashboardConfig(_Section):
 
 
 class TasksConfig(_Section):
-    # Tasks Athena does by itself, on a schedule, and tells you about (see docs/tasks.md).
+    # Agents' DAGs: the tasks Athena does by itself, on a schedule or when something happens (docs/agents.md).
     enabled: bool = True
-    quiet_minutes: float = 5.0  # a task waits until you haven't messaged Athena for this long
-    max_minutes: float = 30.0  # the most a run works for, not counting time it waits for you
+    quiet_minutes: float = 5.0  # a scheduled run waits until Athena's been inactive for this long
+    max_minutes: float = 30.0  # the most a task works for, not counting time it waits for your OK
     max_tool_rounds: int = 25
     thinking: Literal["on", "short", "off"] | None = "on"  # tasks aren't in a hurry: None follows [llm]
     confirm_minutes: float = 60.0  # how long a task waits for you to allow a tool that asks first
-    # How often Athena checks on what you've asked it to watch (watching.py), all in one go. 0: never.
-    heartbeat_minutes: float = Field(default=30.0, ge=0)
+    # How often Athena checks on what you've asked it to watch (watching.py), all in one go: at most every hour.
+    # 0: never.
+    heartbeat_minutes: float = Field(default=60.0, ge=0)
     heartbeat_tools: list[str] = Field(default_factory=list)  # ones that ask first, which checking needn't
 
 
 class TriggersConfig(_Section):
-    # Events that start tasks, from iPhone Shortcuts or anything else on your tailnet that can make an HTTP
-    # request (see docs/tasks.md). POST /hooks/<event> on the dashboard's address, with this token,
-    # runs the tasks whose schedule is "on <event>". Off until the token's set.
+    # Events that start agents' DAGs, from iPhone Shortcuts or anything else on your tailnet that can make an
+    # HTTP request (see docs/agents.md). POST /hooks/<event> on the dashboard's address, with this token,
+    # runs the DAGs with "<event>" in their triggers. Off until the token's set.
     token: str = ""  # TRIGGERS_TOKEN in .env: sent as "Authorization: Bearer <token>"
     max_per_hour: int = Field(default=30, ge=1)  # events taken in an hour, of every kind; more are refused
 

@@ -45,21 +45,21 @@ async def test_turning_them_on_for_a_device_and_off(chat):  # noqa: F811
 
 async def test_an_answer_to_a_message_sent_on_the_dashboard(chat, phone):  # noqa: F811
     async with client(chat) as http:
-        await http.post("/api/chat/1", json={"text": "Hello"})
+        await http.post("/api/agents/1/messages", json={"text": "Hello"})
         await answered(http)
         await until(lambda: phone.received)
         assert phone.received == [
-            ("normal", {"title": "Athena · Hello", "body": "Hello there.", "url": "#chat/1", "tag": "reply-1"})
+            ("normal", {"title": "Athena · Hello", "body": "Hello there.", "url": "#agents/1", "tag": "reply-1"})
         ]
 
         # Not while you're looking at the page: it shows the answer itself.
         assert (await http.post("/api/presence", json={"looking": True})).status_code == 200
-        await http.post("/api/chat/1", json={"text": "Hello again"})
+        await http.post("/api/agents/1/messages", json={"text": "Hello again"})
         await answered(http)
         await asyncio.sleep(0.1)
         assert len(phone.received) == 1
         await http.post("/api/presence", json={"looking": False})  # you've switched away
-        await http.post("/api/chat/1", json={"text": "Still there?"})
+        await http.post("/api/agents/1/messages", json={"text": "Still there?"})
         await answered(http)
         await until(lambda: len(phone.received) == 2)
 
@@ -77,7 +77,7 @@ async def test_while_the_page_waits_for_news_youre_looking_at_it(chat, phone):  
 async def test_what_athena_tells_you_by_itself_and_when_it_needs_your_ok(chat, phone):  # noqa: F811
     assert chat.channel is None  # no Telegram here: your devices, and the dashboard, are how it reaches you
     assert await chat.notify("📋 **Briefing**\n\nAll quiet.") is True
-    assert phone.received == [("normal", {"title": "Athena", "body": "📋 Briefing All quiet.", "url": "#chat",
+    assert phone.received == [("normal", {"title": "Athena", "body": "📋 Briefing All quiet.", "url": "#agents",
                                           "tag": "athena"})]  # fmt: skip
 
     # A task's request for your OK, answered on the dashboard.
@@ -87,9 +87,9 @@ async def test_what_athena_tells_you_by_itself_and_when_it_needs_your_ok(chat, p
     await until(lambda: len(phone.received) == 2)
     urgency, said = phone.received[1]
     assert urgency == "high" and said["title"] == "Athena needs your OK"
-    assert said["body"] == "For your task “Notes”: allow send_note?" and said["url"] == "#chat"
+    assert said["body"] == "For your task “Notes”: allow send_note?" and said["url"] == "#agents"
     async with client(chat) as http:
-        [request] = (await http.get("/api/chat")).json()["approvals"]
+        [request] = (await http.get("/api/agents")).json()["approvals"]
         assert request["why"] == "For your task “Notes”" and request["session"] is None
         await http.post(f"/api/approvals/{request['id']}", json={"allow": True})
     assert await asyncio.wait_for(asking, 2) is True
@@ -106,33 +106,50 @@ async def test_only_that_theres_something_new_if_youd_rather(chat, phone):  # no
 
 async def test_every_session_notifies_you_unless_you_mute_it(chat, phone):  # noqa: F811
     async with client(chat) as http:
-        await http.post("/api/chat/1/name", json={"name": "Job hunting"})
-        muted = await http.post("/api/chat/1/mute", json={"muted": True})
-        assert muted.json()["muted"] is True and (await http.get("/api/chat")).json()["sessions"][0]["muted"]
-        assert (await http.post("/api/chat/1/mute", json={"muted": "yes"})).status_code == 400
-        await http.post("/api/chat/1", json={"text": "Hello"})
+        await http.post("/api/agents/1", json={"name": "Job hunting"})
+        muted = await http.post("/api/agents/1", json={"muted": True})
+        assert muted.json()["muted"] is True and (await http.get("/api/agents")).json()["sessions"][0]["muted"]
+        assert (await http.post("/api/agents/1", json={"muted": "yes"})).status_code == 400
+        await http.post("/api/agents/1/messages", json={"text": "Hello"})
         await answered(http)
         assert await chat.notify("📋 **Find jobs**\n\nTwo new ones.", session=1) is False
         await asyncio.sleep(0.1)
         assert phone.received == []  # neither an answer nor what a task found there
 
-        await http.post("/api/chat/1/mute", json={"muted": False})
+        await http.post("/api/agents/1", json={"muted": False})
         assert await chat.notify("📋 **Find jobs**\n\nTwo new ones.", session=1) is True
         assert phone.received[-1][1] == {
             "title": "Athena · Job hunting",
             "body": "📋 Find jobs Two new ones.",
-            "url": "#chat/1",
+            "url": "#agents/1",
             "tag": "reply-1",
         }
 
         # What a task asks for your OK for always reaches you, from its session.
-        await http.post("/api/chat/1/mute", json={"muted": True})
+        await http.post("/api/agents/1", json={"muted": True})
         asking = asyncio.create_task(
             chat.reach.ask("send_note", {}, None, why="For your task “Find jobs”", timeout=5, session=1)
         )
         await until(lambda: len(phone.received) == 2)
-        assert phone.received[1][1]["url"] == "#chat/1"
-        [request] = (await http.get("/api/chat")).json()["approvals"]
+        assert phone.received[1][1]["url"] == "#agents/1"
+        [request] = (await http.get("/api/agents")).json()["approvals"]
         assert request["session"] == 1
         await http.post(f"/api/approvals/{request['id']}", json={"allow": False})
         assert await asyncio.wait_for(asking, 2) is False
+
+
+async def test_a_muted_agent_doesnt_message_you_in_telegram_either(chat, phone):  # noqa: F811
+    said = []
+
+    class Telegram:
+        async def tell(self, text, *, session=None):
+            said.append(text)
+
+    chat.channel = Telegram()
+    chat.history.set_muted(1, True)
+    assert await chat.notify("📋 **Jobs**\n\nNothing much.", session=1) is False
+    assert said == [] and phone.received == []
+    assert await chat.notify("Something for you.") is True and said == ["Something for you."]  # not an agent's
+    chat.history.set_muted(1, False)
+    assert await chat.notify("📋 **Jobs**\n\nTwo new ones.", session=1) is True
+    assert said[-1] == "📋 **Jobs**\n\nTwo new ones." and len(phone.received) == 2

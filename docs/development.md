@@ -63,11 +63,13 @@ uv run python -m athena.server_envs
 | `src/athena/memory/` | Memory: the store, embeddings, searching by words, text and the service with its tools |
 | `src/athena/documents.py`, `mac_documents.py` | Indexing your documents, and the read-only server on your Mac |
 | `src/athena/tasks/`, `clock.py` | Tasks: schedules, the store, the scheduler and the model's tools; the time it goes by |
-| `src/athena/cron.py`, `watching.py`, `triggers.py` | Cron schedules, what's watched, and events that start tasks |
+| `src/athena/dags/` | Agents and their DAGs: the DAG language (`spec.py`), what's kept (`store.py`), running one (`runner.py`) and the tasks every DAG ends with (`ends.py`), when they run (`scheduler.py`), the model's tools for them, the dashboard's API, and DAGs made from tasks of before |
+| `src/athena/gate.py` | Your messages first, between the tasks Athena does by itself |
+| `src/athena/cron.py`, `watching.py`, `triggers.py` | Cron schedules, what's watched, and events that start DAGs |
 | `src/athena/skills.py`, `claude_projects.py`, `project_files.py`, `github_repo.py` | Skills, and projects handed to Claude |
 | `src/athena/telegram_bot.py`, `channel.py`, `photos.py`, `formatting.py`, `siri.py` | Telegram, and Siri's endpoint |
 | `src/athena/dashboard.py`, `web/` | The dashboard: its API, and the page itself, plain HTML, CSS and JavaScript modules with no build step. `web/md.js` turns Markdown into the page's elements, never HTML, and `web/sw.js` shows notifications |
-| `src/athena/status.py`, `status_api.py`, `stats.py`, `alerts.py`, `timeline.py` | What Athena is doing, the status board's API, usage statistics, alerts, and what it did for the Activity tab |
+| `src/athena/status.py`, `status_api.py`, `stats.py`, `alerts.py`, `steps.py` | What Athena is doing, the status board's API, usage statistics, alerts, and what a run did, tool by tool |
 | `src/athena/doctor.py`, `evals.py`, `search_eval.py` | `athena doctor`, `athena eval` and the embeddings test |
 | `src/athena/resources/` | What comes with Athena: the example config and `.env`, the system prompt, the recommended servers' locks, the systemd units, the stopped alert and the Mac's scripts |
 | `docs/claude-projects/CLAUDE.md` | The guide for Claude's side of [Projects for Claude](claude-projects.md) |

@@ -52,9 +52,9 @@ async def test_reloading_applies_the_tools_settings_from_config_toml(services, m
     memory_and_tasks = {"remember", "search_memory", "read_document", "forget_memory"}
     tasks_and_skills = {
         "watch",
-        "schedule_task",
-        "list_tasks",
-        "change_task",
+        "trigger_task",
+        "change_dag",
+        "run_dag",
         "read_skill",
         "save_skill",
         "recent_work",
@@ -149,22 +149,22 @@ async def test_what_athena_tells_you_by_itself_goes_into_your_conversation(servi
     assert (message.text, message.channel, reply.text) == ("(Your task “Briefing” ran.)", "Athena", "All quiet.")
 
 
-async def test_forgetting_everything_forgets_what_tasks_found_but_keeps_them(services):
-    task = services.tasks.add("Inbox", "Check my inbox.", "30 7 * * *", [], created_by="you")
-    task.last_result, task.last_steps = (
-        "The bank wrote.",
-        [{"tool": "look", "given": "", "outcome": "ran", "said": "x"}],
-    )
-    services.tasks.store.save(task)
-    services.tasks.check_result = {"at": 1.0, "outcome": "told you", "said": "The bank wrote.", "steps": []}
-    watch = services.tasks.watches.add("my inbox", None, by="you")
-    services.tasks.watches.note(watch.id, "Told them about the bank.")
+async def test_forgetting_everything_forgets_what_runs_found_but_keeps_the_dags(services):
+    dags = services.dags
+    source = "with DAG(schedule='30 7 * * *'):\n    inbox = Task(prompt='Check my inbox.')\n"
+    dags.save(1, source)
+    dags.store.update(1, context="The bank wrote on Monday.")
+    run = dags.store.start_run(1, "manual", "", source)
+    dags.store.finish_task(dags.store.add_task(run.id, "inbox", 0, "running"), "success", "The bank wrote.", [])
+    dags.store.finish_run(run, "success", "The bank wrote.")
+    dags.check_result = {"at": 1.0, "outcome": "told you", "said": "The bank wrote.", "steps": []}
+    watch = dags.watches.add("my inbox", None, by="you")
+    dags.watches.note(watch.id, "Told them about the bank.")
 
     await services.forget_everything()
-    kept = services.tasks.store.get(task.id)
-    assert (kept.title, kept.last_result, kept.last_steps) == ("Inbox", "", [])
-    assert services.tasks.check_result is None
-    assert [(w.what, w.note) for w in services.tasks.watches.all()] == [("my inbox", "")]
+    assert dags.store.get(1).dag == source and dags.store.get(1).context == ""
+    assert dags.store.runs(1) == [] and dags.check_result is None
+    assert [(w.what, w.note) for w in dags.watches.all()] == [("my inbox", "")]
 
 
 async def test_the_prompt_says_what_mcp_servers_are_where_their_config_does(tmp_path):

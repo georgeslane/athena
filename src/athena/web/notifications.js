@@ -1,5 +1,5 @@
-// Notifications on this device: when Athena answers a message you sent on the dashboard, a task has news, in a
-// session you haven't muted, something stops working, or it needs your OK. They come through the browser's push
+// Notifications on this device: when Athena answers a message you sent on the dashboard, an agent has news, unless
+// you've muted it, something stops working, or it needs your OK. They come through the browser's push
 // service (push.py), which on an iPhone works for the dashboard added to your Home Screen.
 
 import { call, h, icon, toast } from "./core.js";
@@ -35,7 +35,7 @@ export async function setUpNotifications() {
   showBells();
 }
 
-// Whether this device could get notifications, but doesn't yet: the Chat tab offers to turn them on.
+// Whether this device could get notifications, but doesn't yet: an agent's chat offers to turn them on.
 export const canTurnOn = () => supported() && !push_.subscription && Notification.permission !== "denied";
 
 // Turn them on for this device, from a tap on ``button``: Safari only asks then.
@@ -55,7 +55,7 @@ export function bellLabel() {
 
 function showBells() {
   for (const el of document.querySelectorAll(".bell:not([data-session]), [data-bell-label]")) paint(el);
-  document.dispatchEvent(new Event("athena-notifications")); // for the Chat tab
+  document.dispatchEvent(new Event("athena-notifications")); // for an agent's chat
 }
 
 function paint(el) {
@@ -76,7 +76,7 @@ async function settings() {
     if (!dialog.open) dialog.showModal();
   };
   const close = h("button.button", { type: "button", text: "Close", onclick: () => dialog.close() });
-  const what = "Athena answers a message you sent here, a task has news, in a session you haven't muted, something stops working, or it needs your OK";
+  const what = "Athena answers a message you sent here, an agent you haven't muted has news, something stops working, or it needs your OK";
   if (!window.isSecureContext) {
     return draw(h("p", { text: "Notifications need the dashboard over HTTPS, as Tailscale Serve gives it: open it at your Pi's https:// address (see docs/dashboard.md)." }), h("div.tool-actions", {}, close));
   }
@@ -92,7 +92,7 @@ async function settings() {
   }
   if (push_.subscription) {
     return draw(
-      h("p", { text: `They're on for this device: you'll hear when ${what}. Not while you're looking at the dashboard, which shows it anyway. The bell in a chat mutes that session.` }),
+      h("p", { text: `They're on for this device: you'll hear when ${what}. Not while you're looking at the dashboard, which shows it anyway. The bell at the top of an agent mutes it.` }),
       h(
         "div.tool-actions",
         {},

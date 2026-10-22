@@ -38,7 +38,7 @@ const now_ = {
       label: h("span.label"),
       task: h("p.now-task"),
       footer: h("p.now-footer"),
-      more: h("a.now-more", { href: "#activity", text: "Everything it's done ›" }),
+      more: h("a.now-more", { href: "#agents", text: "Its agents, and what they've done ›" }),
     };
     const p = this.parts;
     this.el = h(
@@ -129,7 +129,7 @@ export function renderOverview() {
       ["session", "total"].map((period) =>
         h("button", {
           type: "button",
-          text: period === "session" ? "This session" : "All time",
+          text: period === "session" ? "The main agent" : "All time",
           "aria-pressed": String(state.show === period),
           onclick: () => {
             state.show = period;
@@ -148,8 +148,8 @@ export function renderOverview() {
 function usageCard(period, data) {
   const max = state.overview.model.context_window;
   const session = period === "session";
-  let aside = plural(data.sessions || 0, "session");
-  if (session) aside = `Session ${data.id} · since ${when(data.started)}`;
+  let aside = plural(data.sessions || 0, "agent");
+  if (session) aside = `Agent ${data.id} · since ${when(data.started)}`;
   else if (data.first) aside = `Since ${clock(data.first, { day: "numeric", month: "short", year: "numeric" })} · ${aside}`;
   return h(
     "section.card",
@@ -157,9 +157,9 @@ function usageCard(period, data) {
     h(
       "div.card-head",
       {},
-      h("h2", { text: session ? "This session" : "All time" }),
+      h("h2", { text: session ? "The main agent" : "All time" }),
       h("span.aside", { text: aside }),
-      session && h("div.actions", {}, h("button.button.small", { type: "button", text: "New session", onclick: newSession }))
+      session && h("div.actions", {}, h("button.button.small", { type: "button", text: "New agent", onclick: newSession }))
     ),
     h(
       "div.metrics",
@@ -176,7 +176,7 @@ function usageCard(period, data) {
       h("span.label", { text: "Tool calls by tool" }),
       data.tools.length
         ? h("ul.tool-bars", {}, data.tools.map((t) => toolBar(t, data.tools[0].calls)))
-        : h("p.empty", { text: session ? "None yet this session." : "None yet." })
+        : h("p.empty", { text: session ? "None yet in this agent." : "None yet." })
     )
   );
 }
@@ -203,7 +203,7 @@ function contextMeter(context, max) {
     h("div.bar", { class: share > 0.9 ? "full" : share > 0.7 ? "warn" : "" }, h("span", { style: { width: `${width}%` } })),
     h("p.hint", {
       text: tokens
-        ? "What Athena reads with your next message: its instructions, its tools and this session's conversation." +
+        ? "What Athena reads with your next message: its instructions, its tools and the main agent's conversation." +
           (max || state.overview.model.reachable !== true ? "" : " The model server didn't say its limit: set llm.context_window to show it.")
         : "It's measured after Athena's next reply.",
     })
@@ -257,7 +257,7 @@ function memoryCard(o) {
     h(
       "div.danger-zone",
       {},
-      h("p.hint", { text: "Forgetting everything deletes every memory, the conversation history and what's on the Activity tab." }),
+      h("p.hint", { text: "Forgetting everything deletes every memory, the conversation history and what agents' runs found and kept." }),
       h("button.button.danger", { type: "button", text: "Forget everything…", onclick: forgetEverything })
     )
   );
@@ -336,7 +336,7 @@ async function newSession(event) {
   try {
     state.overview = await call("POST", "/api/session", {});
     renderOverview();
-    toast(`Started session ${state.overview.session.id}. The conversation is cleared from Athena's context.`);
+    toast(`Started agent ${state.overview.session.id}, as the main one. Name it, and give it a DAG, on the Agents tab.`);
   } catch (e) {
     toast(e.message, true);
     button.disabled = false;
@@ -356,9 +356,9 @@ async function forgetEverything() {
         m.facts ? h("li", { text: plural(m.facts, "saved fact") }) : null,
         m.documents ? h("li", { text: `What's indexed of ${plural(m.documents, "document")}, which indexing again can add back` }) : null,
         h("li", { text: m.conversations ? `${plural(m.conversations, "past exchange")}, and the conversation history` : "The conversation history" }),
-        h("li", { text: "What it's done, on the Activity tab, and what tasks and checks found" })
+        h("li", { text: "What its agents' runs found and kept, and what checks noted" })
       ),
-      h("p", { text: "It also starts a new session. Usage statistics are kept. Type forget to confirm." }),
+      h("p", { text: "It also starts a new agent. The agents and their DAGs, and usage statistics, are kept. Type forget to confirm." }),
       typed,
     ],
     confirm: "Delete everything",
@@ -370,7 +370,7 @@ async function forgetEverything() {
   try {
     state.overview = await call("POST", "/api/forget", { confirm: "forget" });
     renderOverview();
-    toast("Every memory is deleted, and a new session has started.");
+    toast("Every memory is deleted, and a new agent has started.");
   } catch (e) {
     toast(e.message, true);
   }

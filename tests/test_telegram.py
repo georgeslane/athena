@@ -9,6 +9,7 @@ from telegram.ext import CallbackQueryHandler, MessageHandler
 from athena.agent import AgentResult
 from athena.approvals import Approvals
 from athena.config import TelegramConfig
+from athena.gate import Gate
 from athena.history import ConversationStore
 from athena.telegram_bot import TelegramBot
 
@@ -43,7 +44,7 @@ def make_bot(config, respond, allowed=(ME,)):
     config.telegram = TelegramConfig(bot_token="123456:TEST", allowed_user_ids=list(allowed))
     services = SimpleNamespace(
         config=config,
-        agent=SimpleNamespace(respond=respond),
+        agent=SimpleNamespace(respond=respond, gate=Gate()),
         rewarm=asyncio.Event(),
         history=ConversationStore(config.db_path),
         approvals=Approvals(),
@@ -257,7 +258,7 @@ async def test_session_starts_a_new_session(config):
         effective_message=SimpleNamespace(reply_text=reply_text), effective_chat=SimpleNamespace(id=1)
     )
     await bot.cmd_session(update, SimpleNamespace(bot=FakeBot()))
-    assert replies[0].startswith("Started session 7. I've cleared our conversation from my context.")
+    assert replies[0].startswith("Started a new agent (#7), as the main one")
     app = bot.build()
     names = {name for h in app.handlers[0] if hasattr(h, "commands") for name in h.commands}
     assert {"session", "reset"} <= names  # /reset still works, for anyone used to it
@@ -510,37 +511,38 @@ async def test_retry_takes_back_the_last_answer_and_asks_again(config):
     assert replies[-1].text == "There's nothing to try again in this session."
 
 
-def task_scheduler(config):
+def dag_scheduler(config, history):
     from athena.config import TasksConfig
-    from athena.tasks import Scheduler, TaskStore
+    from athena.dags.scheduler import Dags
+    from athena.dags.store import AgentStore
+    from athena.tools import ToolRegistry
 
-    history = ConversationStore(config.db_path)
-    agent = SimpleNamespace(answering_you=0, last_answered_you=float("-inf"), history=history)
-    return Scheduler(TasksConfig(), TaskStore(config.db_path), agent, timezone="Europe/London",
-                     channel=lambda: None, tools=lambda: [])  # fmt: skip
+    agent = SimpleNamespace(answering_you=0, last_answered_you=float("-inf"), history=history, gate=Gate())
+    return Dags(TasksConfig(), AgentStore(config.db_path), agent, timezone="Europe/London",
+                channel=lambda: None, tools=ToolRegistry())  # fmt: skip
 
 
-async def test_tasks_lists_them_with_buttons_to_run_pause_and_delete(config):
+async def test_dags_lists_them_with_buttons_to_run_pause_and_resume(config):
     bot = make_bot(config, None)
-    bot.s.tasks = scheduler = task_scheduler(config)
+    bot.s.dags = dags = dag_scheduler(config, bot.s.history)
     ctx = SimpleNamespace(bot=FakeBot(), args=[])
     update, replies = command_update()
-    await bot.cmd_tasks(update, ctx)
-    assert replies[-1].text.startswith("I've no tasks.")
+    await bot.cmd_dags(update, ctx)
+    assert replies[-1].text.startswith("No agent has a DAG yet.")
 
-    scheduler.add("Briefing", "Brief me.", "30 7 * * 1-5", [], created_by="you")
-    scheduler.add("Servers", "Find servers.", "0 10 * * sun", [], created_by="athena")
-    scheduler.pause(2)
-    await bot.cmd_tasks(update, ctx)
+    history = bot.s.history
+    history.rename(1, "Briefing")
+    dags.save(1, "with DAG(schedule='30 7 * * 1-5'):\n    brief = Task(prompt='Brief me.')\n")
+    servers = history.new_session("Servers").id
+    dags.save(servers, "with DAG(schedule='0 10 * * sun'):\n    look = Task(prompt='Find servers.')\n")
+    dags.pause(servers)
+    await bot.cmd_dags(update, ctx)
     lines = replies[-1].text.split("\n")
-    assert lines[0] == "Tasks I do by myself:"
-    assert lines[1].startswith("▶️ #1 Briefing: every weekday at 07:30 · next ")
-    assert lines[2] == "⏸ #2 Servers: every Sunday at 10:00"
+    assert lines[0] == "What each agent does by itself:"
+    assert lines[1].startswith("▶️ Briefing: every weekday at 07:30 · next ")
+    assert lines[2] == "⏸ Servers: paused"
     rows = replies[-1].kwargs["reply_markup"].inline_keyboard
-    assert [[b.text for b in row] for row in rows] == [
-        ["▶ Run #1", "⏸ Pause", "🗑 Delete"],
-        ["▶ Run #2", "⏯ Resume", "🗑 Delete"],
-    ]
+    assert [[b.text for b in row] for row in rows] == [["▶ Run Briefing", "⏸ Pause"], ["▶ Run Servers", "⏯ Resume"]]
 
     edits, answers = [], []
 
@@ -554,21 +556,21 @@ async def test_tasks_lists_them_with_buttons_to_run_pause_and_delete(config):
         query = SimpleNamespace(data=button.callback_data, answer=answer, edit_message_text=edit_message_text)
         return SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=user))
 
-    await bot.on_task_button(press(rows[0][2], user=STRANGER), ctx)
-    assert answers == ["Not allowed."] and len(scheduler.store.all()) == 2
-    await bot.on_task_button(press(rows[0][1]), ctx)  # pause #1
-    assert answers[-1] == "Paused" and scheduler.store.get(1).status == "paused"
-    assert edits[-1].split("\n")[1] == "⏸ #1 Briefing: every weekday at 07:30"
-    await bot.on_task_button(press(rows[1][1]), ctx)  # resume #2
-    assert scheduler.store.get(2).status == "active"
-    await bot.on_task_button(press(rows[1][2]), ctx)  # delete #2
-    assert answers[-1] == "Deleted" and scheduler.store.get(2) is None
-    await bot.on_task_button(press(rows[1][0]), ctx)  # it's gone
-    assert answers[-1] == "There's no task #2."
+    await bot.on_dag_button(press(rows[0][1], user=STRANGER), ctx)
+    assert answers == ["Not allowed."] and not dags.store.get(1).paused
+    await bot.on_dag_button(press(rows[0][1]), ctx)  # pause Briefing
+    assert answers[-1] == "Paused" and dags.store.get(1).paused
+    assert edits[-1].split("\n")[1] == "⏸ Briefing: paused"
+    await bot.on_dag_button(press(rows[1][1]), ctx)  # resume Servers
+    assert not dags.store.get(servers).paused
+    await bot.on_dag_button(press(rows[1][0]), ctx)  # run it
+    assert answers[-1] == "It'll run as soon as I'm free" and dags.queue[0].agent == servers
+    await bot.on_dag_button(press(rows[1][0]), ctx)  # again, while it waits
+    assert answers[-1] == "It's already waiting to run."
 
-    bot.s.tasks = None
-    await bot.cmd_tasks(update, ctx)
-    assert replies[-1].text.startswith("Tasks are switched off")
+    bot.s.config.tasks.enabled = False
+    await bot.cmd_dags(update, ctx)
+    assert replies[-1].text.startswith("Agents' DAGs are switched off")
 
 
 async def test_tasks_reach_you_through_telegram(config):

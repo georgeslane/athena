@@ -95,6 +95,11 @@ class Task:
         self.step = "Waiting until you've finished chatting"
         self._tracker._changed()
 
+    def waiting_for_task(self, what: str) -> None:
+        """Your message, waiting for what Athena's doing by itself to finish (gate.py)."""
+        self.step = f"Finishing {what} first"
+        self._tracker._changed()
+
     def using(self, tool: str) -> None:
         self.tools.append(tool)
         self.step = _TOOL_STEPS.get(tool, f"Using {tool}")

@@ -2,12 +2,9 @@
 
 import asyncio
 import gzip
-import json
 import sys
 import time
-from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -269,74 +266,6 @@ async def test_switching_thinking_on_short_or_off(athena):
             "error": "Thinking can be on, short, off, not 'lots'."
         }
         assert athena.config.llm.thinking == "short"
-
-
-async def test_tasks_from_the_dashboard(athena):
-    said = []
-
-    class Telegram:
-        chat_id = "111"
-
-        async def tell(self, text, *, session=None):
-            said.append(text)
-
-        async def ask(self, tool, args, summary, *, why, timeout, session=None):
-            return False
-
-    athena.channel = Telegram()
-    async with client(athena) as http:
-        listing = (await http.get("/api/tasks")).json()
-        assert listing["tasks"] == [] and listing["tools"] == ["forget_memory"]  # the tools that ask first
-        examples = [e["title"] for e in listing["examples"]]
-        assert examples == ["Morning briefing", "MCP servers worth adding", "Skills from habits", "Research"]
-        assert listing["quiet_minutes"] == 5
-
-        bad = await http.post("/api/tasks", json={"title": "X", "instructions": "Y", "schedule": "sometime"})
-        assert bad.status_code == 400 and "I don't understand the schedule" in bad.json()["error"]
-        bad = await http.post("/api/tasks", json={"title": "X", "instructions": "Y", "schedule": "now", "tools": "add"})
-        assert bad.status_code == 400
-
-        # You haven't been chatting, so it runs straight away, and tells you what it found.
-        new = {"title": "Sums", "instructions": "Work something out.", "schedule": "now", "tools": []}
-        listing = (await http.post("/api/tasks", json=new)).json()
-        [task] = listing["tasks"]
-        assert (task["title"], task["created_by"], task["when"]) == (
-            "Sums",
-            "you",
-            "once, as soon as you're not chatting",
-        )
-        await until(lambda: said)
-        assert said == ["📋 **Sums**\n\nAll done."]
-        await until(lambda: athena.tasks.store.get(task["id"]).status == "done")
-        [task] = (await http.get("/api/tasks")).json()["tasks"]
-        assert (task["status"], task["last_outcome"], task["last_result"]) == ("done", "told you", "All done.")
-
-        regular = {"title": "Daily", "instructions": "Check.", "schedule": "30 7 * * *", "tools": []}
-        listing = (await http.post("/api/tasks", json=regular)).json()
-        daily = listing["tasks"][1]
-        assert daily["status"] == "active" and daily["next_run"] > time.time()
-        paused = (await http.post(f"/api/tasks/{daily['id']}", json={"action": "pause"})).json()["tasks"][1]
-        assert paused["status"] == "paused" and paused["next_run"] is None
-        resumed = (await http.post(f"/api/tasks/{daily['id']}", json={"action": "resume"})).json()["tasks"][1]
-        assert resumed["status"] == "active"
-        assert (await http.post(f"/api/tasks/{daily['id']}", json={"action": "explode"})).status_code == 400
-
-        # Changing one: its title, instructions, schedule and the tools it may use without asking.
-        change = {"title": "Weekly", "instructions": "Check more.", "schedule": "0 9 * * 1", "tools": ["forget_memory"]}
-        changed = (await http.post(f"/api/tasks/{daily['id']}", json=change)).json()["tasks"][1]
-        assert (changed["title"], changed["instructions"], changed["when"], changed["allowed_tools"]) == (
-            "Weekly",
-            "Check more.",
-            "every Monday at 09:00",
-            ["forget_memory"],
-        )
-        bad = await http.post(f"/api/tasks/{daily['id']}", json={**change, "schedule": "sometime"})
-        assert bad.status_code == 400 and "I don't understand the schedule" in bad.json()["error"]
-        assert (await http.get("/api/tasks")).json()["tasks"][1]["title"] == "Weekly"  # left as it was
-        assert (await http.post("/api/tasks/nope", json={"action": "run"})).status_code == 404
-        assert (await http.delete(f"/api/tasks/{daily['id']}")).status_code == 200
-        assert [t["id"] for t in (await http.get("/api/tasks")).json()["tasks"]] == [task["id"]]
-        assert (await http.delete(f"/api/tasks/{daily['id']}")).status_code == 400  # already gone
 
 
 async def test_the_status_waits_for_a_change(athena):
@@ -760,87 +689,6 @@ async def test_skills_from_the_dashboard(athena):
 # -- the board: projects handed to Claude ------------------------------------------------------------------
 
 
-async def test_the_board_from_the_dashboard(athena, tmp_path):
-    from test_claude_projects import REPO, STORIES, Clock, FakeGitHub
-
-    from athena.claude_projects import BoardStore, ClaudeProjects, ClaudeProjectsConfig
-
-    async with client(athena) as http:
-        off = await http.get("/api/projects")
-        assert off.status_code == 409 and "switched off" in off.json()["error"]
-
-        github = FakeGitHub()
-        github.commit("main", {"CLAUDE.md": "How to work"})
-        cfg = ClaudeProjectsConfig(enabled=True, repo=REPO, token="good-token")
-        projects = ClaudeProjects(cfg, BoardStore(athena.config.db_path), http=github.client(), clock=Clock(github))
-        athena.builtins.running["claude_projects"] = projects
-        said = []
-
-        class Telegram:
-            chat_id = "111"
-
-            async def tell(self, text, *, session=None):
-                said.append(text)
-
-        athena.channel = Telegram()
-        project = await projects.hand_over({"title": "Bank statements", "summary": "Sum it up.", "stories": STORIES})
-        board = (await http.post("/api/projects/refresh", json={})).json()
-        assert board["repo"] == REPO and board["error"] is None and board["poll_minutes"] == 30
-        (shown,) = board["projects"]
-        assert (shown["title"], shown["status"], shown["number"], [s["id"] for s in shown["stories"]]) == (
-            "Bank statements",
-            "new",
-            1,
-            ["S1", "S2"],
-        )
-
-        # Restart, from the board.
-        board = (await http.post("/api/projects/restart", json={"folder": project.folder})).json()
-        assert github.events[-2:] == [("unlabeled", 1, "claude"), ("labeled", 1, "claude")]
-        assert (await http.post("/api/projects/restart", json={"folder": "nope"})).status_code == 400
-
-        branch = f"project/{project.folder}"
-        github.commit(branch, {f"{project.folder}/status.json": json.dumps({"status": "done", "summary": "Tested."})})
-        board = (await http.post("/api/projects/refresh", json={})).json()
-        assert board["projects"][0]["status"] == "done"
-        assert said == [f"✅ Claude has finished “Bank statements”: Tested. Merge it when you're happy.\n{project.url}"]
-        # In your chat too, so you can ask Athena about it.
-        assert athena.history.load(athena.history.current_chat)[-1] == {"role": "assistant", "content": said[0]}
-        assert (await http.get("/api/projects")).json()["projects"][0]["status"] == "done"
-
-        # More work, from the board: you wrote it, so it's not asked about again.
-        more = {
-            "folder": project.folder,
-            "summary": "Sharing.",
-            "stories": [{"title": "Export", "done_when": ["xlsx"]}],
-        }
-        board = (await http.post("/api/projects/extend", json=more)).json()
-        assert [s["id"] for s in board["projects"][0]["stories"]] == ["S1", "S2", "S3"]
-        assert "### S3: Export" in github.files(branch)[f"{project.folder}/Requirements.md"]
-        assert github.events[-1] == ("labeled", 1, "claude")
-        for bad in [{**more, "folder": "nope"}, {**more, "stories": []}, {**more, "summary": ""}]:
-            assert (await http.post("/api/projects/extend", json=bad)).status_code == 400
-
-        # Nothing about you goes to Claude, even what you typed yourself.
-        pushed = len(github.events)
-        personal = {**more, "notes": "Email it to me at sam@mailbox.co.uk"}
-        refused = await http.post("/api/projects/extend", json=personal)
-        assert refused.status_code == 400
-        assert refused.json()["error"] == (
-            "That has an email address (“sam@mailbox.co.uk”) in it. "
-            "Take that out: Claude gets only what anyone could ask."
-        )
-        assert len(github.events) == pushed and "sam@" not in github.files(branch)[f"{project.folder}/Requirements.md"]
-
-        github.token = "revoked"
-        board = (await http.post("/api/projects/refresh", json={})).json()
-        assert board["error"].startswith("GitHub refused the token") and board["projects"]  # the last board stays
-        assert (await http.get("/api/projects/refresh")).status_code == 405
-
-
-# -- private words ----------------------------------------------------------------------------------
-
-
 async def test_private_words_from_the_memory_tab(athena):
     async with client(athena) as http:
         shown = (await http.get("/api/memory")).json()["privacy"]
@@ -892,38 +740,6 @@ async def test_paths_it_doesnt_know_are_refused(athena):
 
 
 # -- watching, on the Tasks tab ---------------------------------------------------------------------
-
-
-async def test_watching_from_the_tasks_tab(athena):
-    async with client(athena) as http:
-        tasks = (await http.get("/api/tasks")).json()
-        assert tasks["watching"]["items"] == [] and tasks["watching"]["every_minutes"] == 30
-        assert tasks["triggers"] == {"on": False, "events": {}}  # no TRIGGERS_TOKEN here
-
-        soon = (datetime.now(ZoneInfo("Europe/London")) + timedelta(days=3)).date().isoformat()
-        added = (await http.post("/api/watches", json={"what": "the parcel from Amazon", "until": soon})).json()
-        (item,) = added["watching"]["items"]
-        assert (item["what"], item["by"]) == ("the parcel from Amazon", "you")
-        assert datetime.fromtimestamp(item["until"], ZoneInfo("Europe/London")).date().isoformat() == soon
-        for bad in ({"what": "", "until": soon}, {"what": "x", "until": "lots"}, {"what": "x", "until": "2020-01-01"}):
-            assert (await http.post("/api/watches", json=bad)).status_code == 400
-
-        # Changing it: to check my inbox with no end.
-        changed = (await http.post(f"/api/watches/{item['id']}", json={"what": "my inbox", "until": None})).json()
-        assert [(i["what"], i["until"]) for i in changed["watching"]["items"]] == [("my inbox", None)]
-        assert (await http.post(f"/api/watches/{item['id']}", json={"what": ""})).status_code == 400
-        assert (await http.post("/api/watches/99", json={"what": "x", "until": None})).status_code == 404
-
-        await http.post("/api/watches/check", json={})  # the scheduler checks as soon as it's free
-        await until(lambda: athena.tasks.check_result is not None)
-        assert (await http.get("/api/tasks")).json()["watching"]["last"]["outcome"] in ("told you", "nothing new")
-
-        gone = (await http.delete(f"/api/watches/{item['id']}")).json()
-        assert gone["watching"]["items"] == []
-        assert (await http.delete(f"/api/watches/{item['id']}")).status_code == 404
-
-
-# -- security updates, on the Tools tab ---------------------------------------------------------------
 
 
 async def test_a_servers_vulnerable_dependencies_show_on_its_card(athena):

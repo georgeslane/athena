@@ -17,14 +17,14 @@ self.addEventListener("push", (event) => {
       tag: said.tag || undefined,
       renotify: Boolean(said.tag),
       icon: "icon-180.png",
-      data: { url: said.url || "#chat" },
+      data: { url: said.url || "#agents" },
     })
   );
 });
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const hash = new URL(event.notification.data.url || "#chat", self.location.origin).hash || "#chat";
+  const hash = new URL(event.notification.data.url || "#agents", self.location.origin).hash || "#agents";
   event.waitUntil(
     (async () => {
       const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });

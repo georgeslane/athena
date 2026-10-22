@@ -2,17 +2,19 @@
 Athena's working by itself, and looked back on after they're used."""
 
 import asyncio
+import json
 import time
 
 import pytest
 from conftest import FakeLLMServer, completion
-from test_tasks import FakeChannel
+from test_dags import FakeChannel
 
 from athena.agent import Agent, Background
 from athena.config import TasksConfig
+from athena.dags.scheduler import Dags
+from athena.dags.store import AgentStore
 from athena.history import ConversationStore
 from athena.skills import NO_CHANGE, Skills, SkillStore, check, diff
-from athena.tasks import NOTHING, Scheduler, TaskStore
 from athena.tools import ToolError, ToolRegistry, Turn, begin_turn
 
 TRIP = (
@@ -200,15 +202,17 @@ def athena(config, memory, skills):
         agent = Agent(config.agent, server.client(config.llm), tools, skills.history, memory)
         agent.prompt_extra = skills.index
         channel = channel or FakeChannel()
-        scheduler = Scheduler(
+        agent.gate.grace = 0.0
+        scheduler = Dags(
             TasksConfig(quiet_minutes=0),
-            TaskStore(config.db_path),
+            AgentStore(config.db_path),
             agent,
             timezone="Europe/London",
             channel=lambda: channel,
-            tools=tools.all,
+            tools=tools,
             poll_seconds=0.01,
         )
+        agent.directory = scheduler
         agent.on_answered = scheduler.after_answer
         return agent, scheduler, server, channel
 
@@ -275,8 +279,11 @@ async def test_looking_back_suggests_a_better_skill(athena, skills):
     (suggestion,) = skills.store.suggestions()
     assert suggestion.source == "looking back at your skill “Trip plans”, after our chat"
     assert channel.said == [
-        "✏️ After our chat, I've suggested a change to your skill “Trip plans”. "
-        "Approve it, or not, on the dashboard's Skills tab."
+        (
+            "✏️ After our chat, I've suggested a change to your skill “Trip plans”. "
+            "Approve it, or not, on the dashboard's Skills tab.",
+            None,
+        )
     ]
     assert skills.history.load("111")[-1]["content"].startswith("Here's your trip")  # the review isn't in your chat
     assert scheduler.reviews == []  # and it isn't looked back on itself
@@ -315,46 +322,31 @@ async def test_reviews_wait_until_youve_finished_chatting(athena, skills, config
         await scheduler.stop()
 
 
-async def test_a_task_suggests_memories_and_skills_and_says_so(athena, skills, memory):
-    agent, scheduler, server, channel = athena(
-        [
-            completion(None, [("remember", {"fact": "George's train to work is the 7:52."})]),
-            completion(
-                None,
-                [
-                    (
-                        "save_skill",
-                        {"name": "Commute", "description": "Trains to work", "instructions": "Check the 7:52."},
-                    )
-                ],
-            ),
-            completion("The 7:52 is on time."),
-        ]
-    )
-    task = scheduler.add("Commute", "Check my train.", "now", [], created_by="you")
-    await scheduler.run(task)
-    assert channel.said == [
-        "📋 **Commute**\n\nThe 7:52 is on time.\n\n"
-        "🧠 I've suggested a memory and a skill for you to review on the dashboard."
-    ]
+async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills, memory):
+    def model(body):
+        last = body["messages"][-1]
+        text = last["content"] if isinstance(last["content"], str) else ""
+        if "Task “commute”" in text:
+            return completion(None, [("remember", {"fact": "George's train to work is the 7:52."})])
+        if last["role"] == "tool" and "remember" in json.dumps(body["messages"][-2]):
+            calls = [("save_skill", {"name": "Commute", "description": "Trains to work", "instructions": "7:52."})]
+            return completion(None, calls)
+        if last["role"] == "tool":
+            return completion("The 7:52 is on time.")
+        if "Write George a short summary" in text:
+            return completion("The 7:52 is on time. I suggested a memory and a skill.")
+        return completion("NO CHANGES")
+
+    agent, scheduler, server, channel = athena(model)
+    scheduler.history.rename(1, "Commute")
+    scheduler.save(1, "with DAG():\n    commute = Task(prompt='Check my train.')\n")
+    await scheduler.runner.run(1, "manual")
     (fact,) = memory.store.suggestions()
-    assert (fact.text, fact.source) == ("George's train to work is the 7:52.", "your task “Commute”")
+    assert (fact.text, fact.source) == ("George's train to work is the 7:52.", "the DAG of your agent “Commute”")
     assert memory.store.count().get("fact", 0) == 0  # not remembered until you approve it
     assert skills.store.named("Commute") is None and len(skills.store.suggestions()) == 1
-
-    # With nothing to report, a skill it suggested is still worth a word.
-    _, scheduler, _, channel = athena(
-        [
-            completion(None, [("save_skill", {"name": "Habits", "description": "Weekly", "instructions": "Steps."})]),
-            completion(NOTHING),
-        ]
-    )
-    task = scheduler.add("Skills from habits", "Look back.", "now", [], created_by="you")
-    await scheduler.run(task)
-    assert channel.said == [
-        "📋 **Skills from habits**: nothing new to tell you.\n\n"
-        "🧠 I've suggested a skill for you to review on the dashboard."
-    ]
+    summary = next(b for b in server.requests if "Write George a short summary" in json.dumps(b["messages"][-1]))
+    assert "It suggested a memory and a skill, to approve or not" in summary["messages"][-1]["content"]
 
 
 async def test_background_work_can_be_limited_to_some_tools(config, memory, skills):

@@ -10,23 +10,28 @@ The page talks to Athena with JSON:
 
   GET    /api/overview          status, usage statistics, memory and connections
   GET    /api/status            what Athena is doing; ?wait=25&after=<version> waits for a change
-  POST   /api/session           start a new session
-  GET    /api/chat              your sessions, newest first, whether Athena's answering you, and what's waiting for
-                                your OK; POST starts a new conversation
-  GET    /api/chat/<id>         a session's messages: the last page, or ?before=<message id>, and its tasks
-  POST   /api/chat/<id>         {"text", "allow": [tools], "attachments": [{"name", "data": base64}]}: send a message
-                                or a command in a session, which makes it the current one; /api/chat/stop stops the
-                                answer
-  DELETE /api/chat/<id>         delete a session, what was said in it, and its tasks
-  POST   /api/chat/<id>/tools   {"allowed": [tools]}: the tools that may run without asking in a session
-  POST   /api/chat/<id>/name    {"name"}: what a session's called, or "" for after your first message in it
-  POST   /api/chat/<id>/mute    {"muted": bool}: whether a session notifies your devices
+  POST   /api/session           start a new agent, as the main one
+  GET    /api/agents            your agents, the one used last first, whether Athena's answering you, and what's
+                                waiting for your OK; POST {"name"} starts a new one
+  GET    /api/agents/<id>       an agent's messages: the last page, or ?before=<message id>, and its settings
+  POST   /api/agents/<id>       change any of {"name", "model", "muted", "guidance", "context"}
+  DELETE /api/agents/<id>       delete an agent: what was said to it, its DAG and its runs
+  POST   /api/agents/<id>/messages  {"text", "allow": [tools], "attachments": [{"name", "data": base64}]}: send a
+                                message or a command, which makes the agent the main one; /api/agents/stop stops
+                                the answer
+  POST   /api/agents/<id>/tools {"allowed": [tools]}: the tools that may run without asking when you talk to it
+  GET    /api/agents/<id>/dag   its DAG: the file, its tasks, when it runs, and what's proposed for it; POST
+                                {"source"} saves a new file, /dag/check {"source"} checks one as it's written, and
+                                /dag/run, /dag/pause, /dag/resume and /dag/stop do what they say
+  GET    /api/agents/<id>/runs  its last 10 runs, newest first
+  GET    /api/runs/<id>         a run: what each of its tasks was given, said and did, and what it proposed
+  POST   /api/proposals/<id>    {"approve": true | false}: what to do with a change a run proposed
+  GET    /api/models            the models the model server has, for an agent to use
   GET    /api/photos/<name>     a photo sent in a message
   POST   /api/approvals/<id>    {"allow": true | false}: answer a request for your OK, here or in Telegram
   POST   /api/presence          {"looking": bool}: whether you're looking at the page, so devices aren't notified
   GET    /api/push              the key a device needs for notifications; POST {"subscription"} turns them on
                                 for one, /api/push/off {"endpoint"} turns them off, /api/push/test sends one
-  GET    /api/activity          what Athena did, newest first: ?before=<id>, ?kinds=message,task
   POST   /api/thinking          {"mode": "on" | "short" | "off"}: how much the model thinks before answering
   POST   /api/forget            {"confirm": "forget"}: delete every memory
   GET    /api/tools             every tool, with its settings
@@ -36,22 +41,13 @@ The page talks to Athena with JSON:
   POST   /api/tools/<id>/approve  let the model use tools held back because they changed: {"tools": {name: fingerprint}}
   POST   /api/tools/on-demand   {"tools": [names]}: the tools the model finds when it needs them, not in every prompt
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
-  GET    /api/tasks             what Athena does by itself, and what a new task can use
-  POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools", "session"}, where "session" is
-                                a session's id, or a name for a new one
-  POST   /api/tasks/<id>        change one: {"title", "instructions", "schedule", "tools", "session"}, or
-                                {"action": "run" | "pause" | "resume" | "stop"}
-  POST   /api/watches           watch for something: {"what", "until": "YYYY-MM-DD" or null for no end}
+  GET    /api/watches           what's watched, and the hourly checks; POST {"what", "key", "until": "YYYY-MM-DD"
+                                or null for no end} watches for something
   POST   /api/watches/<id>      change it, the same way; /api/watches/check checks on everything now
   DELETE /api/watches/<id>      stop watching it
-  DELETE /api/tasks/<id>        delete one
   GET    /api/memory            what's in memory, the documents indexed from your Mac, and suggested memories
   POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning and by words
   POST   /api/memory/suggestions/<id>  {"action": "approve" | "discard", "text"}: a memory a task suggested
-  GET    /api/projects          the board: projects handed to Claude, as epics of stories
-  POST   /api/projects/refresh  read them from GitHub now
-  POST   /api/projects/restart  {"folder"}: start Claude again on one
-  POST   /api/projects/extend   {"folder", "summary", "stories", "notes"}: more work on one, for Claude
   GET    /api/skills            skills, and what Athena's suggested
   POST   /api/skills            add one: {"name", "description", "body"}
   POST   /api/skills/<id>       change one: {"name", "description", "body"}, or {"restore": version id}
@@ -90,6 +86,7 @@ from urllib.parse import urlsplit
 from athena.approvals import Approval
 from athena.config import Config
 from athena.config_files import EnvFile
+from athena.dags.api import AgentsAPI
 from athena.documents import DocumentsError
 from athena.history import Busy
 from athena.memory import KINDS, relevance
@@ -97,15 +94,13 @@ from athena.push import Push
 from athena.settings import Running, Settings, SettingsError, hand_written
 from athena.status import StatusFeed
 from athena.status_api import wait_seconds
-from athena.tasks import EXAMPLES, NEVER_UNASKED, Scheduler
-from athena.timeline import KEEP_DAYS, PAGE
-from athena.timeline import KINDS as ACTIVITIES
 from athena.tool_search import NAMES as META_TOOLS
-from athena.tools import ToolError, matches_any
+from athena.tools import matches_any
 from athena.triggers import PREFIX as HOOKS
 from athena.triggers import Hooks
-from athena.watching import end_of
 from athena.webserver import HTTPError, Request, Response, Server
+from athena.webserver import json_body as _body
+from athena.webserver import json_response as _json
 
 if TYPE_CHECKING:
     from athena.app import Services
@@ -118,12 +113,12 @@ ASSETS = Path(__file__).parent / "assets"
 FILES = {  # what the page is made of, by path
     "/": (WEB / "index.html", "text/html; charset=utf-8"),
     "/dashboard.css": (WEB / "dashboard.css", "text/css; charset=utf-8"),
-    # The script, as modules: dashboard.js starts it, core.js, steps.js, md.js and notifications.js have what the
-    # tabs share, and each tab has its own.
+    # The script, as modules: dashboard.js starts it, core.js, steps.js, md.js, graph.js and notifications.js have
+    # what the tabs share, and each tab has its own: the Agents tab's chat, DAG and runs in modules of their own.
     **{
         f"/{name}.js": (WEB / f"{name}.js", "text/javascript; charset=utf-8")
-        for name in ("dashboard", "core", "steps", "md", "notifications")
-        + ("status", "chat", "activity", "tasks", "memory", "skills", "board", "tools")
+        for name in ("dashboard", "core", "steps", "md", "graph", "notifications")
+        + ("status", "agents", "chat", "dag", "runs", "watching", "memory", "skills", "tools")
     },
     "/sw.js": (WEB / "sw.js", "text/javascript; charset=utf-8"),  # shows notifications (notifications.js)
     "/manifest.webmanifest": (WEB / "manifest.webmanifest", "application/manifest+json"),
@@ -147,7 +142,7 @@ SIGN_IN_WINDOW = 600.0
 MODEL_CHECK_SECONDS = 60.0
 USED_DAYS = 30  # how far back the Tools tab counts each tool's use
 LOOKING_SECONDS = 40.0  # after the page last said you're looking at it, how long you're taken still to be
-SENDING = re.compile(r"/api/chat/\d+")  # a message in the chat, which can come with photos and files
+SENDING = re.compile(r"/api/agents/\d+/messages")  # a message to an agent, which can come with photos and files
 MAX_SENDING_BYTES = 40_000_000  # what they're sent as, base64, comes to: about 30 MB of them
 SENDING_SECONDS = 300.0  # to send them, on a slow connection
 
@@ -158,18 +153,24 @@ ROUTES = (
     ("GET", r"/api/overview", "_get_overview"),
     ("GET", r"/api/status", "_get_status"),
     ("POST", r"/api/session", "_new_session"),
+    ("GET", r"/api/agents", "_get_agents"),
+    ("POST", r"/api/agents", "_new_agent"),
+    ("POST", r"/api/agents/stop", "_stop_chat"),
+    ("GET", r"/api/agents/(?P<agent>\d+)", "_get_agent"),
+    ("POST", r"/api/agents/(?P<agent>\d+)", "_change_agent"),
+    ("DELETE", r"/api/agents/(?P<agent>\d+)", "_delete_agent"),
+    ("POST", r"/api/agents/(?P<agent>\d+)/messages", "_send"),
+    ("POST", r"/api/agents/(?P<agent>\d+)/tools", "_allow_in_session"),
+    ("GET", r"/api/agents/(?P<agent>\d+)/dag", "_get_dag"),
+    ("POST", r"/api/agents/(?P<agent>\d+)/dag", "_save_dag"),
+    ("POST", r"/api/agents/(?P<agent>\d+)/dag/check", "_check_dag"),
+    ("POST", r"/api/agents/(?P<agent>\d+)/dag/(?P<action>run|pause|resume|stop)", "_dag_action"),
+    ("GET", r"/api/agents/(?P<agent>\d+)/runs", "_get_runs"),
+    ("GET", r"/api/runs/(?P<run>\d+)", "_get_run"),
+    ("POST", r"/api/proposals/(?P<proposal>\d+)", "_decide"),
+    ("GET", r"/api/models", "_get_models"),
     ("POST", r"/api/thinking", "_set_thinking"),
     ("POST", r"/api/forget", "_forget"),
-    ("GET", r"/api/activity", "_get_activity"),
-    ("GET", r"/api/chat", "_get_chat"),
-    ("POST", r"/api/chat", "_new_chat"),
-    ("POST", r"/api/chat/stop", "_stop_chat"),
-    ("GET", r"/api/chat/(?P<session>\d+)", "_get_chat_session"),
-    ("POST", r"/api/chat/(?P<session>\d+)", "_send"),
-    ("DELETE", r"/api/chat/(?P<session>\d+)", "_delete_session"),
-    ("POST", r"/api/chat/(?P<session>\d+)/tools", "_allow_in_session"),
-    ("POST", r"/api/chat/(?P<session>\d+)/name", "_rename_session"),
-    ("POST", r"/api/chat/(?P<session>\d+)/mute", "_mute_session"),
     ("GET", r"/api/photos/(?P<name>[0-9a-f]{32}\.[a-z]+)", "_get_photo"),
     ("POST", r"/api/approvals/(?P<which>[0-9a-f]+)", "_approve"),
     ("POST", r"/api/presence", "_presence"),
@@ -190,10 +191,9 @@ ROUTES = (
     ("POST", r"/api/memory/suggestions/(?P<which>.*)", "_decide_memory"),
     ("POST", r"/api/privacy", "_set_private_words"),
     ("POST", r"/api/privacy/check", "_check_privacy"),
-    (None, r"/api/projects(?:/(?P<action>refresh|restart|extend))?", "_projects"),
     (None, r"/api/skills(?:/(?P<which>.*))?", "_skills"),
     (None, r"/api/documents/(?P<action>.*)", "_documents"),
-    (None, r"/api/tasks(?:/(?P<task>.*))?", "_tasks"),
+    ("GET", r"/api/watches", "_get_watches"),
     ("POST", r"/api/watches", "_add_watch"),
     ("POST", r"/api/watches/check", "_check_watches"),
     ("POST", r"/api/watches/(?P<which>\d+)", "_change_watch"),
@@ -202,7 +202,7 @@ ROUTES = (
 _ROUTES = [(method, re.compile(path), handler) for method, path, handler in ROUTES]
 
 
-class DashboardServer(Server):
+class DashboardServer(AgentsAPI, Server):
     def __init__(self, services: Services):
         cfg = services.config.dashboard
         super().__init__(cfg.host, cfg.port)
@@ -210,7 +210,8 @@ class DashboardServer(Server):
         self.cfg = cfg
         self.feed = StatusFeed(services.status)
         self.settings = Settings(services.config.path, services.config.env_path)
-        self.hooks = Hooks(services.config.triggers, services.tasks)  # /hooks/<event> (triggers.py)
+        # /hooks/<event> (triggers.py): events that start agents' DAGs.
+        self.hooks = Hooks(services.config.triggers, services.dags if services.config.tasks.enabled else None)
         self._files: dict[str, tuple[bytes, bytes, str]] = {}  # path: (body, gzipped, etag)
         self._failures: deque[float] = deque()
         self._lock = asyncio.Lock()  # one change at a time
@@ -404,7 +405,7 @@ class DashboardServer(Server):
             raise HTTPError(400, "That device doesn't take notifications: turn them on first.")
         name = self.s.config.agent.assistant_name
         said = f"Notifications are on. You'll hear when {name} answers you, a task has news, or it needs your OK."
-        if not await push.send(name, said, url="#chat", tag="test", only=endpoint):
+        if not await push.send(name, said, url="#agents", tag="test", only=endpoint):
             raise HTTPError(502, "The push service didn't take it. Turn notifications off and on again.")
         return _json({"sent": True})
 
@@ -477,98 +478,12 @@ class DashboardServer(Server):
             self.s.mcp.approvals.forget(name)  # a server added later with this name starts afresh
         return response
 
-    def _get_activity(self, request: Request, method: str) -> Response:
-        """What Athena did, newest first: ?before=<id> for what came before, ?kinds=message,task for only those."""
-        if self.s.timeline is None:
-            raise HTTPError(409, "Athena isn't keeping a timeline.")
-        before = request.query.get("before")
-        kinds = [k for k in request.query.get("kinds", "").split(",") if k]
-        if (before is not None and not before.isdigit()) or any(k not in ACTIVITIES for k in kinds):
-            raise HTTPError(400, f"Ask with ?before=<an id> and ?kinds= some of {', '.join(ACTIVITIES)}.")
-        entries = self.s.timeline.page(int(before) if before else None, kinds, PAGE + 1)
-        return _json(
-            {"entries": [e.as_dict() for e in entries[:PAGE]], "more": len(entries) > PAGE, "keep_days": KEEP_DAYS}
-        )
-
-    def _get_chat(self, request: Request, method: str) -> Response:
-        return _json(self.s.chat.state())
-
-    def _new_chat(self, request: Request, method: str) -> Response:
-        """A new conversation, as the current session."""
-        try:
-            session = self.s.chat.new_session()
-        except Busy as exc:
-            raise HTTPError(409, str(exc)) from None
-        return _json({**self.s.chat.state(), "session": session.id})
-
-    async def _stop_chat(self, request: Request, method: str) -> Response:
-        return _json({"stopped": await self.s.chat.stop()})
-
-    def _get_chat_session(self, request: Request, method: str, session: str) -> Response:
-        before = request.query.get("before")
-        if before is not None and not before.isdigit():
-            raise HTTPError(400, "Ask with ?before=<a message's id>.")
-        try:
-            return _json(self.s.chat.session(int(session), int(before) if before else None))
-        except KeyError:
-            raise HTTPError(404, "There's no such session.") from None
-
-    async def _send(self, request: Request, method: str, session: str) -> Response:
-        """{"text", "allow": [tools allowed without asking for this message], "attachments": [photos and files]}: a
-        command says what it did."""
-        body = _body(request)
-        try:
-            said = await self.s.chat.send(
-                int(session), body.get("text"), body.get("allow") or [], body.get("attachments") or []
-            )
-        except Busy as exc:
-            raise HTTPError(409, str(exc)) from None
-        except KeyError:
-            raise HTTPError(404, "There's no such session.") from None
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        return _json({**self.s.chat.state(), "said": said})
-
-    async def _delete_session(self, request: Request, method: str, session: str) -> Response:
-        try:
-            await self.s.chat.delete(int(session))
-        except Busy as exc:
-            raise HTTPError(409, str(exc)) from None
-        except KeyError:
-            raise HTTPError(404, "There's no such session.") from None
-        return _json(self.s.chat.state())
-
-    def _rename_session(self, request: Request, method: str, session: str) -> Response:
-        return self._change_session(session, lambda: self.s.chat.rename(int(session), _body(request).get("name")))
-
-    def _mute_session(self, request: Request, method: str, session: str) -> Response:
-        return self._change_session(session, lambda: self.s.chat.mute(int(session), _body(request).get("muted")))
-
-    def _change_session(self, session: str, change: Any) -> Response:
-        try:
-            change()
-        except KeyError:
-            raise HTTPError(404, "There's no such session.") from None
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        return _json(self.s.chat.session(int(session)))
-
     def _get_photo(self, request: Request, method: str, name: str) -> Response:
         photo = self.s.history.photos.load(name)
         if photo is None:
             raise HTTPError(404, "That photo isn't kept any more.")
         # Named by what's in it, so it never changes: kept by your browser only, not anything in between.
         return Response(photo.data, photo.mime, headers={"Cache-Control": "private, max-age=31536000, immutable"})
-
-    def _allow_in_session(self, request: Request, method: str, session: str) -> Response:
-        """{"allowed": [tools]}: what may run without asking in a session."""
-        try:
-            self.s.chat.allow_in_session(int(session), _body(request).get("allowed"))
-        except KeyError:
-            raise HTTPError(404, "There's no such session.") from None
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        return _json(self.s.chat.session(int(session)))
 
     def _approve(self, request: Request, method: str, which: str) -> Response:
         """{"allow": true or false}: answer a request for your OK."""
@@ -603,98 +518,6 @@ class DashboardServer(Server):
         found = self.s.privacy.find([text])
         return _json({"findings": [{"kind": f.kind, "text": "" if f.secret else f.text} for f in found]})
 
-    def _tasks(self, request: Request, method: str, task: str) -> Response:
-        scheduler = self.s.tasks
-        if scheduler is None:
-            raise HTTPError(409, "Tasks are switched off ([tasks] enabled = false in config.toml).")
-        try:
-            if not task and method == "GET":
-                return _json(self.tasks())
-            if not task and method == "POST":
-                body = _body(request)
-                scheduler.add(*_task_fields(body), created_by="you", session=self._task_session(body))
-                return _json(self.tasks())
-            if not task.isdigit():
-                raise HTTPError(404, "There's no task like that.")
-            if method == "DELETE":
-                scheduler.delete(int(task))
-                return _json(self.tasks())
-            if method == "POST":
-                body = _body(request)
-                action = body.get("action")
-                if action is None:
-                    scheduler.change(int(task), *_task_fields(body), session=self._task_session(body))
-                elif action == "stop":
-                    scheduler.stop_running()
-                elif action in ("run", "pause", "resume"):
-                    getattr(scheduler, "run_now" if action == "run" else action)(int(task))
-                else:
-                    raise ValueError('Say what to do: {"action": "run" | "pause" | "resume" | "stop"}.')
-                return _json(self.tasks())
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        raise HTTPError(405, "There's nothing like that here.")
-
-    def _task_session(self, body: dict[str, Any]) -> int | None:
-        """The session a task's to run in: {"session": its id, or a name for a new one}; None for the current one."""
-        session = body.get("session")
-        if isinstance(session, str):
-            fields = _task_fields(body)  # a new session for a task that won't do would be left empty
-            if not session.strip() or not fields[0].strip() or not fields[1].strip():
-                raise ValueError("A task needs a title and instructions, and a new session a name.")
-            return self.s.history.new_session(session, current=False).id
-        if session is not None and (isinstance(session, bool) or not isinstance(session, int)):
-            raise ValueError('Say which session it runs in: {"session": its id}, or a name for a new one.')
-        return session
-
-    def _scheduler(self) -> Scheduler:
-        if self.s.tasks is None:
-            raise HTTPError(409, "Tasks are switched off ([tasks] enabled = false in config.toml).")
-        return self.s.tasks
-
-    def _add_watch(self, request: Request, method: str) -> Response:
-        scheduler, body = self._scheduler(), _body(request)
-        assert scheduler.watches is not None
-        try:
-            scheduler.watches.add(str(body.get("what") or ""), self._until(body), by="you")
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        scheduler.wake()
-        return _json(self.tasks())
-
-    def _change_watch(self, request: Request, method: str, which: str) -> Response:
-        scheduler, body = self._scheduler(), _body(request)
-        assert scheduler.watches is not None
-        if scheduler.watches.get(int(which)) is None:
-            raise HTTPError(404, f"Nothing's watched as #{which}.")
-        try:
-            scheduler.watches.change(int(which), str(body.get("what") or ""), self._until(body))
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        return _json(self.tasks())
-
-    def _until(self, body: dict[str, Any]) -> float | None:
-        """When something's watched until, from {"until": "YYYY-MM-DD"}, the end of that day; null for no end."""
-        until = body.get("until")
-        if until is None:
-            return None
-        if not isinstance(until, str):
-            raise ValueError("Give the day as YYYY-MM-DD, or null for no end.")
-        return end_of(until, self._scheduler().tz)
-
-    def _check_watches(self, request: Request, method: str) -> Response:
-        self._scheduler().check_now()
-        return _json(self.tasks())
-
-    def _stop_watching(self, request: Request, method: str, which: str) -> Response:
-        scheduler = self._scheduler()
-        assert scheduler.watches is not None
-        try:
-            scheduler.watches.remove(int(which))
-        except ValueError as exc:
-            raise HTTPError(404, str(exc)) from None
-        return _json(self.tasks())
-
     async def _memory_suggestion(self, which: str, body: dict[str, Any]) -> dict[str, Any]:
         memory = self.s.memory
         if not which.isdigit():
@@ -720,41 +543,6 @@ class DashboardServer(Server):
         else:
             raise HTTPError(400, 'Say what to do: {"action": "approve" | "discard"}.')
         return self.memory()
-
-    async def _projects(self, request: Request, method: str, action: str) -> Response:
-        projects = self.s.builtins.get("claude_projects")
-        if projects is None:
-            why = self.s.builtins.problems.get("claude_projects")
-            off = f"Projects for Claude can't start: {why}." if why else "Projects for Claude are switched off."
-            raise HTTPError(409, f"{off} Set them up on the Tools tab.")
-        if action == "" and method == "GET":
-            return _json(projects.board())
-        if action == "refresh" and method == "POST":
-            return _json(await self.s.check_projects() or projects.board())
-        if action == "extend" and method == "POST":
-            body = _body(request)
-            folder = str(body.get("folder") or "")
-            project = next((p for p in projects.projects if p.folder == folder and p.pr in ("open", "merged")), None)
-            if project is None:
-                raise HTTPError(400, f"There's no project {folder} on the board.")
-            sent = {k: body.get(k) for k in ("summary", "stories", "notes")}
-            verdict = self.s.privacy.check("extend_claude_project", sent, asks=True)
-            if verdict.refused:
-                raise HTTPError(
-                    400, f"That has {verdict.describe()} in it. Take that out: Claude gets only what anyone could ask."
-                )
-            try:
-                await projects.extend(project, body)
-            except ToolError as exc:
-                raise HTTPError(400, str(exc)) from None
-            return _json(projects.board())
-        if action == "restart" and method == "POST":
-            try:
-                await projects.restart(str(_body(request).get("folder") or ""))
-            except ToolError as exc:
-                raise HTTPError(400, str(exc)) from None
-            return _json(projects.board())
-        raise HTTPError(405, "There's nothing like that here.")
 
     def _skills(self, request: Request, method: str, which: str) -> Response:
         skills = self.s.skills
@@ -888,7 +676,7 @@ class DashboardServer(Server):
         return {
             "skills": [skills.describe(s) for s in skills.store.all()],
             "suggestions": [skills.describe_suggestion(s) for s in skills.store.suggestions()],
-            "reviews": self.s.tasks is not None,  # skills are looked back on after they're used
+            "reviews": self.s.config.tasks.enabled,  # skills are looked back on after they're used
         }
 
     async def _change(self, change: Any) -> Response:
@@ -924,7 +712,7 @@ class DashboardServer(Server):
             "version": self.feed.version,
             "now": time.time(),
             "status": dataclasses.asdict(self.feed.snapshot),
-            # Enough for the page to know when to ask for more: the Chat tab's badge, and whether to fetch it again.
+            # Enough for the page to know when to ask for more: the Agents tab's badge, and whether to fetch it again.
             "chat": {
                 "current": self.s.history.session.id,
                 "busy": chat.busy,
@@ -976,28 +764,6 @@ class DashboardServer(Server):
                 "memories": len(self.s.memory.store.suggestions()),
                 "skills": len(self.s.skills.store.suggestions()),
             },
-        }
-
-    def tasks(self) -> dict[str, Any]:
-        scheduler = self.s.tasks
-        assert scheduler is not None
-        asks = sorted(t.name for t in self.s.tools.all() if t.needs_confirmation and t.name not in NEVER_UNASKED)
-        history, tasks = self.s.history, scheduler.store.all()
-        return {
-            "tasks": [scheduler.describe(t) for t in tasks],
-            # Where they can run: your sessions, the one used last first, and those they're in.
-            "sessions": [
-                {"id": s.id, "title": s.title}
-                for s in history.sessions(also={t.session_id for t in tasks if t.session_id is not None})
-            ],
-            "current": history.session.id,
-            "tools": asks,  # tools that ask first, which a task may be allowed to use without asking
-            "examples": EXAMPLES,
-            "quiet_minutes": scheduler.cfg.quiet_minutes,
-            "watching": scheduler.watching(),
-            # Events that start tasks, at /hooks/<event> (triggers.py): which tasks wait for each, and whether
-            # the token that lets them in is set.
-            "triggers": {"on": self.hooks.on, "events": scheduler.waiting_for()},
         }
 
     def tools(self) -> dict[str, Any]:
@@ -1126,32 +892,9 @@ class DashboardServer(Server):
         return Response(body, FILES[path][1], headers=headers)
 
 
-def _json(payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> Response:
-    return Response(json.dumps(payload, ensure_ascii=False), "application/json", status, headers or {})
-
-
 def _tokens(schema: dict[str, Any]) -> int:
     """Roughly how many tokens a tool's schema takes in the prompt: about four characters each."""
     return -(-len(json.dumps(schema, ensure_ascii=False)) // 4)
-
-
-def _body(request: Request) -> dict[str, Any]:
-    try:
-        body = json.loads(request.body or b"{}")
-    except ValueError:
-        raise HTTPError(400, "That isn't JSON.") from None
-    if not isinstance(body, dict):
-        raise HTTPError(400, "Send a JSON object.")
-    return body
-
-
-def _task_fields(body: dict[str, Any]) -> tuple[str, str, str, list[str]]:
-    """A task's title, instructions, schedule and the tools it may use without asking, as the page sends them."""
-    tools = body.get("tools") or []
-    if not isinstance(tools, list):
-        raise ValueError("Send the tools it may use without asking as a list of names.")
-    title, instructions, schedule = (str(body.get(key) or "") for key in ("title", "instructions", "schedule"))
-    return title, instructions, schedule, tools
 
 
 def _skill_body(request: Request) -> dict[str, str]:

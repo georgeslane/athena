@@ -6,7 +6,7 @@ Every [alerts] every_minutes it checks:
   - there's room left on the drive its data is on
 
 Once something has failed after_failures checks in a row, so a blip doesn't bother you, you
-get one message about it, and another when it works again. Each goes on the timeline too.
+get one message about it, and another when it works again.
 
 When Athena itself stops, it can't tell you: resources/systemd/athena-stopped.service does that
 (resources/tell_stopped.py), which systemd starts when Athena gives up restarting.
@@ -22,7 +22,6 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from athena.integrations import BUILTINS
-from athena.timeline import ALERT, Timeline
 
 if TYPE_CHECKING:
     from athena.app import Services
@@ -95,12 +94,10 @@ class HealthMonitor:
         cfg: AlertsConfig,
         check: Callable[[], Awaitable[Health]],
         tell: Callable[[str], Awaitable[bool]],
-        timeline: Timeline | None = None,
     ):
         self.cfg = cfg
         self.check = check
         self.tell = tell  # sends you a message: False if it couldn't
-        self.timeline = timeline
         self.failing: dict[str, int] = {}  # checks failed in a row, by key
         self.told: dict[str, str] = {}  # what you've been told isn't working: key -> what it is
         self._loop: asyncio.Task[None] | None = None
@@ -154,8 +151,3 @@ class HealthMonitor:
             self.told.update((key, what) for key, what, _ in broke)
             for key, _ in fixed:
                 self.told.pop(key, None)
-            if self.timeline:
-                for _, what, why in broke:
-                    self.timeline.add(ALERT, f"{what} isn't working", "problem", said=why)
-                for _, what in fixed:
-                    self.timeline.add(ALERT, f"{what} is working again", "fixed")
