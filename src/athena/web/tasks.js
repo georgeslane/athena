@@ -1,12 +1,12 @@
 // The Tasks tab: what Athena does by itself.
 
 import { ask, call, clock, h, icon, isoDay, plural, state, toast } from "./core.js";
+import { stepList } from "./steps.js";
 
 // -- tasks: what Athena does by itself ---------------------------------------------------------------
 
 const tasks_ = { timer: null };
 const TASK_STATES = { active: "Scheduled", paused: "Paused", done: "Done", running: "Working on it" };
-const MARKS = { ran: "✓", failed: "✗", declined: "–" }; // how each step a run took went
 // Schedules to start from, in the task form: what each is called, and how it's written.
 const WHEN = [
   ["Now", "now"],
@@ -103,34 +103,6 @@ function taskCard(task) {
     task.event ? trigger(task.event) : null,
     last,
     h("div.tool-actions", {}, actions)
-  );
-}
-
-// What a run did: each tool it used, what it was given and what came back, and whether it worked.
-function stepList(steps, key) {
-  if (!steps || !steps.length) return null;
-  const io = (label, text) => (text ? h("div.step-io", {}, h("span.label", { text: label }), h("pre", { text })) : null);
-  return h(
-    "div.steps",
-    {},
-    h("span.label", { text: `What it did: ${plural(steps.length, "step")}` }),
-    h(
-      "ol.step-list",
-      {},
-      steps.map((s, i) =>
-        h(
-          "li.step",
-          { "data-outcome": s.outcome },
-          h(
-            "details",
-            { "data-keep": `${key}-${i}` },
-            h("summary", {}, h("span.step-mark", { text: MARKS[s.outcome] || "·", title: s.outcome }), h("code.step-tool", { text: s.tool }), s.outcome === "ran" ? null : h("span.step-outcome", { text: s.outcome }), h("span.step-given", { text: s.given })),
-            io("Given", s.given),
-            io("Got back", s.said || "(nothing)")
-          )
-        )
-      )
-    )
   );
 }
 

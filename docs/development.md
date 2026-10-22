@@ -66,7 +66,7 @@ uv run python -m athena.server_envs
 | `src/athena/skills.py`, `claude_projects.py`, `project_files.py`, `github_repo.py` | Skills, and projects handed to Claude |
 | `src/athena/telegram_bot.py`, `channel.py`, `photos.py`, `formatting.py`, `siri.py` | Telegram, and Siri's endpoint |
 | `src/athena/dashboard.py`, `web/` | The dashboard: its API, and the page itself, plain HTML, CSS and JavaScript modules with no build step |
-| `src/athena/status.py`, `status_api.py`, `stats.py`, `alerts.py` | What Athena is doing, the status board's API, usage statistics and alerts |
+| `src/athena/status.py`, `status_api.py`, `stats.py`, `alerts.py`, `timeline.py` | What Athena is doing, the status board's API, usage statistics, alerts, and what it did for the Activity tab |
 | `src/athena/doctor.py`, `evals.py`, `search_eval.py` | `athena doctor`, `athena eval` and the embeddings test |
 | `src/athena/resources/` | What comes with Athena: the example config and `.env`, the system prompt, the recommended servers' locks, the systemd units, the stopped alert and the Mac's scripts |
 | `docs/claude-projects/CLAUDE.md` | The guide for Claude's side of [Projects for Claude](claude-projects.md) |

@@ -23,6 +23,7 @@ from athena.photos import Photo, label, with_photos
 from athena.privacy import Privacy, refusal, warning
 from athena.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 from athena.status import StatusTracker, Task, describe_error
+from athena.timeline import MESSAGE, Timeline, ToolEvent, steps
 from athena.tool_search import USE_TOOL, unwrap
 from athena.tools import ToolError, ToolRegistry, Turn, begin_turn
 
@@ -31,8 +32,8 @@ log = logging.getLogger(__name__)
 # Asks the user to approve a tool call: (tool name, arguments, what it will do if the
 # tool can say) -> approved?
 ConfirmFn = Callable[[str, dict[str, Any], str | None], Awaitable[bool]]
-# After each tool call: the tool, its arguments, what it gave back, and what happened (RAN, FAILED or DECLINED).
-ToolEventFn = Callable[[str, dict[str, Any], str, str], Awaitable[None]]
+# After each tool call: what it was given and gave back, what happened, and whether it needed approval.
+ToolEventFn = Callable[[ToolEvent], Awaitable[None]]
 
 WINDOW_SECONDS = 600.0  # how long the model's context window, as its server says, is taken to stay the same
 
@@ -117,6 +118,8 @@ class Agent:
         self.on_answered: Callable[[AgentResult, Background | None], None] | None = None
         # Looks through what each tool would send for personal details and secrets (privacy.py).
         self.privacy: Privacy | None = None
+        # Where your messages, and what was done for them, are noted for the dashboard (timeline.py).
+        self.timeline: Timeline | None = None
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._compact_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._compacting: dict[str, asyncio.Task[None]] = {}  # compacting after an answer, by chat
@@ -205,27 +208,33 @@ class Agent:
 
     async def _run_tool(
         self, call: ToolCall, confirm: ConfirmFn | None, task: Task, only: frozenset[str] | None = None
-    ) -> tuple[str, str]:
-        """Run a tool call. Returns what the model is told, and what happened: RAN, FAILED or DECLINED."""
+    ) -> ToolEvent:
+        """Run a tool call. Returns what the model is told, what happened (RAN, FAILED or DECLINED), and whether it
+        was asked for approval and what the privacy check found."""
+        args = call.arguments or {}
         tool = self.tools.get(call.name)
         if tool is None:
-            return f"Error: there is no tool called '{call.name}'.", FAILED
+            return ToolEvent(call.name, args, f"Error: there is no tool called '{call.name}'.", FAILED)
         if only is not None and call.name not in only:
-            return f"Error: only {', '.join(sorted(only))} can be used now.", FAILED
+            return ToolEvent(call.name, args, f"Error: only {', '.join(sorted(only))} can be used now.", FAILED)
         if call.arguments is None:
-            return f"Error: the arguments were not valid JSON: {call.raw_arguments[:200]}", FAILED
+            return ToolEvent(
+                call.name, args, f"Error: the arguments were not valid JSON: {call.raw_arguments[:200]}", FAILED
+            )
         verdict = self.privacy.check(tool.name, call.arguments, asks=tool.needs_confirmation) if self.privacy else None
+        flagged = verdict.describe() if verdict and verdict.findings else ""
         if verdict and verdict.refused:
-            return f"Error: {refusal(verdict)}", FAILED
+            return ToolEvent(tool.name, args, f"Error: {refusal(verdict)}", FAILED, flagged=flagged)
         if tool.needs_confirmation:
             if confirm is None:
-                return "Error: this action needs the user's approval, which can't be requested here.", FAILED
+                said = "Error: this action needs the user's approval, which can't be requested here."
+                return ToolEvent(tool.name, args, said, FAILED, flagged=flagged)
             summary = None
             if tool.preview:
                 try:
                     summary = await asyncio.wait_for(tool.preview(call.arguments), self.cfg.tool_timeout_seconds)
                 except Exception as exc:  # nothing has been done, and the user hasn't been asked
-                    return self._tool_error(call.name, exc), FAILED
+                    return ToolEvent(tool.name, args, self._tool_error(call.name, exc), FAILED, flagged=flagged)
             if verdict and verdict.findings:
                 summary = warning(verdict) + (f"\n{summary}" if summary else "")
             try:
@@ -235,18 +244,21 @@ class Agent:
                 log.warning("Confirmation request failed: %s", exc)
                 approved = False
             if not approved:
-                return "The user declined this action. Don't retry it unless they ask.", DECLINED
+                said = "The user declined this action. Don't retry it unless they ask."
+                return ToolEvent(tool.name, args, said, DECLINED, asked=True, flagged=flagged)
+        asked = tool.needs_confirmation
         task.using(tool.name)
         try:
             result = await asyncio.wait_for(tool.handler(call.arguments), self.cfg.tool_timeout_seconds)
         except Exception as exc:
-            return self._tool_error(call.name, exc), FAILED
+            return ToolEvent(tool.name, args, self._tool_error(call.name, exc), FAILED, asked=asked, flagged=flagged)
         result = result if isinstance(result, str) else json.dumps(result, default=str)
         limit = self.cfg.max_tool_result_chars
         if len(result) > limit:
             result = result[:limit] + f"\n[...truncated {len(result) - limit} characters]"
         # An MCP server's own errors come back as text starting "Error:" (see mcp_manager.result_to_text).
-        return result or "(no output)", FAILED if result.startswith("Error:") else RAN
+        outcome = FAILED if result.startswith("Error:") else RAN
+        return ToolEvent(tool.name, args, result or "(no output)", outcome, asked=asked, flagged=flagged)
 
     def _tool_error(self, name: str, exc: Exception) -> str:
         """What the model is told when a tool fails. Call it from the `except` block."""
@@ -373,6 +385,12 @@ class Agent:
             shown = text or (label(len(photos)) if photos else "")  # a photo without a caption
             task = self.status.begin(background.label if background else shown)
             record = QueryRecord(session=self.history.session.id, channel=channel or self.status.channel)
+            # Your messages go on the timeline here; what Athena does by itself, where it's done (tasks/).
+            noting = background is None and self.timeline is not None
+            taken, collect = steps()
+            if noting:
+                on_tool = _both(collect, on_tool)
+            result: AgentResult | None = None
             try:
                 result = await self._respond(chat_id, text, task, confirm, on_tool, note, record, background, photos)
             except BaseException as exc:  # including cancellation, so the board never sticks on "working"
@@ -381,6 +399,8 @@ class Agent:
                 raise
             finally:
                 self._record(record)
+                if noting:
+                    self._note(shown, record, result, taken)
             task.finish()
         if result.saved and self.on_saved:
             self.on_saved()
@@ -414,13 +434,32 @@ class Agent:
             self.chatting.clear()
 
     def _record(self, record: QueryRecord) -> None:
+        record.seconds = time.time() - record.started  # for the timeline too
         if not self.stats:
             return
-        record.seconds = time.time() - record.started
         try:
             self.stats.record(record)
         except Exception:  # statistics mustn't get in the way of an answer
             log.exception("Couldn't record usage statistics")
+
+    def _note(self, text: str, record: QueryRecord, result: AgentResult | None, taken: list[dict[str, str]]) -> None:
+        """Put your message, and how it was answered, on the timeline."""
+        assert self.timeline is not None
+        outcome = "answered"
+        if record.error:
+            outcome = "stopped" if record.error == "Stopped" else f"failed: {record.error}"
+        try:
+            self.timeline.add(
+                MESSAGE,
+                text,
+                outcome,
+                said=result.text if result and not record.error else "",
+                channel=record.channel,
+                seconds=record.seconds,
+                steps=taken,
+            )
+        except Exception:  # like the statistics, it mustn't get in the way of an answer
+            log.exception("Couldn't note the message on the timeline")
 
     async def _chat(
         self, record: QueryRecord, messages: list[dict[str, Any]], schemas: Any, thinking: str | None = None
@@ -508,17 +547,19 @@ class Agent:
                     # use_tool runs a tool found when needed: as that tool, for everything but the model's own record.
                     run = unwrap(call) if call.name == USE_TOOL else call
                     if isinstance(run, str):
-                        output, outcome, run = run, FAILED, call
+                        event = ToolEvent(call.name, call.arguments or {}, run, FAILED)
                     else:
-                        output, outcome = await self._run_tool(run, confirm, task, only)
-                    result.tools_used.append(run.name)
-                    record.tools.append((run.name, outcome))
+                        event = await self._run_tool(run, confirm, task, only)
+                    output = event.output
+                    result.tools_used.append(event.tool)
+                    record.tools.append((event.tool, event.outcome))
                     # What a tool was given and gave back can be personal, and the journal keeps it after
                     # "forget everything": so only with --verbose.
-                    log.info("tool %s: %s", run.name, outcome)
-                    log.debug("tool %s(%s) -> %s", run.name, run.raw_arguments[:200], output[:200].replace("\n", " "))
+                    log.info("tool %s: %s", event.tool, event.outcome)
+                    given = json.dumps(event.args)[:200]
+                    log.debug("tool %s(%s) -> %s", event.tool, given, output[:200].replace("\n", " "))
                     if on_tool:
-                        await on_tool(run.name, run.arguments or {}, output, outcome)
+                        await on_tool(event)
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
             else:
                 # Out of tool rounds: ask for a final answer with tools switched off.
@@ -533,3 +574,12 @@ class Agent:
             result.transcript = [*messages, {"role": "assistant", "content": result.text}]
         result.elapsed = time.monotonic() - started
         return result
+
+
+def _both(first: ToolEventFn, then: ToolEventFn | None) -> ToolEventFn:
+    async def on_tool(event: ToolEvent) -> None:
+        await first(event)
+        if then:
+            await then(event)
+
+    return on_tool

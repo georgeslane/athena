@@ -37,6 +37,7 @@ const now_ = {
       label: h("span.label"),
       task: h("p.now-task"),
       footer: h("p.now-footer"),
+      more: h("a.now-more", { href: "#activity", text: "Everything it's done ›" }),
     };
     const p = this.parts;
     this.el = h(
@@ -51,7 +52,7 @@ const now_ = {
         h("span.ring")
       ),
       h("div", {}, h("div.now-top", {}, p.pill, p.time), p.headline, p.sub),
-      h("div.now-detail", {}, h("div.meander", { "aria-hidden": "true" }), p.label, p.task, p.footer)
+      h("div.now-detail", {}, h("div.meander", { "aria-hidden": "true" }), p.label, p.task, p.footer, p.more)
     );
     this.update();
     return this.el;
@@ -111,6 +112,7 @@ const now_ = {
     p.footer.textContent = footer;
     p.footer.className = "now-footer" + (footerClass ? ` ${footerClass}` : "");
     p.footer.hidden = !footer;
+    p.more.hidden = state_ !== "idle" || !s.last_finished;
   },
 };
 
@@ -254,7 +256,7 @@ function memoryCard(o) {
     h(
       "div.danger-zone",
       {},
-      h("p.hint", { text: "Forgetting everything deletes every memory and the conversation history." }),
+      h("p.hint", { text: "Forgetting everything deletes every memory, the conversation history and what's on the Activity tab." }),
       h("button.button.danger", { type: "button", text: "Forget everything…", onclick: forgetEverything })
     )
   );
@@ -351,7 +353,8 @@ async function forgetEverything() {
         {},
         m.facts ? h("li", { text: plural(m.facts, "saved fact") }) : null,
         m.documents ? h("li", { text: `What's indexed of ${plural(m.documents, "document")}, which indexing again can add back` }) : null,
-        h("li", { text: m.conversations ? `${plural(m.conversations, "past exchange")}, and the conversation history` : "The conversation history" })
+        h("li", { text: m.conversations ? `${plural(m.conversations, "past exchange")}, and the conversation history` : "The conversation history" }),
+        h("li", { text: "What it's done, on the Activity tab, and what tasks and checks found" })
       ),
       h("p", { text: "It also starts a new session. Usage statistics are kept. Type forget to confirm." }),
       typed,

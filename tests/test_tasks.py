@@ -17,6 +17,7 @@ from athena.llm import LLMReply
 from athena.status import StatusTracker
 from athena.tasks import NOTHING, Schedule, ScheduleError, Scheduler, TaskStore
 from athena.tasks import scheduler as scheduler_module
+from athena.timeline import Timeline
 from athena.tools import Tool, ToolError, ToolRegistry
 from athena.watching import WatchStore
 
@@ -158,6 +159,7 @@ def athena(config, memory, tmp_path):
             on_ran=lambda: ran.append(1),
             poll_seconds=0.01,
             watches=WatchStore(config.db_path),
+            timeline=Timeline(config.db_path),
         )
         for tool in scheduler.tools():
             tools.add(tool)
@@ -171,6 +173,7 @@ def athena(config, memory, tmp_path):
             looked=looked,
             ran=ran,
             status=status,
+            timeline=scheduler.timeline,
         )
 
     return make

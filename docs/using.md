@@ -34,7 +34,7 @@ Athena keeps the conversation going, so each reply can build on the last. All of
 - **A session** is everything since you last started one: send `/session`, or press **New session** on the dashboard. The conversation is cleared from the model's context, and Athena carries on with its memories. Every exchange is kept in memory, so it can still search earlier sessions.
 - **Compacting** keeps a long conversation going without filling the context. Once it's `max_history_messages` long (40), or an answer fills `compact_at` of the context window (80%), Athena has the model summarise all but the last two exchanges, in the background. From then on the model sees the summary, then the messages since. `/compact` does it straight away.
 - **Context**, on the dashboard, is what Athena reads with your next message: the system prompt, the tools' descriptions and this session's conversation. The limit comes from the model server. If yours doesn't say, set `llm.context_window`.
-- **Forget everything**, on the dashboard's Status tab, deletes every memory and the conversation history, empties Athena's folder, and forgets what tasks and checks last found. The tasks and what's watched stay. It starts a new session. Usage statistics stay, as they're only counts and timings.
+- **Forget everything**, on the dashboard's Status tab, deletes every memory and the conversation history, empties Athena's folder, and forgets what tasks and checks last found and everything on the Activity tab. The tasks and what's watched stay. It starts a new session. Usage statistics stay, as they're only counts and timings.
 
 ## Prompt caching
 

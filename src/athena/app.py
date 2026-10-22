@@ -33,6 +33,7 @@ from athena.stats import UsageStats
 from athena.status import StatusTracker
 from athena.status_api import StatusServer
 from athena.tasks import Scheduler, TaskStore
+from athena.timeline import ATHENA, Timeline
 from athena.tool_approvals import ToolApprovals
 from athena.tools import Tool, ToolRegistry
 from athena.watching import WatchStore
@@ -99,6 +100,7 @@ class Services:
     status_api: StatusServer | None
     builtins: Builtins = field(default_factory=Builtins)
     stats: UsageStats | None = None
+    timeline: Timeline | None = None  # what Athena did, for the dashboard's Activity tab
 
     def __post_init__(self) -> None:
         # Set to have the model server read the prompt again now, e.g. after the tools change.
@@ -117,6 +119,7 @@ class Services:
                 tools=self.tools.all,
                 on_ran=self.rewarm.set,  # your chat has the report in it now
                 watches=WatchStore(self.config.db_path),  # what it keeps an eye on for you (watching.py)
+                timeline=self.timeline,
             )
             for tool in self.tasks.tools():
                 self.tools.add(tool)
@@ -144,7 +147,7 @@ class Services:
         # Messages you when something Athena needs stops working (alerts.py).
         self.alerts = None
         if self.config.alerts.enabled:
-            self.alerts = HealthMonitor(self.config.alerts, lambda: check_health(self), self._alert)
+            self.alerts = HealthMonitor(self.config.alerts, lambda: check_health(self), self._alert, self.timeline)
         # After the memory and task tools, in this order, so the tools' order (and the prompt) stays the same.
         self.tools.add_provider(lambda: self.builtins.tools)
         self.tools.add_provider(self.mcp.tools)
@@ -180,6 +183,8 @@ class Services:
             self.tasks.start()
         if self.alerts:
             self.alerts.start()
+        if self.timeline:
+            self.timeline.add(ATHENA, f"{self.config.agent.assistant_name} started", "started")
         self._projects = asyncio.create_task(self._watch_projects(), name="claude-projects")
         self._security = asyncio.create_task(self.security.forever(), name="security-updates")
 
@@ -279,6 +284,8 @@ class Services:
         self.history.close()
         if self.stats:
             self.stats.close()
+        if self.timeline:
+            self.timeline.close()
 
     # -- changes, from Telegram and the dashboard ---------------------------------------------
 
@@ -336,8 +343,8 @@ class Services:
         return session
 
     async def forget_everything(self) -> Session:
-        """Delete every memory, the conversation history, the code's workspace and what tasks found, and start a new
-        session. Usage statistics, and the tasks themselves, stay."""
+        """Delete every memory, the conversation history, the code's workspace, what tasks found and the timeline,
+        and start a new session. Usage statistics, and the tasks themselves, stay."""
         if self.tasks:
             self.tasks.stop_running()  # it would save what it's doing after everything's deleted
             self.tasks.reviews.clear()  # they hold what was said
@@ -352,6 +359,8 @@ class Services:
             await asyncio.to_thread(clear_workspace, self.config)  # what code made from what was said
             if self.tasks:
                 await asyncio.to_thread(self.tasks.forget)  # what tasks found, and the steps they took
+            if self.timeline:
+                await asyncio.to_thread(self.timeline.clear)
         self.rewarm.set()
         return session
 
@@ -404,6 +413,7 @@ def build_services(cfg: Config) -> Services:
     llm = LLMClient(cfg.llm)
     history = ConversationStore(cfg.db_path, cfg.agent.max_history_messages)
     stats = UsageStats(cfg.db_path)
+    timeline = Timeline(cfg.db_path)
 
     tools = ToolRegistry()
     tools.on_demand = list(cfg.tools.on_demand)
@@ -440,6 +450,7 @@ def build_services(cfg: Config) -> Services:
         status=status,
         stats=stats,
     )
+    agent.timeline = timeline
     return Services(
         cfg,
         llm,
@@ -453,4 +464,5 @@ def build_services(cfg: Config) -> Services:
         status_api,
         Builtins.build(cfg),
         stats,
+        timeline,
     )

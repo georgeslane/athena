@@ -695,6 +695,45 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .until input[type="date"] { width: auto; min-height: 40px; }
 .until input:disabled { opacity: 0.5; }
 
+/* Activity: what Athena did, by day, newest first, each opening to its steps. */
+.now-more { display: inline-block; margin-top: 8px; font-size: 13px; font-weight: 600; color: var(--accent); text-decoration: none; }
+.now-more:hover { color: var(--accent-hover); }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.filters button { min-height: 32px; padding: 4px 13px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.filters button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.activity-day + .activity-day { margin-top: 18px; }
+.activity-day > .label { display: block; margin-bottom: 4px; }
+.activity { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.entry { min-width: 0; border-top: 1px solid var(--border); }
+.activity > .entry:first-child { border-top: 0; }
+.entry summary, .entry-row { display: grid; grid-template-columns: 3em 8px minmax(0, 1fr); gap: 0 10px; align-items: start; padding: 9px 6px; border-radius: 10px; }
+.entry summary { list-style: none; cursor: pointer; }
+.entry summary::-webkit-details-marker { display: none; }
+.entry summary:hover { background: var(--surface-2); }
+.entry-time { padding-top: 1px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.entry-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--idle); }
+.entry-dot[data-tone="bad"] { background: var(--failed); }
+.entry-dot[data-tone="approval"] { background: var(--approval); }
+.entry-dot[data-tone="quiet"] { background: var(--faint); }
+.entry-main { display: grid; gap: 2px; min-width: 0; }
+.entry-title { font-size: 14.5px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.entry details[open] > summary .entry-title { display: block; }
+.entry-kind { margin-right: 7px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.entry-sub { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.entry-outcome { font-weight: 600; }
+.entry-dot[data-tone="bad"] + .entry-main .entry-outcome { color: var(--failed); }
+.entry-dot[data-tone="approval"] + .entry-main .entry-outcome { color: var(--approval); }
+.entry-body { padding: 0 6px 12px calc(3em + 34px); min-width: 0; }
+.entry-body > * { min-width: 0; }
+.entry-body .task-said, .entry-body .step summary, .entry-body .step-io pre { background: var(--surface-2); }
+.activity.nested { margin: 0 0 6px calc(3em + 18px); }
+.activity.nested > .entry:first-child { border-top: 1px solid var(--border); }
+.more { display: flex; justify-content: center; margin-top: 12px; }
+@media (max-width: 719px) {
+  .entry-body { padding-left: 6px; }
+  .activity.nested { margin-left: 0; }
+}
+
 /* What a task's run, or a check, did: the tools it used, each opening to what went in and came back. */
 .steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 10px; }
 .step-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
@@ -705,6 +744,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .step[data-outcome="declined"] .step-mark, .step[data-outcome="declined"] .step-outcome { color: var(--approval); }
 .step-tool { flex: none; font-weight: 600; }
 .step-outcome { flex: none; font-size: 12px; font-weight: 600; }
+.step-approval { flex: none; font-size: 12px; color: var(--muted); }
+.step-flagged { margin: 6px 0 0 26px; font-size: 12.5px; color: var(--approval); }
 .step-given { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
 .step-io { display: grid; gap: 3px; margin: 6px 0 4px 26px; }
 .step-io pre { margin: 0; padding: 7px 9px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); font: 12px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
