@@ -6,11 +6,11 @@ Send any message, a [photo](#photos), or a PDF or text file (see [Files](tools.m
 
 | Command | What it does |
 |---|---|
-| `/session` | Start a new session: a new conversation, which the model starts afresh. Memories are kept, earlier conversations can still be searched, and the dashboard can carry them on. `/reset` does the same. |
+| `/new` | Start a new agent, as the main one: a new conversation, which the model starts afresh. Memories are kept, earlier conversations can still be searched, and the dashboard can carry them on. `/session` and `/reset` do the same. |
 | `/stop` | Stop the answer Athena is working on, and any messages waiting their turn. |
-| `/compact` | Summarise the conversation so far, keeping the last two exchanges, to make room in the model's context. Athena also does this by itself: see [Sessions and context](#sessions-and-context). |
+| `/compact` | Summarise the conversation so far, keeping the last two exchanges, to make room in the model's context. Athena also does this by itself: see [Agents and context](#agents-and-context). |
 | `/retry` | Answer your last message again, say after changing how much Athena thinks. An answer already given is taken out of the conversation and memory first. |
-| `/tasks` | What Athena does by itself, with buttons to run, pause, resume, stop or delete each. See [Tasks](tasks.md). |
+| `/dags` | What each agent does by itself, with buttons to run, pause, resume or stop its DAG. See [Agents](agents.md). `/tasks` does the same. |
 | `/think [on\|short\|off]` | How much the model thinks before answering. With no choice, it says which it is, with buttons to change it. |
 | `/remember <fact>` | Save a fact. |
 | `/recall [query]` | Search memories, with similarity scores. With no query, the most recent. |
@@ -21,7 +21,7 @@ Send any message, a [photo](#photos), or a PDF or text file (see [Files](tools.m
 
 Only the Telegram users in `telegram.allowed_user_ids` can use it: `athena setup` puts you there. If the list is empty, the bot replies to any message with the sender's ID.
 
-The dashboard's Chat tab has the same commands, and `athena chat` on the Pi most of them: see [Sessions and context](#sessions-and-context).
+Each agent's chat on the dashboard has the same commands, and `athena chat` on the Pi most of them: see [Agents and context](#agents-and-context).
 
 ## Photos
 
@@ -29,15 +29,15 @@ Send a photo, with what you want to know as its caption, such as "what's wrong w
 
 It needs a model that can see, such as Qwen 3.6 35B-A3B. Some MLX conversions of a model leave out the part that sees, so `doctor` shows the model a red square and checks it says red. Photos go only to your model server, never to a tool. They're kept in `~/.athena/data/photos/`, readable only by Athena's user, until you forget everything.
 
-## Sessions and context
+## Agents and context
 
 Athena keeps the conversation going, so each reply can build on the last. All of it counts towards the model's context, and the more there is, the longer the model takes to read it.
 
-- **A session** is something Athena does for you, such as finding you a job, and the conversation about it. Telegram, the dashboard's Chat tab, Siri and `athena chat` all talk into the current session, the one used last, so you can carry on in one what you started in another. Send `/session`, or press **New session** on the dashboard, to start another: the model starts it afresh, with Athena's memories. On the dashboard you can name sessions, carry on any earlier one, which makes it the current one again, mute or delete them. Every exchange is kept in memory too, so Athena can search earlier sessions from any of them.
-- **Tasks** each belong to a session, and run in its conversation, with everything said there to go on. What they find goes into that session, which becomes the current one, so you can reply to it from anywhere. See [Tasks](tasks.md).
+- **An agent** is something Athena keeps an eye on or does for you, such as finding you jobs, with a conversation of its own. Telegram, Siri and `athena chat` talk to the main agent, the one with the latest news, from you or from Athena, so you can carry on in one what you started in another. Send `/new`, or press **New agent** on the dashboard, to start another: the model starts it afresh, with Athena's memories. On the dashboard you can talk to any agent, which makes it the main one, and name, mute or delete it. Every exchange is kept in memory too, so Athena can search earlier conversations from any agent.
+- **Its DAG** is what it does by itself: tasks, on a schedule or when something happens, with its guidance and what its last run kept to go on. What they find goes into its chat. See [Agents](agents.md).
 - **Compacting** keeps a long conversation going without filling the context. Once it's `max_history_messages` long (40), or an answer fills `compact_at` of the context window (80%), Athena has the model summarise all but the last two exchanges, in the background. From then on the model sees the summary, then the messages since. `/compact` does it straight away.
-- **Context**, on the dashboard, is what Athena reads with your next message: the system prompt, the tools' descriptions and this session's conversation. The limit comes from the model server. If yours doesn't say, set `llm.context_window`.
-- **Forget everything**, on the dashboard's Status tab, deletes every memory and the conversation history, empties Athena's folder, and forgets what tasks and checks last found and everything on the Activity tab. The tasks and what's watched stay. It starts a new session. Usage statistics stay, as they're only counts and timings.
+- **Context**, on the dashboard, is what Athena reads with your next message: the system prompt, the tools' descriptions and the main agent's conversation. The limit comes from the model server. If yours doesn't say, set `llm.context_window`.
+- **Forget everything**, on the dashboard's Status tab, deletes every memory and the conversation history, empties Athena's folder, and forgets what agents' runs found and kept and what checks noted. The agents, their DAGs and what's watched stay. It starts a new agent. Usage statistics stay, as they're only counts and timings.
 
 ## Prompt caching
 

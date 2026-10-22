@@ -2,37 +2,43 @@
 
 A web page for Athena, on your iPhone or Mac. It follows your device's light or dark mode, and in Safari on an iPhone, Share > Add to Home Screen makes it an app. On a phone, tap the shield in the corner for the other tabs.
 
-- **Status:** what Athena is doing, and how much it's used: messages, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, what's in memory, and its connections. **Thinking** switches the model's thinking on, short or off, as `/think` does.
-- **Chat:** talk to Athena, in any of your sessions, and see what their tasks found: see [Chat](#chat).
-- **Activity:** what Athena did, newest first: your messages and its answers, the tasks it ran, its checks on what it's watching, alerts, and when it started. Each opens to its steps: every tool it used, what that was given and gave back, whether it worked, and whether you allowed it, a task was allowed it without asking, or you declined it. It also says what the privacy check found in what a tool sent. Checks that found nothing, one after another, show as one line. It's kept for 30 days.
-- **Tasks:** what Athena does by itself, by session, and what it's watching. Add, change, run, pause and delete them, and see what each said and did last time, tool by tool. See [Tasks](tasks.md).
+- **Status:** what Athena is doing, and how much it's used: messages, tool calls by tool and the average reply time, for the main agent and in total. It shows how much of the model's context the conversation takes up, what's in memory, and its connections. **Thinking** switches the model's thinking on, short or off, as `/think` does.
+- **Agents:** what Athena keeps an eye on and does for you, each with its chat, its DAG, the history of its runs, what its last run kept, and its guidance: see [Agents](#agents) and [Agents](agents.md).
+- **Watching:** what Athena checks on every hour, each with a key that starts the DAGs waiting for it. See [Watching](agents.md#watching).
 - **Memory:** what Athena wanted to remember while it worked by itself, to save or discard. Search memories, past conversations and documents. Choose folders on your Mac to index. List your private words. See [Memory](memory.md) and [Privacy](privacy-and-security.md#privacy).
 - **Skills:** write, change and delete skills, see each one's history, and approve the changes Athena suggests. See [Skills](memory.md#skills).
-- **Board:** the coding projects Athena has handed to Claude. See [Projects for Claude](claude-projects.md).
 - **Tools:** switch tools and MCP servers on and off, change their settings and give them keys. Choose which of a server's tools Athena uses and which ask first, add servers of your own, and choose the tools found only when they're needed. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply as soon as Athena's free, without a restart.
 
-A number on the Memory and Skills tabs says how many of Athena's suggestions are waiting for you, and one on the Chat tab how many requests for your OK.
+A number on the Memory and Skills tabs says how many of Athena's suggestions are waiting for you, and one on the Agents tab how many requests for your OK.
 
-## Chat
+## Agents
 
-Each session is something Athena does for you, such as finding you a job, running a business or maths research, and the conversation about it, which Telegram, Siri and the terminal share: what you start in one, you can carry on in another. The current session is the one used last, which the model has read already. Your other sessions are listed newest first, with a dot on those with something new, and sending a message in one carries it on, as the current session. **New session** starts another.
+Each agent is something Athena keeps an eye on or does for you, such as finding you jobs (see [Agents](agents.md)). They're listed with the main one, the one with the latest news, first, a dot on those with something new, and how many proposals each has waiting. **New agent** makes another. Each has five views:
 
-- **Tasks:** a session's tasks run in it, with everything said there to go on, and say what they found there, for you to reply to: see [Tasks](tasks.md). Press **Add a task**, or the number of them, under the session's name to see them, run them now, change them or add another.
-- **One message at a time.** While Athena's answering you, wherever you asked, nothing more can be sent, and sessions can't be changed, so messages can't pile up. The send button becomes a stop button.
+- **Chat:** talk to it. Telegram, Siri and the terminal talk to the main agent, and sending a message here makes this one the main agent. What its DAG's tasks with `alert=True` say, and each run's summary, arrive here too, linked to the run.
+- **DAG:** when it runs, with **Run now** and **Pause**; changes its runs propose, showing exactly what would change, to approve or reject; its file, which is checked as you write it, saying what's wrong and on which line; and how it works, drawn.
+- **History:** its last 10 runs, each drawn with how each task went, and what each task was given, said and did.
+- **Context:** what its last run kept for the next, which you can change.
+- **Guidance:** how Athena acts in it, at a high level.
+
+At the top, the bell mutes it, **Tools** chooses what may run without asking when you talk to it, and **⋯** names it, chooses its model, or deletes it.
+
+In its chat:
+
+- **One message at a time.** While Athena's answering you, wherever you asked, nothing more can be sent, so messages can't pile up. The send button becomes a stop button. A message sent while its DAG runs is answered once the task that's running has finished.
 - **Photos and files:** press the paper clip, paste or drop them in. Up to 5 photos, which the model sees, as in Telegram: a large one is made smaller first. Up to 5 PDFs or text files, such as Markdown, CSV or JSON, of up to 20 MB each, which go into Athena's workspace for it to read, if Files are on.
 - **Commands** work as in Telegram: press **/**, or type `/` to see them. `/stop` and `/retry` act on what you sent here.
-- **Requests for your OK** show in the conversation, with what the tool would do and everything it would be given, whether they're for a message you sent here, in Telegram, or a task. Allow or deny them here or in Telegram: whichever you answer first counts.
-- **Tools that ask first** can be allowed without asking, for your next message or for the rest of the session, wherever you're talking to Athena in it: press **Tools**. Some, such as scheduling tasks and pushing to GitHub, always ask.
+- **Requests for your OK** show in the conversation, with what the tool would do and everything it would be given, whether they're for a message you sent here, in Telegram, or one of its tasks. Allow or deny them here or in Telegram: whichever you answer first counts.
+- **Tools that ask first** can be allowed without asking, for your next message or from now on, wherever you're talking to it: press **Tools**. Its DAG says what its tasks may do. Some, such as changing a DAG and pushing to GitHub, always ask.
 - **If Athena couldn't answer,** your message stays, to try again or change.
-- **Naming and deleting:** press **⋯** to name a session, or delete it: everything said in it, here and in Athena's memory, and its tasks. Activity keeps its record of what Athena did for 30 days.
 - Files Athena sends go to Telegram, as a task's do.
 
 ## Notifications
 
-Athena can notify your iPhone and Mac when it answers a message you sent on the dashboard, a task has news, something it needs stops working, or it needs your OK. Every session notifies you, until you mute it with the bell at the top of its chat; requests for your OK always do. It doesn't while you're looking at the dashboard, which shows it anyway.
+Athena can notify your iPhone and Mac when it answers a message you sent on the dashboard, an agent has news, something it needs stops working, or it needs your OK. Every agent notifies you, until you mute it with the bell at the top of it; requests for your OK always do. It doesn't while you're looking at the dashboard, which shows it anyway.
 
 1. **On an iPhone or iPad,** add the dashboard to your Home Screen first (in Safari, Share > Add to Home Screen), and open it from there: iOS only notifies web apps you've added. On a Mac, Safari and other browsers can take them as they are, or File > Add to Dock makes it an app.
-2. The Chat tab offers to turn them on: press **Turn on**, and allow notifications when asked. Or press the bell in Connections on the Status tab, where **Send a test** checks they arrive, and **Turn off** stops them on that device.
+2. An agent's chat offers to turn them on: press **Turn on**, and allow notifications when asked. Or press the bell in Connections on the Status tab, where **Send a test** checks they arrive, and **Turn off** stops them on that device.
 
 They come through your device's push service, Apple's for Safari, which needs the dashboard over HTTPS, as Tailscale Serve gives it. Each is encrypted so that only your device can read it, and signed with a key Athena keeps in its data folder, so no one else can notify you as Athena. Each shows the start of the message: `notification_text = false` under `[dashboard]` shows only that there's something new.
 
