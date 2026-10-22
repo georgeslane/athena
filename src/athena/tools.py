@@ -14,7 +14,7 @@ ToolProvider = Callable[[], Iterable["Tool"]]
 
 _INVALID_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 # Tools that always ask you first, even where others may be allowed without asking (a task's, or a session's):
-# starting more tasks, and pushing to GitHub.
+# changing what an agent does by itself, and pushing to GitHub.
 NEVER_UNASKED = frozenset({"change_dag", "hand_to_claude", "answer_claude", "extend_claude_project"})
 
 
@@ -32,12 +32,18 @@ class Turn:
 
     alone: str | None = None  # None: answering you. Else what it's doing, such as "your task “Briefing”"
     chat: str | None = None  # the chat it's in, such as "session:3"
-    dag: Any = None  # the DAG run it's in, if it is: what trigger_task triggers tasks in (dags/runner.py)
+    dag: Any = None  # the DAG run it's in, if it is: what task_result gives its result to (dags/runner.py)
     # What tools noted, such as {"skills": ["Trip plans"], "suggested": ["memory", "memory"]}.
     notes: dict[str, list[str]] = field(default_factory=dict)
+    finished: str | None = None  # the answer, once a tool has given it, such as task_result: the turn ends there
 
     def note(self, key: str, value: str) -> None:
         self.notes.setdefault(key, []).append(value)
+
+    def finish(self, answer: str) -> None:
+        """End the turn once the tools called with this one have run, with ``answer``, rather than asking the model
+        for one."""
+        self.finished = answer
 
 
 _turn: ContextVar[Turn | None] = ContextVar("turn", default=None)

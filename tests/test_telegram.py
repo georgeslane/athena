@@ -44,7 +44,7 @@ def make_bot(config, respond, allowed=(ME,)):
     config.telegram = TelegramConfig(bot_token="123456:TEST", allowed_user_ids=list(allowed))
     services = SimpleNamespace(
         config=config,
-        agent=SimpleNamespace(respond=respond, gate=Gate()),
+        agent=SimpleNamespace(respond=respond, gate=Gate(), last_chat=None),
         rewarm=asyncio.Event(),
         history=ConversationStore(config.db_path),
         approvals=Approvals(),
@@ -214,8 +214,8 @@ async def test_keeps_the_model_server_warm(config):
         while len(calls) == settled:
             await asyncio.sleep(0.01)
 
-        # It warms up the current session: after a new one, that one.
-        bot.s.history.new_session()
+        # It warms up the conversation you last talked to Athena in: the master agent's, until you talk to another.
+        bot.s.agent.last_chat = bot.s.history.new_session().chat_id
         bot.s.rewarm.set()
         while calls[-1] != "session:2":
             await asyncio.sleep(0.01)
@@ -246,19 +246,20 @@ async def test_confirmation_shows_what_the_tool_says_it_will_do(config):
     assert "reply_markup" in prompt.kwargs
 
 
-async def test_session_starts_a_new_session(config):
+async def test_new_starts_the_master_agents_conversation_afresh(config):
     replies = []
 
     async def reply_text(text):
         replies.append(text)
 
     bot = make_bot(config, None)
-    bot.s.new_session = lambda: SimpleNamespace(id=7)
+    bot.s.history.append_exchange(bot.s.history.master_chat, "Hello", "Hi")
     update = SimpleNamespace(
         effective_message=SimpleNamespace(reply_text=reply_text), effective_chat=SimpleNamespace(id=1)
     )
     await bot.cmd_session(update, SimpleNamespace(bot=FakeBot()))
-    assert replies[0].startswith("Started a new agent (#7), as the main one")
+    assert replies[0].startswith("Started afresh: I won't see what we've said here so far.")
+    assert bot.s.history.load(bot.s.history.master_chat) == [] and bot.s.rewarm.is_set()
     app = bot.build()
     names = {name for h in app.handlers[0] if hasattr(h, "commands") for name in h.commands}
     assert {"session", "reset"} <= names  # /reset still works, for anyone used to it
@@ -508,7 +509,7 @@ async def test_retry_takes_back_the_last_answer_and_asks_again(config):
     fresh.s.take_back_last_exchange = nothing
     update, replies = command_update()
     await fresh.cmd_retry(update, ctx)
-    assert replies[-1].text == "There's nothing to try again in this session."
+    assert replies[-1].text == "There's nothing to try again."
 
 
 def dag_scheduler(config, history):

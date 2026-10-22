@@ -1,6 +1,6 @@
-"""Chatting on the dashboard (chat.py), through its API as the page uses it: sending in a session, which makes it
-the current one, one message at a time, commands, approvals answered here, tools allowed without asking, and
-trying again what didn't get an answer."""
+"""Chatting on the dashboard (chat.py), through its API as the page uses it: sending to an agent, one message at a
+time, commands, approvals answered here, tools allowed without asking, and trying again what didn't get an
+answer; agents' settings, files and DAGs."""
 
 import asyncio
 
@@ -58,7 +58,7 @@ async def answered(http):
 async def test_a_message_is_answered_in_its_session(chat):
     async with client(chat) as http:
         state = (await http.get("/api/agents")).json()
-        assert state["current"] == 1 and [s["id"] for s in state["sessions"]] == [1]
+        assert state["master"] == 1 and [(s["id"], s["master"]) for s in state["sessions"]] == [(1, True)]
         assert {c["name"] for c in state["commands"]} >= {"new", "retry", "stop", "help", "dags"}
         assert [t["name"] for t in state["askable"]] == ["forget_memory", "send_note"]  # can be allowed unasked
 
@@ -70,7 +70,7 @@ async def test_a_message_is_answered_in_its_session(chat):
             ("user", "Hi Athena", "Dashboard"),
             ("assistant", "Hello there.", ""),
         ]
-        assert state["sessions"][0]["title"] == "Hi Athena" and state["failed"] == {}
+        assert state["sessions"][0]["title"] == "Master" and state["failed"] == {}
 
         for wrong, status in (({"text": " "}, 400), ({"text": "x" * 4001}, 400), ({"text": "hi", "allow": "x"}, 400)):
             assert (await http.post("/api/agents/1/messages", json=wrong)).status_code == status, wrong
@@ -78,13 +78,13 @@ async def test_a_message_is_answered_in_its_session(chat):
         assert (await http.get("/api/agents/9")).status_code == 404
 
 
-async def test_one_message_at_a_time_and_sending_in_an_old_session_makes_it_current(chat):
+async def test_one_message_at_a_time_to_any_agent(chat):
     async with client(chat) as http:
         await http.post("/api/agents/1/messages", json={"text": "Hello"})
         await answered(http)
         new = (await http.post("/api/agents", json={})).json()
-        assert new["agent"] == 2 and new["current"] == 2
-        assert (await http.post("/api/agents", json={})).json()["agent"] == 2  # nothing said in it yet: the same one
+        assert new["agent"] == 2 and new["master"] == 1
+        assert (await http.post("/api/agents", json={"name": "Shopping"})).json()["agent"] == 3
 
         await http.post("/api/agents/2/messages", json={"text": "Please use wait_here"})
         state = (await http.get("/api/agents")).json()
@@ -92,18 +92,16 @@ async def test_one_message_at_a_time_and_sending_in_an_old_session_makes_it_curr
         for busy in (
             http.post("/api/agents/1/messages", json={"text": "Back to the first"}),
             http.post("/api/agents/2/messages", json={"text": "And another"}),
-            http.post("/api/agents", json={}),
-            http.post("/api/session", json={}),
         ):
             response = await busy
             assert response.status_code == 409 and "still answering" in response.json()["error"]
+        assert (await http.post("/api/agents", json={})).status_code == 200  # making an agent is fine meanwhile
         chat.let_go.set()
         await answered(http)
 
-        assert chat.history.session.id == 2
         await http.post("/api/agents/1/messages", json={"text": "Back to the first"})
         state = await answered(http)
-        assert state["current"] == 1 and [s["id"] for s in state["sessions"]] == [1, 2]  # the one used last first
+        assert [s["id"] for s in state["sessions"]] == [1, 2, 3]  # the master first, then the latest to be used
         first = (await http.get("/api/agents/1")).json()["messages"]
         assert [m["text"] for m in first] == ["Hello", "Hello there.", "Back to the first", "Hello there."]
 
@@ -157,12 +155,12 @@ async def test_commands_say_what_they_did(chat):
         assert (await say("/help")).startswith("Hi! I'm Athena.")
         assert await say("/remember George's bike is blue.") == "Saved as memory #1."
         assert await say("/stop") == "I'm not working on anything."
-        assert await say("/retry") == "There's nothing to try again in this session."
+        assert await say("/retry") == "There's nothing to try again here."
         assert await say("/frobnicate") == "There's no /frobnicate command. /help lists them."
         await http.post("/api/agents/1/messages", json={"text": "Hello"})
         await answered(http)
-        assert (await say("/session")).startswith("Started session 2.")
-        assert chat.history.session.id == 2 and chat.history.messages(1)[0]  # the first is kept as it was
+        assert (await say("/new")).startswith("Started afresh: I won't see what we've said here so far.")
+        assert chat.history.load("session:1") == [] and chat.history.messages(1)[0]  # it's still there to read
 
 
 async def test_approving_here_and_allowing_tools_without_asking(chat):
@@ -198,53 +196,56 @@ async def test_approving_here_and_allowing_tools_without_asking(chat):
 async def test_the_page_hears_of_new_messages_as_it_does_the_status(chat):
     async with client(chat) as http:
         before = (await http.get("/api/status")).json()
-        assert before["chat"] == {"current": 1, "busy": False, "approvals": 0, "last": None}
+        assert before["chat"] == {"master": 1, "busy": False, "approvals": 0, "last": None}
         waiting = asyncio.create_task(http.get(f"/api/status?after={before['version']}&wait=10"))
         await asyncio.sleep(0.05)
-        chat.keep("(Your task “Briefing” ran.)", "All quiet.")  # nothing's changed about what Athena's doing
+        chat.keep("(Claude's projects changed.)", "All quiet.")  # nothing's changed about what Athena's doing
         after = (await asyncio.wait_for(waiting, 2)).json()
         assert after["version"] != before["version"]
         assert after["chat"]["last"]["role"] == "assistant"  # so the page can say Athena's written
 
 
-async def test_naming_and_deleting_sessions(chat):
+async def test_naming_and_deleting_agents(chat):
     async with client(chat) as http:
-        await http.post("/api/agents/1/messages", json={"text": "My CV: Python and data."})
+        agent = (await http.post("/api/agents", json={})).json()["agent"]
+        await http.post(f"/api/agents/{agent}/messages", json={"text": "My CV: Python and data."})
         await answered(http)
-        renamed = await http.post("/api/agents/1", json={"name": "  Job   hunting "})
+        renamed = await http.post(f"/api/agents/{agent}", json={"name": "  Job   hunting "})
         assert renamed.json()["name"] == "Job hunting"
-        assert (await http.post("/api/agents/1", json={"name": 3})).status_code == 400
+        assert (await http.post(f"/api/agents/{agent}", json={"name": 3})).status_code == 400
         assert (await http.post("/api/agents/9", json={"name": "x"})).status_code == 404
         state = (await http.get("/api/agents")).json()
-        assert state["sessions"][0]["title"] == "Job hunting" and state["sessions"][0]["last"] > 0
-        chat.dags.save(1, "with DAG(schedule='0 9 * * *'):\n    find = Task(prompt='Look for new postings.')\n")
-        listed = (await http.get("/api/agents")).json()["sessions"][0]["dag"]
+        assert state["sessions"][1]["title"] == "Job hunting" and state["sessions"][1]["last"] > 0
+        chat.dags.save(agent, "with DAG(schedule='0 9 * * *'):\n    find = Task(prompt='Look for new postings.')\n")
+        listed = (await http.get("/api/agents")).json()["sessions"][1]["dag"]
         assert listed["when"] == "every day at 09:00" and not listed["running"] and listed["next_run"]
 
-        # Deleted while it's being answered: no.
-        await http.post("/api/agents/1/messages", json={"text": "Please use wait_here"})
-        refused = await http.delete("/api/agents/1")
-        assert refused.status_code == 409 and "answering you in that session" in refused.json()["error"]
+        # Deleted while it's being answered: no. Nor the master agent, ever.
+        await http.post(f"/api/agents/{agent}/messages", json={"text": "Please use wait_here"})
+        refused = await http.delete(f"/api/agents/{agent}")
+        assert refused.status_code == 409 and "answering you in that agent" in refused.json()["error"]
         chat.let_go.set()
         await answered(http)
+        master = await http.delete("/api/agents/1")
+        assert master.status_code == 409 and "can't be deleted" in master.json()["error"]
         await until(lambda: chat.memory.store.count().get("conversation") == 2)  # what was said, in memory
 
-        state = (await http.delete("/api/agents/1")).json()
-        assert [s["id"] for s in state["sessions"]] == [2] and state["current"] == 2  # a new one
-        assert (await http.get("/api/agents/1")).status_code == 404
-        assert chat.dags.store.get(1).dag == ""  # its DAG goes with it
+        state = (await http.delete(f"/api/agents/{agent}")).json()
+        assert [s["id"] for s in state["sessions"]] == [1]
+        assert (await http.get(f"/api/agents/{agent}")).status_code == 404
+        assert chat.dags.store.get(agent).dag == ""  # its DAG goes with it
         assert chat.memory.store.count().get("conversation", 0) == 0  # and out of it
-        assert (await http.delete("/api/agents/1")).status_code == 404
+        assert (await http.delete(f"/api/agents/{agent}")).status_code == 404
 
 
-async def test_deleting_an_earlier_session_leaves_the_current_one(chat):
+async def test_deleting_one_agent_while_athena_answers_in_another(chat):
     async with client(chat) as http:
-        await http.post("/api/agents/1/messages", json={"text": "Hello"})
+        await http.post("/api/agents", json={"name": "First"})
+        await http.post("/api/agents/2/messages", json={"text": "Hello"})
         await answered(http)
-        await http.post("/api/agents", json={})
-        await http.post("/api/agents/2/messages", json={"text": "Please use wait_here"})
-        state = (await http.delete("/api/agents/1")).json()  # while Athena's answering in another: that's fine
-        assert state["current"] == 2 and [s["id"] for s in state["sessions"]] == [2]
+        await http.post("/api/agents/1/messages", json={"text": "Please use wait_here"})
+        state = (await http.delete("/api/agents/2")).json()  # while Athena's answering in another: that's fine
+        assert [s["id"] for s in state["sessions"]] == [1]
         chat.let_go.set()
         await answered(http)
 
@@ -312,7 +313,7 @@ async def test_an_agents_settings(chat):
     async with client(chat) as http:
         made = (await http.post("/api/agents", json={"name": "Job hunting"})).json()
         agent = made["agent"]
-        assert made["sessions"][0]["name"] == "Job hunting"
+        assert made["sessions"][1]["name"] == "Job hunting"
         changed = await http.post(
             f"/api/agents/{agent}", json={"model": "big-model", "guidance": " Only remote jobs. ", "context": "CV."}
         )
@@ -334,7 +335,8 @@ async def test_an_agents_dag_from_the_dashboard(chat):
         fresh = (await http.get("/api/agents/1/dag")).json()
         assert not fresh["written"] and fresh["source"].startswith("from athena import DAG, Task")
         assert fresh["dag"]["when"] == "only when you run it" and fresh["dag"]["end"][-1]["id"] == "summary"
-        assert "send_note" in fresh["tools"] and fresh["triggers"]["events"] == ["claude-done"]
+        assert "send_note" in fresh["tools"] and fresh["master"] and "job_emails = Task(" in fresh["source"]
+        assert fresh["events"] == {"waiting": {}, "sources": {}, "claude": "claude-done", "hooks": False}
 
         checked = (await http.post("/api/agents/1/dag/check", json={"source": "with DAG():\n    pass\n"})).json()
         assert checked["dag"] is None and checked["error"]["line"] == 1 and "no tasks" in checked["error"]["message"]
@@ -369,38 +371,50 @@ async def test_an_agents_dag_from_the_dashboard(chat):
         assert (await http.post(f"/api/proposals/{proposal.id}", json={"approve": True})).status_code == 409
 
 
-async def test_watching_from_the_dashboard(chat):
+async def test_files_that_come_with_an_agents_guidance(chat):
+    import base64
+
+    def sent(name, data):
+        return {"name": name, "data": base64.b64encode(data).decode()}
+
     async with client(chat) as http:
-        listed = (await http.get("/api/watches")).json()
-        assert listed["items"] == [] and listed["every_minutes"] == 60
-        added = await http.post(
-            "/api/watches", json={"what": "new emails about jobs", "key": "job-emails", "until": None}
-        )
-        assert added.json()["items"][0]["key"] == "job-emails"
-        chat.dags.save(1, "with DAG(triggers=['watch:job-emails']):\n    a = Task(prompt='x')\n")
-        [item] = (await http.get("/api/watches")).json()["items"]
-        assert item["starts"] == ["Hi Athena"] or item["starts"] == ["Agent 1"]
-        assert (await http.post("/api/watches", json={"what": "x", "key": "Bad Key"})).status_code == 400
-        changed = await http.post(
-            f"/api/watches/{item['id']}", json={"what": "emails about jobs", "until": "2099-01-01"}
-        )
-        assert changed.json()["items"][0]["what"] == "emails about jobs"
-        assert (await http.post("/api/watches/check", json={})).json()["asked"] is True
-        assert (await http.delete(f"/api/watches/{item['id']}")).json()["items"] == []
+        agent = (await http.post("/api/agents", json={"name": "Jobs"})).json()["agent"]
+        assert (await http.get(f"/api/agents/{agent}/files")).json() == {"files": [], "on": True, "max": 10}
+        given = [sent("cv.pdf", b"%PDF-1.4 CV"), sent("../notes.md", b"# Notes")]
+        added = await http.post(f"/api/agents/{agent}/files", json={"files": given})
+        assert added.status_code == 200, added.text
+        assert added.json()["files"] == [
+            {"name": "cv.pdf", "size": 11, "path": f"agents/{agent}/cv.pdf"},
+            {"name": "notes.md", "size": 7, "path": f"agents/{agent}/notes.md"},  # only its name is kept
+        ]
+        assert f"agents/{agent}/cv.pdf (11 bytes), agents/{agent}/notes.md (7 bytes)." in chat.dags.intro_for(agent)
+        again = (await http.post(f"/api/agents/{agent}/files", json={"files": [sent("cv.pdf", b"v2")]})).json()
+        assert [f["name"] for f in again["files"]] == ["cv (2).pdf", "cv.pdf", "notes.md"]  # nothing's replaced
+        got = await http.get(f"/api/agents/{agent}/files/cv.pdf")
+        assert got.content == b"%PDF-1.4 CV" and got.headers["content-type"] == "application/pdf"
+        assert "attachment" in got.headers["content-disposition"]
+        for wrong in ({"files": []}, {"files": [{"name": "x.md"}]}, {"files": [sent("photo.exe", b"MZ")]}):
+            assert (await http.post(f"/api/agents/{agent}/files", json=wrong)).status_code == 400, wrong
+        left = (await http.delete(f"/api/agents/{agent}/files/cv%20%282%29.pdf")).json()["files"]
+        assert [f["name"] for f in left] == ["cv.pdf", "notes.md"]
+        assert (await http.delete(f"/api/agents/{agent}/files/nope.md")).status_code == 404
+        assert (await http.get("/api/agents/9/files")).status_code == 404
+        await http.delete(f"/api/agents/{agent}")
+        assert chat.dags.intro_for(agent) == "" and not (chat.dags.workspace / "agents" / str(agent)).exists()
 
 
 async def test_deleting_an_agent_while_its_dag_runs_stops_the_run_first(chat):
     chat.agent.gate.grace = 0.0
+    agent = chat.history.new_session("Doomed").id
     dag = "with DAG():\n    a = Task(prompt='Please use wait_here')\n    b = Task(prompt='b')\n    a >> b\n"
-    chat.dags.save(1, dag)
-    chat.history.append_exchange("session:1", "Hello", "Hi")
-    chat.dags.run_now(1)
+    chat.dags.save(agent, dag)
+    chat.history.append_exchange(f"session:{agent}", "Hello", "Hi")
+    chat.dags.run_now(agent)
     await until(lambda: chat.dags.current and chat.status.snapshot().step == "Using wait_here")
-    other = chat.history.new_session().id
     async with client(chat) as http:
-        state = (await http.delete("/api/agents/1")).json()
-    assert state["current"] == other and chat.dags.current is None
+        state = (await http.delete(f"/api/agents/{agent}")).json()
+    assert [s["id"] for s in state["sessions"]] == [1] and chat.dags.current is None
     store = chat.dags.store
     with store._lock:
         left = store._conn.execute("SELECT COUNT(*) FROM dag_task_runs").fetchone()[0]
-    assert left == 0 and store.runs(1) == []  # nothing of it left behind
+    assert left == 0 and store.runs(agent) == []  # nothing of it left behind

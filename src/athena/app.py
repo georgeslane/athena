@@ -18,7 +18,7 @@ from athena.builtin import Builtin, Unavailable
 from athena.channel import Reach
 from athena.chat import DashboardChat
 from athena.config import THINKING, Config, parse_config
-from athena.dags.migrate import tasks_to_dags
+from athena.dags.migrate import start_afresh
 from athena.dags.scheduler import Dags
 from athena.dags.spec import CLAUDE_DONE
 from athena.dags.store import AgentStore
@@ -42,8 +42,7 @@ from athena.status import StatusTracker
 from athena.status_api import StatusServer
 from athena.tool_approvals import ToolApprovals
 from athena.tools import Tool, ToolRegistry
-from athena.watching import WatchStore
-from athena.workspace import clear_workspace
+from athena.workspace import clear_workspace, workspace_of
 
 if TYPE_CHECKING:
     from athena.channel import Channel
@@ -115,17 +114,15 @@ class Services:
         # Tools waiting for your OK, which Telegram or the dashboard can give (approvals.py).
         self.approvals = Approvals()
         # Agents: each one's model, guidance and DAG, which runs by itself and tells you what it found (dags/).
-        agents = AgentStore(self.config.db_path)
-        tasks_to_dags(self.config.db_path, agents, self.history)  # once: tasks from before become DAGs
         self.dags = Dags(
             self.config.tasks,
-            agents,
+            AgentStore(self.config.db_path),
             self.agent,
             timezone=self.config.agent.timezone,
             channel=lambda: self.reach,
             tools=self.tools,
-            on_ran=self.rewarm.set,  # the main agent's conversation may have what a run found in it
-            watches=WatchStore(self.config.db_path),  # what it keeps an eye on for you (watching.py)
+            workspace=workspace_of(self.config),  # where each agent's files are
+            on_ran=self.rewarm.set,  # the master agent's conversation may have what a run found in it
         )
         for tool in self.dags.tools():
             self.tools.add(tool)
@@ -274,9 +271,9 @@ class Services:
         return await self.notify(text)
 
     def keep(self, yours: str, said: str) -> None:
-        """Keep something Athena told you by itself in your conversation, the current session, so you can reply to
-        it: ``yours`` is a line for your side, such as "(Your task “Briefing” ran.)"."""
-        self.history.append_exchange(self.history.current_chat, yours, said, channel="Athena")
+        """Keep something Athena told you by itself in the master agent's conversation, where Telegram talks to it,
+        so you can reply to it: ``yours`` is a line for your side, such as "(Claude's projects changed.)"."""
+        self.history.append_exchange(self.history.master_chat, yours, said, channel="Athena")
 
     # -- projects handed to Claude (claude_projects.py) ------------------------------------------
 
@@ -328,8 +325,6 @@ class Services:
             await self.alerts.stop()
         await self.dags.stop()
         self.dags.store.close()
-        if self.dags.watches:
-            self.dags.watches.close()
         self.skills.store.close()
         self.privacy.close()
         if self.dashboard:
@@ -406,51 +401,31 @@ class Services:
             self.memory.forget_conversation(exchange)
         return exchange
 
-    def new_session(self) -> Session:
-        """Start a new conversation, as the current session. Memories are kept. Busy if Athena's answering you."""
-        self._not_answering()
-        session = self.history.new_session()
-        self.rewarm.set()
-        return session
-
-    def use_session(self, session_id: int) -> Session:
-        """Carry on an earlier conversation: make it the current session. Busy if Athena's answering you in
-        another, so messages can't pile up; KeyError if there's no such session."""
-        if session_id != self.history.session.id:
-            self._not_answering()
-        session = self.history.use_session(session_id)
-        self.rewarm.set()  # the model server reads it now, rather than when you send the next message
-        return session
-
-    async def delete_session(self, session_id: int) -> Session:
-        """Delete a session: what was said in it, here and in memory, and its tasks. Returns the current session,
-        which is another if it was this one. Busy if Athena's answering you in it; KeyError if there's no such
-        session."""
+    async def delete_session(self, session_id: int) -> None:
+        """Delete an agent: what was said to it, here and in memory, its DAG, runs and files. Busy if Athena's
+        answering you in it; KeyError if there's no such agent; ValueError if it's the master agent."""
         replying = self.chat.replying
-        answering = replying.session if replying else self.history.session.id if self.agent.answering_you else None
+        answering = replying.session if replying else self.history.master.id if self.agent.answering_you else None
         if answering == session_id:
-            raise Busy("I'm answering you in that session. Wait until I've finished, or stop me, first.")
+            raise Busy("I'm answering you in that agent. Wait until I've finished, or stop me, first.")
         if self.history.get_session(session_id) is None:
             raise KeyError(session_id)
-        await self.dags.delete(session_id)  # its DAG, runs and what they proposed, stopping a run if one's going
+        if session_id == self.history.master.id:
+            raise ValueError("The master agent can't be deleted: Telegram, Siri and the terminal talk to it.")
+        await self.dags.delete(session_id)  # its DAG, runs and files, stopping a run if one's going
         if self._indexer and not self._indexer.done():
             await asyncio.wait({self._indexer})  # so nothing said in it is added to memory just after
-        was_current = session_id == self.history.session.id
         for exchange in self.history.delete_session(session_id):
             self.memory.forget_conversation(exchange)
         self.chat.failed.pop(session_id, None)
-        if was_current:
-            self.rewarm.set()
-        log.info("Deleted session %d", session_id)
-        return self.history.session
-
-    def _not_answering(self) -> None:
-        if self.chat.busy:
-            raise Busy()
+        if self.agent.last_chat == f"session:{session_id}":
+            self.agent.last_chat = None
+        self.rewarm.set()  # the master agent's told of the others
+        log.info("Deleted agent %d", session_id)
 
     async def forget_everything(self) -> Session:
-        """Delete every memory, the conversation history, the code's workspace, what tasks found and the timeline,
-        and start a new session. Usage statistics, and the tasks themselves, stay."""
+        """Delete every memory, the conversation history, the code's workspace, with agents' files, and what DAG
+        runs found. Returns the master agent. Usage statistics, and the agents and their DAGs, stay."""
         await self.dags.halt()  # it would save what it's doing after everything's deleted
         self.dags.reviews.clear()  # they hold what was said
         async with self.agent.paused():
@@ -460,11 +435,11 @@ class Services:
                     await self._indexer
             await self.documents.stop()
             await asyncio.to_thread(self.memory.store.clear)
-            session = await asyncio.to_thread(self.history.clear)
+            await asyncio.to_thread(self.history.clear)
             await asyncio.to_thread(clear_workspace, self.config)  # what code made from what was said
-            await asyncio.to_thread(self.dags.forget)  # what runs found and kept, and what checks noted
+            await asyncio.to_thread(self.dags.forget)  # what runs found and kept
         self.rewarm.set()
-        return session
+        return self.history.master
 
     def index_conversations(self) -> None:
         """Add new exchanges to memory in the background, so they can be searched later."""
@@ -512,6 +487,7 @@ def build_memory(cfg: Config) -> MemoryService:
 
 def build_services(cfg: Config) -> Services:
     memory = build_memory(cfg)
+    start_afresh(cfg.db_path, memory.store, cfg.db_path.parent / "photos")  # once, before the agents are read
     llm = LLMClient(cfg.llm)
     history = ConversationStore(cfg.db_path, cfg.agent.max_history_messages)
     stats = UsageStats(cfg.db_path)

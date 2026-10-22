@@ -1,15 +1,21 @@
-"""When agents' DAGs run: on their schedules, when an event or something watched starts them, or when you ask,
-one at a time; and the checks on what's watched, every hour, and looking back at skills used in a chat.
+"""When agents' DAGs run: on their schedules, when an event starts them, or when you ask, one at a time; and
+looking back at skills used in a chat.
 
 Runs wait their turn in a queue. The one to run next is one you asked for, or an event started, if there is one,
 then the DAG with the fewest tasks, then the one that's waited longest. One you asked for, or an event started,
-starts as soon as Athena's free; one that's due on its schedule, or was started by something watched, once Athena
-has been inactive, neither answering you nor running anything, for [tasks] quiet_minutes (5). So when two DAGs
-are due at the same time, the shorter runs first, and the other once it's finished and things have been quiet
-for five minutes.
+starts as soon as Athena's free; one that's due on its schedule once Athena has been inactive, neither answering
+you nor running anything, for [tasks] quiet_minutes (5). So when two DAGs are due at the same time, the shorter
+runs first, and the other once it's finished and things have been quiet for five minutes.
+
+Events come from outside, through /hooks/<event> (triggers.py), from Claude finishing a project, and from the
+outlets of agents' DAGs: what a task with outlets finds starts the DAGs with that event in their triggers, such as
+an agent that applies for jobs starting from what the master agent's DAG found in your emails. A DAG isn't
+started by an event its own run led to, however many agents that went through, so they can't go round in a
+circle.
 
 It's also what the agent loop asks about each agent's conversation (agent.Directory): its model, what it starts
-with (its guidance, what its last run kept, its DAG), and what its DAG's doing now.
+with (its guidance and files, what its last run kept, its DAG, and for the master agent, your other agents), and
+what its DAG's doing now.
 """
 
 from __future__ import annotations
@@ -23,22 +29,22 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, timedelta, tzinfo
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from athena.agent import AgentResult, Background
 from athena.clock import Clock
 from athena.dags import ends
+from athena.dags import files as agent_files
 from athena.dags.runner import RunContext, Runner, apply_tools
-from athena.dags.spec import STARTER, WATCH, DagError, DagSpec, parse
+from athena.dags.spec import MASTER_STARTER, STARTER, DagError, DagSpec, parse
 from athena.dags.store import APPROVED, PENDING, REJECTED, STALE, AgentStore, Proposal
 from athena.history import session_of
 from athena.skills import READ_SKILL, REVIEW, SAVE_SKILL
 from athena.status import describe_error
-from athena.steps import steps
 from athena.tools import Tool, ToolRegistry, current_turn
-from athena.watching import WatchStore, watch_tool
-from athena.watching import describe as describe_watch
+from athena.workspace import show_size
 
 if TYPE_CHECKING:
     from athena.agent import Agent
@@ -47,14 +53,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-NOTHING = "NOTHING TO REPORT"  # what a check on what's watched replies when nothing needs you
 MISSED_GRACE = timedelta(hours=6)  # a scheduled run missed by more than this (Athena was off) is skipped
-HEARTBEAT_MINUTES = 10  # the most a check on what's watched works for
-MIN_HEARTBEAT = 60.0  # minutes between checks, whatever heartbeat_minutes says
 REVIEW_MINUTES, REVIEW_ROUNDS = 10, 4  # looking back at how a skill went in a chat
 MAX_REVIEWS = 5  # waiting to be done; the oldest is dropped for a new one past this
 MAX_QUEUED = 5  # runs of one agent waiting their turn
 EVENT_GAP = 60.0  # seconds: the same event again sooner doesn't start a DAG again
+ABOUT_CHARS = 160  # of an agent's guidance, as the master agent's told of it
 
 
 @dataclass
@@ -62,10 +66,12 @@ class Pending:
     """A run waiting its turn."""
 
     agent: int
-    trigger: str  # "schedule", "manual", "event:<name>" or "watch:<key>"
+    trigger: str  # "schedule", "manual" or "event:<name>"
     input: str  # what came with it
     at: float  # when it was due
     now: bool  # as soon as Athena's free, rather than once it's been inactive for a while
+    items: list[str] = field(default_factory=list)  # what came with it, as items, for for_each=trigger
+    chain: tuple[int, ...] = ()  # the agents whose runs led to it, through outlets
 
 
 @dataclass
@@ -87,7 +93,7 @@ class Dags:
         timezone: str,
         channel: Callable[[], Channel | None],
         tools: ToolRegistry,
-        watches: WatchStore | None = None,
+        workspace: Path | None = None,
         clock: Clock | None = None,
         on_ran: Callable[[], None] = lambda: None,
         poll_seconds: float = 15.0,
@@ -103,18 +109,22 @@ class Dags:
             self.tz = UTC
         self.channel = channel
         self.registry = tools
-        self.watches = watches  # what Athena keeps an eye on for you (watching.py)
+        self.workspace = workspace  # where agents' files are, if Athena has files (files.py)
         self.on_ran = on_ran  # e.g. so the model server reads your conversation again
         self.poll = poll_seconds
         self.runner = Runner(
-            cfg, store, agent, tools, channel=channel, intro=self.intro_for, tz=self.tz, main=self._make_main
+            cfg,
+            store,
+            agent,
+            tools,
+            channel=channel,
+            intro=self.intro_for,
+            tz=self.tz,
+            master=lambda: self.master,
+            emit=self.emitted,
         )
         self.queue: list[Pending] = []
         self.reviews: list[Review] = []  # skills to look back on, once you've finished chatting
-        self.last_check = self.clock.time()  # the first check is an hour after starting
-        self.check_result: dict[str, Any] | None = None  # how the last check went, for the dashboard
-        self.checking = False
-        self._check_now = False  # you asked for a check, on the dashboard
         self._fired: dict[tuple[int, str], float] = {}  # (agent, trigger) -> when it last started a run
         self._finished = float("-inf")  # time.monotonic() when Athena last finished something by itself
         self._wake = asyncio.Event()
@@ -124,6 +134,11 @@ class Dags:
     @property
     def user(self) -> str:
         return self.agent.cfg.user_name
+
+    @property
+    def master(self) -> int:
+        """The master agent: where Telegram, Siri and the terminal talk to you, and news from the others is told."""
+        return self.history.master.id
 
     @property
     def current(self) -> RunContext | None:
@@ -146,17 +161,31 @@ class Dags:
         return current.note(self.user)
 
     def intro_for(self, agent_id: int) -> str:
-        """What an agent's conversations start with, its chat's and its runs': what it is, its guidance, what its
-        last run kept, and its DAG. Nothing for an agent that's none of those."""
+        """What an agent's conversations start with, its chat's and its runs': what it is, its guidance and its
+        files, what its last run kept, and its DAG; and for the master agent, your other agents. Nothing for an
+        agent that's none of those."""
         config = self.store.get(agent_id)
         session = self.history.get_session(agent_id)
         name = session.name if session else ""
-        if not (name or config.guidance or config.context or config.dag):
+        kept = agent_files.listed(self.workspace, agent_id)
+        if agent_id == self.master:
+            lines = [
+                "<agent>",
+                f"This is the master agent, where {self.user} talks to you from Telegram, Siri, the terminal and the "
+                f"dashboard. Each of their other agents does something for them by itself: you answer {self.user}'s "
+                "questions about those agents, and help with anything else.",
+                *self._roster(),
+            ]
+        elif name or config.guidance or config.context or config.dag or kept:
+            who = f"This is {self.user}'s agent “{name}”." if name else f"This is one of {self.user}'s agents."
+            lines = ["<agent>", who]
+        else:
             return ""
-        who = f"This is {self.user}'s agent “{name}”." if name else f"This is one of {self.user}'s agents."
-        lines = ["<agent>", who]
         if config.guidance:
             lines += [f"How {self.user} wants you to act here:", config.guidance.strip()]
+        if kept:
+            listed = ", ".join(f"{agent_files.folder(agent_id)}/{n} ({show_size(size)})" for n, size in kept)
+            lines.append(f"Files {self.user} gave this agent, to read with read_file when they'd help: {listed}.")
         if config.context:
             lines += ["What its DAG's last run kept for the next:", config.context.strip()]
         if config.dag:
@@ -167,11 +196,46 @@ class Dags:
         lines.append("</agent>")
         return "\n".join(lines)
 
-    def _make_main(self, agent_id: int) -> None:
-        """Make an agent the main one, as it's the one with the latest news: unless you're talking to Athena."""
-        if self.agent.answering_you == 0 and self.history.session.id != agent_id:
-            with contextlib.suppress(KeyError):
-                self.history.use_session(agent_id)
+    def _roster(self) -> list[str]:
+        """Your other agents, as the master agent's told of them: what each is for, and when its DAG runs. In the
+        order they were made, so it only changes when they do."""
+        configs = {c.id: c for c in self.store.all()}
+        lines = []
+        for agent_id, name in self.agents():
+            if agent_id == self.master:
+                continue
+            config = configs.get(agent_id)
+            spec = self.spec(config.dag) if config else None
+            runs = f" Its DAG runs {spec.describe()}." if spec else " It has no DAG."
+            about = " ".join(config.guidance.split()) if config else ""
+            about = about if len(about) <= ABOUT_CHARS else about[: ABOUT_CHARS - 1] + "…"
+            lines.append(f"- “{name}” (#{agent_id}).{runs}{f' {about}' if about else ''}")
+        if not lines:
+            return [f"{self.user} has no other agents yet: they make them on the dashboard's Agents tab."]
+        return [
+            "Their other agents:",
+            *lines,
+            "When a run of one of their DAGs has news, it's told to you here too. agent_runs reads what any of them "
+            "did; change_dag and run_dag act on one of them by name.",
+        ]
+
+    def agents(self) -> list[tuple[int, str]]:
+        """Every agent, by id: (id, name), the master agent first."""
+        listed = self.history.sessions(limit=500, also={c.id for c in self.store.all()})
+        found = sorted((s.id, s.title or f"Agent {s.id}") for s in listed)
+        return sorted(found, key=lambda a: a[0] != self.master)
+
+    def find(self, which: str) -> int | None:
+        """An agent, by its name or #id: None if there's no such agent, or the name could be more than one."""
+        which = which.strip()
+        if which.lstrip("#").isdigit():
+            agent_id = int(which.lstrip("#"))
+            return agent_id if self.history.get_session(agent_id) else None
+        named = [(agent_id, name) for agent_id, name in self.agents()]
+        exact = [agent_id for agent_id, name in named if name.casefold() == which.casefold()]
+        partly = [agent_id for agent_id, name in named if which.casefold() in name.casefold()]
+        found = exact or partly
+        return found[0] if len(found) == 1 else None
 
     # -- starting and stopping -------------------------------------------------------------------------
 
@@ -211,9 +275,6 @@ class Dags:
                 pending = self._next()
                 if pending and self.agent.answering_you == 0 and (pending.now or self.quiet()):
                     await self._start(pending)
-                    continue
-                if self._heartbeat_due() and (self.agent.answering_you == 0 if self._check_now else self.quiet()):
-                    await self.heartbeat()
                     continue
                 if self.reviews and self.quiet():
                     await self.review(self.reviews.pop(0))
@@ -265,11 +326,24 @@ class Dags:
             self._queue(config.id, "schedule", at=config.next_run)
             self.store.update(config.id, next_run=spec.schedule.after(self.clock.now(self.tz)).timestamp())
 
-    def _queue(self, agent_id: int, trigger: str, input: str = "", now: bool = False, at: float | None = None) -> bool:
+    def _queue(
+        self,
+        agent_id: int,
+        trigger: str,
+        input: str = "",
+        items: list[str] | None = None,
+        *,
+        now: bool = False,
+        at: float | None = None,
+        chain: tuple[int, ...] = (),
+    ) -> bool:
+        items = list(items or [])
         waiting = [p for p in self.queue if p.agent == agent_id]
-        if any(p.trigger == trigger and p.input == input for p in waiting) or len(waiting) >= MAX_QUEUED:
+        same = any(p.trigger == trigger and p.input == input and p.items == items for p in waiting)
+        if same or len(waiting) >= MAX_QUEUED:
             return False
-        self.queue.append(Pending(agent_id, trigger, input, at if at is not None else self.clock.time(), now))
+        when = at if at is not None else self.clock.time()
+        self.queue.append(Pending(agent_id, trigger, input, when, now, items, chain))
         self.wake()
         return True
 
@@ -289,7 +363,8 @@ class Dags:
         self.queue.remove(pending)
         self._fired[(pending.agent, pending.trigger)] = self.clock.time()
         self._run = asyncio.create_task(
-            self.runner.run(pending.agent, pending.trigger, pending.input), name=f"dag-{pending.agent}"
+            self.runner.run(pending.agent, pending.trigger, pending.input, pending.items, pending.chain),
+            name=f"dag-{pending.agent}",
         )
         try:
             await asyncio.wait({self._run})
@@ -314,24 +389,28 @@ class Dags:
         if not self._queue(agent_id, "manual", now=True):
             raise ValueError("It's already waiting to run.")
 
-    def fire(self, event: str, text: str = "") -> list[str]:
-        """An event came in: queue the DAGs it starts, unless one started on it within EVENT_GAP seconds. Returns
-        the names of the agents whose DAGs it started."""
-        return self._trigger(f"event:{event}", lambda spec: event in spec.events, text)
+    def fire(self, event: str, text: str = "", items: list[str] | None = None) -> list[str]:
+        """An event came in, from outside or from Claude: queue the DAGs it starts, unless one started on it within
+        EVENT_GAP seconds. Returns the names of the agents whose DAGs it started."""
+        return self._trigger(event, text, items)
 
-    def happened(self, key: str, text: str = "") -> list[str]:
-        """Something watched as ``key`` has happened: queue the DAGs it starts."""
-        return self._trigger(f"{WATCH}{key}", lambda spec: key in spec.watches, text)
+    def emitted(self, ctx: RunContext, event: str, text: str, items: list[str]) -> list[str]:
+        """A task with outlets found something: start the DAGs with the event in their triggers, but not those of
+        the agents whose runs led here."""
+        return self._trigger(event, text, items, chain=(*ctx.chain, ctx.run.agent))
 
-    def _trigger(self, trigger: str, starts: Callable[[DagSpec], bool], text: str) -> list[str]:
-        now, started = self.clock.time(), []
+    def _trigger(self, event: str, text: str, items: list[str] | None, chain: tuple[int, ...] = ()) -> list[str]:
+        trigger, now, started = f"event:{event}", self.clock.time(), []
         for config in self.store.all():
             spec = self.spec(config.dag)
-            if config.paused or spec is None or not starts(spec):
+            if config.paused or spec is None or event not in spec.triggers:
+                continue
+            if config.id in chain:
+                log.info("%s would start agent %d's DAG again, which led to it: it doesn't", trigger, config.id)
                 continue
             if now - self._fired.get((config.id, trigger), float("-inf")) < EVENT_GAP:
                 continue  # it's only just started on it
-            if self._queue(config.id, trigger, text, now=not trigger.startswith(WATCH)):
+            if self._queue(config.id, trigger, text, items, now=True, chain=chain):
                 self._fired[(config.id, trigger)] = now
                 started.append(self.history.title(config.id) or f"Agent {config.id}")
         if started:
@@ -343,18 +422,20 @@ class Dags:
         events: dict[str, list[str]] = {}
         for config in self.store.all():
             spec = self.spec(config.dag)
-            for event in spec.events if spec and not config.paused else ():
+            for event in spec.triggers if spec and not config.paused else ():
                 events.setdefault(event, []).append(self.history.title(config.id) or f"Agent {config.id}")
         return events
 
-    def watched_by(self) -> dict[str, list[str]]:
-        """The keys of what's watched that start DAGs, with the names of their agents."""
-        keys: dict[str, list[str]] = {}
+    def sources(self) -> dict[str, list[dict[str, Any]]]:
+        """The events DAGs' outlets start, with where each comes from: {event: [{"agent", "name", "task"}]}."""
+        found: dict[str, list[dict[str, Any]]] = {}
         for config in self.store.all():
             spec = self.spec(config.dag)
-            for key in spec.watches if spec and not config.paused else ():
-                keys.setdefault(key, []).append(self.history.title(config.id) or f"Agent {config.id}")
-        return keys
+            for task in spec.tasks if spec else ():
+                for event in task.outlets:
+                    name = self.history.title(config.id) or f"Agent {config.id}"
+                    found.setdefault(event, []).append({"agent": config.id, "name": name, "task": task.id})
+        return found
 
     def save(self, agent_id: int, source: str) -> DagSpec:
         """Make ``source`` an agent's DAG, and work out when it's next due. DagError if it won't do."""
@@ -389,18 +470,16 @@ class Dags:
             await asyncio.wait({run}, timeout=10)
 
     async def delete(self, agent_id: int) -> None:
-        """Forget an agent's DAG, its runs and what they proposed, as when the agent's deleted: stopping a run of it
-        first, if one's going."""
+        """Forget an agent's DAG, its runs, what they proposed and its files, as when the agent's deleted: stopping
+        a run of it first, if one's going."""
         await self.halt(agent_id)
         self.queue = [p for p in self.queue if p.agent != agent_id]
         self.store.delete(agent_id)
+        agent_files.forget(self.workspace, agent_id)
 
     def forget(self) -> None:
-        """Forget what runs and checks found, as forgetting everything does. The DAGs, and what's watched, stay."""
+        """Forget what runs found, as forgetting everything does. The agents and their DAGs stay."""
         self.store.forget()
-        self.check_result = None
-        if self.watches:
-            self.watches.forget_notes()
 
     def decide(self, proposal_id: int, approve: bool) -> Proposal:
         """Approve or reject a proposal. ValueError if it can't be, as when the DAG's changed since."""
@@ -430,7 +509,8 @@ class Dags:
         """An agent's DAG, for the dashboard: its file and tasks, or what's wrong with it, when it runs, whether
         it's running, and what's waiting for you."""
         config = self.store.get(agent_id)
-        source = config.dag or STARTER
+        master = agent_id == self.master
+        source = config.dag or (MASTER_STARTER if master else STARTER)
         try:
             spec, error = parse(source), None
         except DagError as exc:
@@ -441,6 +521,7 @@ class Dags:
         return {
             "source": source,
             "written": bool(config.dag),
+            "master": master,
             "dag": spec.as_dict() if spec else None,
             "error": error,
             "paused": config.paused,
@@ -462,128 +543,7 @@ class Dags:
             out["summary"] = ends.describe_tools(proposal.changes)
         return out
 
-    # -- checking on what's watched ----------------------------------------------------------------------
-
-    def _heartbeat_minutes(self) -> float:
-        return max(self.cfg.heartbeat_minutes, MIN_HEARTBEAT) if self.cfg.heartbeat_minutes else 0.0
-
-    def _heartbeat_due(self) -> bool:
-        if self.watches is None or not self._heartbeat_minutes() or not self.watches.all():
-            return False
-        return self._check_now or self.clock.time() - self.last_check >= self._heartbeat_minutes() * 60
-
-    def check_now(self) -> None:
-        """Check on what's watched as soon as Athena's free, as asked on the dashboard."""
-        self._check_now = True
-        self.wake()
-
-    async def heartbeat(self) -> None:
-        """Check on everything that's watched, in one turn: start the DAGs waiting for what's happened, and tell
-        you only what needs your attention."""
-        assert self.watches is not None
-        asked = self._check_now  # you asked for it: it doesn't wait for you to have been quiet a moment
-        self._check_now, self.last_check = False, self.clock.time()
-        for gone in self.watches.expire(self.clock.time()):
-            await self._tell(f"👀 I've stopped watching for this, as it was only until today: {gone.what}")
-        watching = self.watches.all()
-        if not watching:
-            return
-        starts = self.watched_by()
-        listed = "\n".join(describe_watch(w, self.tz, starts.get(w.key, [])) for w in watching)
-        text = (
-            f"Check on what {self.user} asked you to keep an eye on:\n{listed}\n\n"
-            "Use your tools to see where each one stands. When one that starts an agent's DAG has happened, call "
-            "watch with action happened, and what you found, rather than telling them yourself. Use action note to "
-            "keep what you'll want next time, such as the last figure you saw or what you've passed on already, "
-            "and action done once one no longer matters. Then reply with only what needs their attention now, "
-            f"short. If nothing does, reply with just: {NOTHING}"
-        )
-        note = (
-            f"This is your regular check, every {self._heartbeat_minutes():g} minutes, not a message from "
-            f"{self.user}. They aren't watching, so don't ask them anything. Your earlier checks are above."
-        )
-
-        async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
-            channel = self.channel()
-            if channel is None:
-                return False
-            why = "While checking what you asked me to watch"
-            async with self.agent.gate.aside():
-                return await channel.ask(tool, args, summary, why=why, timeout=self.cfg.confirm_minutes * 60)
-
-        log.info("Checking on %d watched thing%s", len(watching), "" if len(watching) == 1 else "s")
-        self.checking = True
-        taken, on_tool = steps()
-        outcome, said = "nothing new", ""
-        try:
-            async with self.agent.gate.task("checking what you're watching", grace=not asked):
-                background = Background(  # its time counts from now, when it has the model
-                    label="Checking what you're watching",
-                    step=_budget(HEARTBEAT_MINUTES),
-                    thinking=self.cfg.thinking,
-                    max_rounds=self.cfg.max_tool_rounds,
-                    source="checking what you asked me to watch",
-                )
-                result = await self.agent.respond(
-                    "heartbeat",
-                    text,
-                    confirm=confirm,
-                    allowed=self.cfg.heartbeat_tools,
-                    on_tool=on_tool,
-                    note=note,
-                    channel="Heartbeat",
-                    background=background,
-                )
-        except _OutOfTime:
-            outcome = f"ran out of time ({HEARTBEAT_MINUTES} minutes)"
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            outcome = f"failed: {describe_error(exc)}"
-            log.warning("The check on what's watched failed: %s", exc)
-        else:
-            said = result.text.strip()
-            if result.saved and NOTHING not in said.upper():
-                outcome = "told you"
-                await self._tell(f"👀 {said}", keep=("(You checked what I asked you to watch.)", said))
-            else:
-                said = ""
-        finally:
-            self.checking = False
-            self._finished = time.monotonic()
-        self.watches.checked(self.clock.time())
-        self.check_result = {"at": self.last_check, "outcome": outcome, "said": said, "steps": taken}
-        log.info("The check on what's watched: %s", outcome)
-        self.on_ran()
-
-    def watching(self) -> dict[str, Any]:
-        """What's watched, and the checks, for the dashboard."""
-        minutes = self._heartbeat_minutes()
-        items = self.watches.all() if self.watches else []
-        starts = self.watched_by()
-        return {
-            "items": [
-                {
-                    "id": w.id,
-                    "key": w.key,
-                    "what": w.what,
-                    "created": w.created,
-                    "until": w.until,
-                    "by": w.by,
-                    "note": w.note,
-                    "starts": starts.get(w.key, []),
-                }
-                for w in items
-            ],
-            "every_minutes": minutes,
-            "next": self.last_check + minutes * 60 if minutes and items else None,
-            "last": self.check_result,
-            "checking": self.checking,
-            "asked": self._check_now,  # you asked for a check, which hasn't started yet
-        }
-
-    async def _tell(self, text: str, keep: tuple[str, str] | None = None) -> None:
-        """Message you. ``keep``: (a line for your side, what was said), to keep in the main agent's chat too."""
+    async def _tell(self, text: str) -> None:
         channel = self.channel()
         if channel is None:
             log.warning("Nowhere to send a message of %d characters", len(text))  # not what it says
@@ -592,9 +552,6 @@ class Dags:
             await channel.tell(text)
         except Exception as exc:
             log.warning("Couldn't send a message: %s", exc)
-        if keep:  # so you can ask about it
-            yours, said = keep
-            self.history.append_exchange(self.history.current_chat, yours, said, channel="Athena")
 
     # -- looking back at how skills went in a chat ---------------------------------------------------
 
@@ -644,18 +601,13 @@ class Dags:
     def tools(self) -> list[Tool]:
         from athena.dags.tools import dag_tools
 
-        watching = (
-            [watch_tool(self.watches, self.tz, self._heartbeat_minutes(), self.wake, self.happened)]
-            if self.watches
-            else []
-        )
-        return [*watching, *dag_tools(self)]
+        return dag_tools(self)
 
     def agent_here(self) -> int:
-        """The agent of the conversation a tool's called in: the main one, if it's not an agent's."""
+        """The agent of the conversation a tool's called in: the master agent, if it's not an agent's."""
         chat = current_turn().chat
         agent_id = session_of(chat) if chat else None
-        return agent_id if agent_id is not None else self.history.session.id
+        return agent_id if agent_id is not None else self.master
 
 
 class _OutOfTime(Exception):

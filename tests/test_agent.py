@@ -359,7 +359,7 @@ async def test_each_answer_is_counted_with_its_tools_and_context(config, memory)
         return False
 
     await agent.respond("chat1", "Remember I like figs", confirm=decline, channel="Siri")
-    session = stats.summary(agent.history.session.id)
+    session = stats.summary(agent.history.master.id)
     assert (session["queries"], session["tool_calls"], session["largest_prompt"]) == (1, 4, 1300)
     assert {t["name"]: (t["calls"], t["failed"], t["declined"]) for t in session["tools"]} == {
         "remember": (1, 0, 0),
@@ -386,7 +386,7 @@ async def test_warming_up_measures_the_context(config, memory):
     stats = UsageStats(config.db_path)
     agent = make_agent(config, memory, FakeLLMServer([usage(2345, 1, completion("."))]), stats=stats)
     await agent.warm_up("chat1")
-    assert stats.summary(agent.history.session.id)["context"]["tokens"] == 2345
+    assert stats.summary(agent.history.master.id)["context"]["tokens"] == 2345
 
 
 async def test_after_a_reply_the_chat_is_free_to_warm_up(config, memory):

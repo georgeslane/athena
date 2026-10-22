@@ -173,17 +173,17 @@ async def test_wrong_passwords_are_limited(athena):
 )
 async def test_changes_only_come_from_the_dashboards_own_page(athena, headers, status):
     async with client(athena) as http:
-        response = await http.post("/api/session", content=b"{}", headers=headers)
+        response = await http.post("/api/agents", content=b"{}", headers=headers)
         assert response.status_code == status, response.text
 
 
 async def test_the_page_from_its_own_address_can_make_changes(athena):
     async with client(athena) as http:
         host = f"127.0.0.1:{athena.dashboard.port}"
-        response = await http.post("/api/session", json={}, headers={"Origin": f"http://{host}"})
+        response = await http.post("/api/agents", json={}, headers={"Origin": f"http://{host}"})
         assert response.status_code == 200
         behind_tailscale = {"Origin": "https://pi.tail1234.ts.net", "X-Forwarded-Host": "pi.tail1234.ts.net"}
-        assert (await http.post("/api/session", json={}, headers=behind_tailscale)).status_code == 200
+        assert (await http.post("/api/agents", json={}, headers=behind_tailscale)).status_code == 200
 
 
 async def test_files_are_cached_and_compressed(athena):
@@ -222,25 +222,21 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
         "error": None,
         "checked": 0,
     }
-    # With the tools for tasks and watching, files, and the MCP Registry's.
+    # With the tools for agents' DAGs, files, and the MCP Registry's.
     assert overview["tools"] == {"count": 18, "servers": 1, "connected": 1, "applying": False}
     assert overview["status"]["state"] == "idle" and overview["status"]["last_task"] == "Thanks"
 
 
-async def test_a_new_session_and_forgetting_everything(athena):
-    await athena.agent.respond(athena.history.current_chat, "My sister is called Anna")
+async def test_forgetting_everything(athena):
+    await athena.agent.respond(athena.history.master_chat, "My sister is called Anna")
     await until(lambda: athena.memory.store.count().get("conversation"))
     await athena.memory.remember("George's sister is called Anna.")
     async with client(athena) as http:
-        session = (await http.post("/api/session", json={})).json()["session"]
-        assert (session["id"], session["queries"], session["context"]) == (2, 0, None)
-        assert athena.history.load(athena.history.current_chat) == []  # a new conversation
-
         refused = await http.post("/api/forget", json={})
         assert refused.status_code == 400 and athena.memory.store.count() == {"fact": 1, "conversation": 1}
         after = (await http.post("/api/forget", json={"confirm": "forget"})).json()
     assert after["memory"] == {"facts": 0, "documents": 0, "conversations": 0}
-    assert after["session"]["id"] == 3 and after["total"]["queries"] == 1  # the statistics stay
+    assert after["session"]["id"] == 1 and after["total"]["queries"] == 1  # the master agent and statistics stay
 
 
 async def test_switching_thinking_on_short_or_off(athena):
@@ -737,9 +733,6 @@ async def test_paths_it_doesnt_know_are_refused(athena):
         assert (await http.get("/api/tools/demo")).status_code == 404  # a server is changed or removed, not read
         assert (await http.post("/api/overview", json={})).status_code == 405
         assert (await http.get("/api/skills/")).status_code == 200  # a trailing slash is fine
-
-
-# -- watching, on the Tasks tab ---------------------------------------------------------------------
 
 
 async def test_a_servers_vulnerable_dependencies_show_on_its_card(athena):

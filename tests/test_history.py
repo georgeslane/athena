@@ -106,42 +106,38 @@ def test_reset_and_chats_are_separate(tmp_path):
     assert [m["content"] for m in store.load("a")] == ["again", "yes"]
 
 
-def test_each_session_is_a_conversation_and_the_one_used_last_is_current(tmp_path):
+def test_each_agent_is_a_conversation_and_the_master_agent_comes_first(tmp_path):
     changes = []
     store = ConversationStore(tmp_path / "h.db", max_messages=8)
     store.listeners.append(lambda: changes.append(1))
-    first = store.session
-    assert first.id == 1 and store.current_chat == "session:1" and store.sessions_started() == 1
-    store.append_exchange(store.current_chat, "Plan a trip to   Rome", "Sure.", channel="Telegram")
+    master = store.master
+    assert (master.id, master.name, master.master) == (1, "Master", True) and store.master_chat == "session:1"
+    store.append_exchange(store.master_chat, "Plan a trip to   Rome", "Sure.", channel="Telegram")
     second = store.new_session()
-    assert second.id == 2 and store.current_chat == "session:2" and store.load("session:2") == []
-    store.append_exchange(store.current_chat, "What's the weather?", "Sunny.", channel="Dashboard")
+    assert second.id == 2 and store.master.id == 1 and store.load("session:2") == []
+    store.append_exchange(second.chat_id, "What's the weather?", "Sunny.", channel="Dashboard")
     assert store.load("session:1")[0]["content"] == "Plan a trip to   Rome"  # it's all still there
 
-    # Carrying on in the first makes it the current session again, and it stays so after a restart.
-    assert store.use_session(1).id == 1 and store.current_chat == "session:1"
+    # The master agent first, then the one with something said in it most recently; after a restart too.
     store.close()
     store = ConversationStore(tmp_path / "h.db", max_messages=8)
-    assert store.session.id == 1
+    assert store.master.id == 1 and store.sessions_started() == 2
     listed = store.sessions()
-    assert [(s.id, s.title, s.messages) for s in listed] == [
-        (1, "Plan a trip to Rome", 2),
-        (2, "What's the weather?", 2),
+    assert [(s.id, s.title, s.messages, s.master) for s in listed] == [
+        (1, "Master", 2, True),
+        (2, "What's the weather?", 2, False),
     ]
-    with pytest.raises(KeyError):
-        store.use_session(9)
-
-    # A new one shows once something's said in it, or while it's the current one.
-    store.new_session()
-    assert [s.id for s in store.sessions()] == [3, 1, 2]
-    store.use_session(2)
-    assert [s.id for s in store.sessions()] == [2, 1]
-    assert len(changes) == 4  # each message and change of session (another store's aren't counted)
+    # A new one shows once something's said in it, or it has a name.
+    third = store.new_session()
+    assert [s.id for s in store.sessions()] == [1, 2]
+    store.append_exchange(third.chat_id, "Hello", "Hi")
+    assert [s.id for s in store.sessions()] == [1, 3, 2]
+    assert len(changes) == 3  # each message and new agent (another store's aren't counted)
 
 
 def test_a_sessions_messages_page_by_page_with_where_they_came_from(tmp_path):
     store = ConversationStore(tmp_path / "h.db")
-    chat = store.current_chat
+    chat = store.master_chat
     for i in range(5):
         store.append_exchange(chat, f"q{i}", f"a{i}", tools=["fetch"] if i == 4 else None, channel="Telegram")
     last, more = store.messages(1, limit=4)
@@ -155,63 +151,30 @@ def test_a_sessions_messages_page_by_page_with_where_they_came_from(tmp_path):
 def test_tools_allowed_in_a_session(tmp_path):
     store = ConversationStore(tmp_path / "h.db")
     assert store.set_allowed_tools(1, ["fetch", "send_email", "fetch"]).allowed_tools == ("fetch", "send_email")
-    assert store.session.allowed_tools == ("fetch", "send_email")
-    store.new_session()
-    assert store.session.allowed_tools == ()
-    assert store.get_session(1).allowed_tools == ("fetch", "send_email")
+    assert store.master.allowed_tools == ("fetch", "send_email")
+    other = store.new_session()
+    assert other.allowed_tools == () and store.get_session(1).allowed_tools == ("fetch", "send_email")
     with pytest.raises(KeyError):
         store.set_allowed_tools(9, [])
     store.clear()  # forgetting everything forgets what you allowed too
-    assert store.get_session(1).allowed_tools == ()
+    assert store.get_session(1).allowed_tools == () and store.master.allowed_tools == ()
 
 
-def test_from_when_a_session_was_a_time_each_gets_its_conversation(tmp_path):
-    """A database from before: sessions marked where the model's view of every chat began, Telegram's chat and the
-    terminal's, a summary of the current session, and a task's chat."""
+def test_a_master_agent_is_made_in_a_database_from_before(tmp_path):
     db = sqlite3.connect(tmp_path / "h.db")
     db.executescript(
         """
-        CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, role TEXT NOT NULL,
-            content TEXT NOT NULL, created_at TEXT NOT NULL, tools TEXT, photos TEXT);
-        CREATE TABLE chat_state (chat_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL DEFAULT 0, summary TEXT,
-            summary_session INTEGER);
         CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, started REAL NOT NULL,
-            first_message INTEGER NOT NULL);
-        INSERT INTO sessions VALUES (1, 100, 0), (2, 200, 4);
+            first_message INTEGER NOT NULL, last_used REAL, allowed_tools TEXT NOT NULL DEFAULT '[]',
+            name TEXT NOT NULL DEFAULT '', muted INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO sessions (started, first_message, name) VALUES (1, 0, 'Old');
         """
-    )
-    rows = [
-        ("111", "user", "first"), ("111", "assistant", "one"),  # session 1
-        ("task:1", "user", "old run"), ("task:1", "assistant", "done"),
-        ("111", "user", "second"), ("111", "assistant", "two"),  # session 2, from 5
-        ("cli", "user", "from the terminal"), ("cli", "assistant", "hi"),
-        ("111", "user", "(Your task “Briefing” ran.)"), ("111", "assistant", "All quiet."),
-        ("task:1", "user", "new run"), ("task:1", "assistant", "done again"),
-    ]  # fmt: skip
-    db.executemany("INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, ?, ?, 'x')", rows)
-    db.executemany(
-        "INSERT INTO chat_state VALUES (?, ?, ?, ?)", [("111", 6, "We said hello.", 2), ("task:1", 0, "Old.", 1)]
     )
     db.commit()
     db.close()
-
     store = ConversationStore(tmp_path / "h.db")
-    assert store.session.id == 2  # the latest is still the current one
-    assert [m["content"] for m in store.load("session:1")] == ["first", "one"]
-    second, _ = store.messages(2)
-    assert [(m.text, m.channel) for m in second if m.role == "user"] == [
-        ("second", "Telegram"),
-        ("from the terminal", "Terminal"),
-        ("(Your task “Briefing” ran.)", "Athena"),
-    ]
-    # The model sees the current session as it did Telegram's chat: what came after its window, and the summary.
-    seen = store.load("session:2")
-    assert seen[0]["content"].startswith("<summary>") and seen[0]["content"].endswith("from the terminal")
-    # A task's chat sees only what's from the current session, without a summary from an earlier one.
-    assert [m["content"] for m in store.load("task:1")] == ["new run", "done again"]
-    assert [s.id for s in store.sessions()] == [2, 1]
-    store.close()
-    assert [m["content"] for m in ConversationStore(tmp_path / "h.db").load("session:1")] == ["first", "one"]
+    assert (store.master.id, store.master.name) == (2, "Master")
+    assert ConversationStore(tmp_path / "h.db").master.id == 2  # just the one
 
 
 def test_exchanges_pair_each_message_with_its_reply(tmp_path):
@@ -229,12 +192,13 @@ def test_exchanges_pair_each_message_with_its_reply(tmp_path):
     assert store.exchanges_after(exchanges[-1].id) == []
 
 
-def test_clearing_deletes_every_message_and_starts_a_session(tmp_path):
+def test_clearing_deletes_every_message_and_keeps_the_agents(tmp_path):
     store = ConversationStore(tmp_path / "h.db")
+    other = store.new_session("Jobs")
     store.append_exchange("a", "secret plans", "noted")
     last = store.exchanges_after(0)[-1].id
-    session = store.clear()
-    assert session.id == 2 and store.exchanges_after(0) == []
+    store.clear()
+    assert store.exchanges_after(0) == [] and store.master.id == 1 and store.get_session(other.id)
     store.append_exchange("a", "new", "start")
     assert store.exchanges_after(0)[0].id > last  # ids aren't reused, so nothing old can come back
     assert [m["content"] for m in store.load("a")] == ["new", "start"]
@@ -263,33 +227,32 @@ def test_deleting_a_session_deletes_what_was_said_in_it_and_only_its_own_photos(
     from athena.photos import Photo, red_square
 
     store = ConversationStore(tmp_path / "h.db")
-    first = store.session
+    first = store.new_session("Here")
     shared, own = red_square(), Photo(b"\xff\xd8\xff" + b"own", "image/jpeg")
     store.append_exchange(first.chat_id, "[2 photos] Look", "Red.", photos=[shared, own])
     second = store.new_session("Elsewhere")
     store.append_exchange(second.chat_id, "[Photo] Again", "Still red.", photos=[shared])
-    store.use_session(first.id)
 
     [exchange] = store.delete_session(first.id)
     assert (exchange.question, exchange.answer) == ("[2 photos] Look", "Red.")
-    assert store.session.id == second.id  # the one used before it is current now
     assert store.photos.load(shared.name) and store.photos.load(own.name) is None
     assert store.get_session(first.id) is None and store.load(first.chat_id) == []
     with pytest.raises(KeyError):
         store.delete_session(first.id)
+    with pytest.raises(ValueError, match="can't be deleted"):
+        store.delete_session(store.master.id)
     store.delete_session(second.id)
-    assert store.session.id not in (first.id, second.id)  # there's always a current session
-    assert store.sessions_started() == 1
+    assert [s.id for s in store.sessions()] == [store.master.id]
 
 
 def test_sessions_can_be_named_and_muted_and_a_named_one_is_listed(tmp_path):
     store = ConversationStore(tmp_path / "h.db")
     store.rename(1, "  Maths   research ")
     store.set_muted(1, True)
-    assert (store.session.name, store.session.muted) == ("Maths research", True)
-    later = store.new_session("Business", current=False)
-    assert store.session.id == 1 and [s.id for s in store.sessions()] == [1, later.id]
+    assert (store.master.name, store.master.muted) == ("Maths research", True)
+    later = store.new_session("Business")
+    assert [s.id for s in store.sessions()] == [1, later.id]
     assert [s.title for s in store.sessions()] == ["Maths research", "Business"]
-    store.append_exchange(f"session:{later.id}", "(Your task “Plan”) Plan it.", "Planned.")
+    store.append_exchange(f"session:{later.id}", "Plan it.", "Planned.")
     store.rename(later.id, "")
-    assert store.title(later.id) == "Plan"  # after the task it started with
+    assert store.title(later.id) == "Plan it."  # after your first message in it

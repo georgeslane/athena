@@ -55,7 +55,7 @@ async def _chat(args: argparse.Namespace) -> int:
     services.status.channel = "the terminal"
     await services.start()
     name = cfg.agent.assistant_name
-    print(f"Chatting with {name} via {cfg.llm.model}, in session {services.history.session.id}. /help for commands.\n")
+    print(f"Chatting with {name}'s master agent, via {cfg.llm.model}. /help for commands.\n")
     for st in services.mcp.status():
         print(
             f"  MCP {st.name}: "
@@ -87,7 +87,7 @@ async def _chat(args: argparse.Namespace) -> int:
                 said = await commands.run(services, *command, source="terminal")
                 print("  " + (said or "There's no such command here: /help lists them.").replace("\n", "\n  "))
                 continue
-            session = services.history.session  # your conversation, wherever you're having it
+            session = services.history.master  # the master agent, as Telegram and Siri talk to
             try:
                 result = await services.agent.respond(
                     session.chat_id,
@@ -419,7 +419,7 @@ def main(argv: list[str] | None = None) -> None:
     p_mac_install.add_argument("--server", action="append", default=[], help="another server the script lists")
     p_mac_install.add_argument("--scope", action="append", default=[], help="with --documents: what the Pi may see")
     p_mac_install.add_argument("--uninstall", action="store_true", help="remove everything it set up")
-    sub.add_parser("chat", help="chat in the terminal, in the current session (handy over SSH)")
+    sub.add_parser("chat", help="chat in the terminal, with the master agent (handy over SSH)")
     sub.add_parser("doctor", help="check the model, embeddings, MCP servers, Telegram and the dashboard")
     p_ingest = sub.add_parser("ingest", help="add text/markdown files or folders to long-term memory")
     p_ingest.add_argument("paths", nargs="+")

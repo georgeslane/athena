@@ -51,8 +51,9 @@ CATALOG: tuple[Integration, ...] = (*(builtin.entry for builtin in BUILTINS), *R
 BY_ID = {i.id: i for i in CATALOG}
 # Settings of recommended servers that came after some had been set up, which those are given (upgrade).
 ADDED_LATER = ("arguments", "about")
-# Settings that no longer exist, taken out (upgrade): a config.toml with one wouldn't load.
-REMOVED = ("display.led",)
+# Settings that no longer exist, taken out (upgrade): a config.toml with one wouldn't load. Checking what was
+# watched every hour is what the master agent's DAG does now.
+REMOVED = ("display.led", "tasks.heartbeat_minutes", "tasks.heartbeat_tools")
 # Settings left at a default that no longer works, taken out so the new default applies (upgrade): the system
 # prompt was in the git checkout Athena ran from, and comes with Athena now.
 OLD_DEFAULTS = {"agent.system_prompt_file": "prompts/system.md"}

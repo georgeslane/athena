@@ -91,17 +91,20 @@ async def test_the_endpoint_needs_its_token_and_starts_the_dags_waiting(athena, 
 
     monkeypatch.setenv("TRIGGERS_TOKEN", TOKEN)  # from .env, with nothing in config.toml
     hooks = Hooks(TriggersConfig(), dags)
-    assert answer(hooks, request("arrive-home", body=b'{"text": "Arrived at 18:02"}')) == (
+    assert answer(hooks, request("arrive-home", body=b'{"text": "Arrived at 18:02", "items": ["Milk", 2]}')) == (
         200,
-        {"event": "arrive-home", "started": ["Home"], "said": "Started."},
+        {"event": "arrive-home", "started": ["Home"], "items": 2, "said": "Started."},
     )
-    assert dags.queue[0].input == "Arrived at 18:02"
+    assert (dags.queue[0].input, dags.queue[0].items) == ("Arrived at 18:02", ["Milk", "2"])
     status, said = answer(hooks, request("arrive-home"))
     assert status == 200 and said["started"] == [] and "not again" in said["said"]
     assert answer(hooks, request("nobody-waits"))[0] == 404
     assert answer(hooks, request("Bad_Name"))[0] == 400
     assert answer(hooks, request("arrive-home", method="GET"))[0] == 405
     assert answer(hooks, request("arrive-home", body=b"{not json"))[0] == 400
+    assert answer(hooks, request("arrive-home", body=b'{"items": "Milk"}'))[0] == 400
+    many = json.dumps({"items": [str(n) for n in range(21)]}).encode()
+    assert answer(hooks, request("arrive-home", body=many)) == (400, "That's 21 items: send at most 20.")
 
 
 async def test_wrong_tokens_and_too_many_events_are_refused(athena):  # noqa: F811
@@ -179,7 +182,7 @@ async def test_a_shortcut_starts_a_dag_through_the_dashboards_address(tmp_path, 
                     headers={"Authorization": f"Bearer {PASSWORD}"},
                 )
             ).json()
-            assert dag["triggers"]["hooks"] is True and "arrive-home" in dag["triggers"]["events"]
+            assert dag["events"]["hooks"] is True and dag["events"]["waiting"] == {"arrive-home": ["Home"]}
             assert dag["dag"]["triggers"] == ["arrive-home"]
     finally:
         await services.close()

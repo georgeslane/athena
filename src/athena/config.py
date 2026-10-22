@@ -154,10 +154,6 @@ class TasksConfig(_Section):
     max_tool_rounds: int = 25
     thinking: Literal["on", "short", "off"] | None = "on"  # tasks aren't in a hurry: None follows [llm]
     confirm_minutes: float = 60.0  # how long a task waits for you to allow a tool that asks first
-    # How often Athena checks on what you've asked it to watch (watching.py), all in one go: at most every hour.
-    # 0: never.
-    heartbeat_minutes: float = Field(default=60.0, ge=0)
-    heartbeat_tools: list[str] = Field(default_factory=list)  # ones that ask first, which checking needn't
 
 
 class TriggersConfig(_Section):

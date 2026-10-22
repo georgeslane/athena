@@ -1,4 +1,4 @@
-"""The commands you can send Athena, such as /session and /recall, as Telegram and the dashboard's chat both have
+"""The commands you can send Athena, such as /new and /recall, as Telegram and the dashboard's chat both have
 them: what each does, and what it says back, in Markdown. Where you send them from adds what's its own, such as
 Telegram's buttons. /stop and /retry depend on what's being answered there, so each front end has its own."""
 
@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 import openai
 
 from athena.config import THINKING, ConfigError
-from athena.history import Busy
 from athena.memory import Found
 from athena.status import describe_error
 from athena.tools import flags
@@ -23,7 +22,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 COMMANDS = [
-    ("new", "Start a new agent, as the main one: a new conversation (memories are kept)"),
+    ("new", "Start our conversation afresh: I won't see what we've said here so far (memories are kept)"),
     ("compact", "Summarise our conversation so far, keeping the last few messages, to make room"),
     ("stop", "Stop the answer I'm working on"),
     ("retry", "Answer your last message again"),
@@ -55,13 +54,14 @@ def parse(line: str) -> tuple[str, str] | None:
 
 async def run(services: Services, name: str, rest: str, *, source: str, chat_id: str | None = None) -> str | None:
     """Run a command, and what it says: None if it isn't one of these (/stop and /retry are each front end's own).
-    ``chat_id`` is the chat /compact compacts, the current session's if it's not given."""
+    ``chat_id`` is the chat it's sent in, which /new and /compact act on: the master agent's if it's not given."""
+    chat_id = chat_id or services.history.master_chat
     if name in ("help", "start"):
         return help_text(services)
     if name in ("new", "session", "reset"):
-        return new_session(services)
+        return afresh(services, chat_id)
     if name == "compact":
-        return await compact(services, chat_id or services.history.current_chat)
+        return await compact(services, chat_id)
     if name == "think":
         return think(services, rest)
     if name in ("dags", "tasks"):
@@ -103,15 +103,11 @@ def help_text(services: Services) -> str:
     return "\n".join(lines + [f"/{c} - {d}" for c, d in COMMANDS])
 
 
-def new_session(services: Services) -> str:
-    try:
-        session = services.new_session()
-    except Busy as exc:
-        return str(exc)
-    return (
-        f"Started a new agent (#{session.id}), as the main one: name it, and give it a DAG, on the dashboard. "
-        "Memories are kept, and I can still search what we said before."
-    )
+def afresh(services: Services, chat_id: str) -> str:
+    """Start a chat afresh: the model sees nothing said in it so far, though it's all still there to read."""
+    services.history.reset(chat_id)
+    services.rewarm.set()
+    return "Started afresh: I won't see what we've said here so far. Memories are kept, and I can still search them."
 
 
 async def compact(services: Services, chat_id: str) -> str:
