@@ -1,8 +1,9 @@
 # The dashboard
 
-A web page for Athena, on your iPhone or Mac. It follows your device's light or dark mode, and in Safari on an iPhone, Share > Add to Home Screen makes it an app.
+A web page for Athena, on your iPhone or Mac. It follows your device's light or dark mode, and in Safari on an iPhone, Share > Add to Home Screen makes it an app. On a phone, tap the shield in the corner for the other tabs.
 
 - **Status:** what Athena is doing, and how much it's used: messages, tool calls by tool and the average reply time, for this session and in total. It shows how much of the model's context the conversation takes up, what's in memory, and its connections. **Thinking** switches the model's thinking on, short or off, as `/think` does.
+- **Chat:** talk to Athena, in any of your sessions: see [Chat](#chat).
 - **Activity:** what Athena did, newest first: your messages and its answers, the tasks it ran, its checks on what it's watching, alerts, and when it started. Each opens to its steps: every tool it used, what that was given and gave back, whether it worked, and whether you allowed it, a task was allowed it without asking, or you declined it. It also says what the privacy check found in what a tool sent. Checks that found nothing, one after another, show as one line. It's kept for 30 days.
 - **Tasks:** what Athena does by itself, and what it's watching. Add, change, run, pause and delete them, and see what each said and did last time, tool by tool. See [Tasks](tasks.md).
 - **Memory:** what Athena wanted to remember while it worked by itself, to save or discard. Search memories, past conversations and documents. Choose folders on your Mac to index. List your private words. See [Memory](memory.md) and [Privacy](privacy-and-security.md#privacy).
@@ -10,7 +11,18 @@ A web page for Athena, on your iPhone or Mac. It follows your device's light or 
 - **Board:** the coding projects Athena has handed to Claude. See [Projects for Claude](claude-projects.md).
 - **Tools:** switch tools and MCP servers on and off, change their settings and give them keys. Choose which of a server's tools Athena uses and which ask first, add servers of your own, and choose the tools found only when they're needed. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply as soon as Athena's free, without a restart.
 
-A number on the Memory and Skills tabs says how many of Athena's suggestions are waiting for you.
+A number on the Memory and Skills tabs says how many of Athena's suggestions are waiting for you, and one on the Chat tab how many requests for your OK.
+
+## Chat
+
+Each session is a conversation, which Telegram, Siri and the terminal share: what you start in one, you can carry on in another. The current session is the one used last, which the model has read already. Your other sessions are listed newest first, and sending a message in one carries it on, as the current session. **New chat** starts another.
+
+- **One message at a time.** While Athena's answering you, wherever you asked, nothing more can be sent, and sessions can't be changed, so messages can't pile up. The send button becomes a stop button.
+- **Commands** work as in Telegram: type `/` to see them. `/stop` and `/retry` act on what you sent here.
+- **Requests for your OK** show in the conversation, with what the tool would do and everything it would be given, whether they're for a message you sent here, in Telegram, or a task. Allow or deny them here or in Telegram: whichever you answer first counts.
+- **Tools that ask first** can be allowed without asking, for your next message or for the rest of the session, wherever you're talking to Athena in it: press **Tools**. Some, such as scheduling tasks and pushing to GitHub, always ask.
+- **If Athena couldn't answer,** your message stays, to try again or change.
+- Files Athena sends go to Telegram, as a task's do.
 
 ## Set it up
 

@@ -42,30 +42,37 @@
   <div id="app" class="app" hidden>
     <header class="top">
       <div class="top-inner">
-        <a class="brand" href="#status" aria-label="Status">
+        <a class="brand" id="brand" href="#status" aria-label="Status" aria-controls="tabs">
           <div class="shield shield-small" data-state="idle" aria-hidden="true">
             <img src="athena.svg" alt="" width="40" height="40">
             <span class="eye left"></span><span class="eye right"></span><span class="ring"></span>
           </div>
           <span class="wordmark" data-name>Athena</span>
+          <!-- On a phone, the shield opens the menu of tabs: these say where you are, and that it does. -->
+          <span class="brand-where" id="brand-where">Status</span>
+          <svg class="brand-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          <span class="brand-count" id="brand-count" hidden></span>
         </a>
         <span class="pill" id="top-pill" data-state="idle"><span class="dot"></span><span class="pill-label">Idle</span></span>
-        <nav class="tabs" aria-label="Sections">
-          <a class="tab" href="#status" data-tab="status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Status</span></a>
-          <a class="tab" href="#activity" data-tab="activity"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg><span>Activity</span></a>
-          <a class="tab" href="#tasks" data-tab="tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"/></svg><span>Tasks</span></a>
-          <a class="tab" href="#memory" data-tab="memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.8-4.8"/></svg><span>Memory</span></a>
-          <a class="tab" href="#skills" data-tab="skills"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4 4.5v13c4 0 6.5.5 8 2 1.5-1.5 4-2 8-2v-13c-4 0-6.5.5-8 2zM12 6.5v13"/></svg><span>Skills</span></a>
-          <a class="tab" href="#board" data-tab="board"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v7h-4z"/></svg><span>Board</span></a>
-          <a class="tab" href="#tools" data-tab="tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg><span>Tools</span></a>
+        <nav class="tabs" id="tabs" aria-label="Sections">
+          <a class="tab" href="#status" data-tab="status" title="Status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Status</span></a>
+          <a class="tab" href="#chat" data-tab="chat" title="Chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-5 4v-4H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg><span>Chat</span></a>
+          <a class="tab" href="#activity" data-tab="activity" title="Activity"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg><span>Activity</span></a>
+          <a class="tab" href="#tasks" data-tab="tasks" title="Tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"/></svg><span>Tasks</span></a>
+          <a class="tab" href="#memory" data-tab="memory" title="Memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.8-4.8"/></svg><span>Memory</span></a>
+          <a class="tab" href="#skills" data-tab="skills" title="Skills"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4 4.5v13c4 0 6.5.5 8 2 1.5-1.5 4-2 8-2v-13c-4 0-6.5.5-8 2zM12 6.5v13"/></svg><span>Skills</span></a>
+          <a class="tab" href="#board" data-tab="board" title="Board"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v7h-4z"/></svg><span>Board</span></a>
+          <a class="tab" href="#tools" data-tab="tools" title="Tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg><span>Tools</span></a>
         </nav>
       </div>
       <div class="meander" aria-hidden="true"></div>
     </header>
 
+    <div class="menu-backdrop" id="menu-backdrop" hidden></div>
     <div class="banner" id="offline" role="status" hidden>Can't reach Athena. Trying again…</div>
 
     <section id="tab-status" class="panel" data-panel="status" aria-label="Status"></section>
+    <section id="tab-chat" class="panel chat-panel" data-panel="chat" aria-label="Chat" hidden></section>
     <section id="tab-activity" class="panel" data-panel="activity" aria-label="Activity" hidden></section>
     <section id="tab-tasks" class="panel" data-panel="tasks" aria-label="Tasks" hidden></section>
     <section id="tab-memory" class="panel" data-panel="memory" aria-label="Memory" hidden></section>

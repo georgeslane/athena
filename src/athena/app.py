@@ -15,6 +15,7 @@ from athena.agent import Agent
 from athena.alerts import HealthMonitor, check_health
 from athena.approvals import Approvals
 from athena.builtin import Builtin, Unavailable
+from athena.chat import DashboardChat
 from athena.config import THINKING, Config, parse_config
 from athena.dashboard import DashboardServer
 from athena.documents import DocumentIndex
@@ -156,6 +157,7 @@ class Services:
         self.tools.add_provider(self.mcp.tools)
         # Your documents, indexed from your Mac when you ask on the dashboard.
         self.documents = DocumentIndex(self.config.documents, self.memory, self.config.log_dir)
+        self.chat = DashboardChat(self)  # chatting on the dashboard (chat.py)
         self.dashboard = DashboardServer(self) if self.config.dashboard.enabled else None
         self.applying = False  # changes to the tools are being applied
         self._apply_lock = asyncio.Lock()
@@ -258,6 +260,7 @@ class Services:
         self.rewarm.set()
 
     async def close(self) -> None:
+        await self.chat.stop()  # an answer to the dashboard, before what it uses closes
         for task in (self._projects, self._security):
             if task:
                 task.cancel()
@@ -361,7 +364,7 @@ class Services:
         return session
 
     def _not_answering(self) -> None:
-        if self.agent.answering_you:
+        if self.chat.busy:
             raise Busy()
 
     async def forget_everything(self) -> Session:

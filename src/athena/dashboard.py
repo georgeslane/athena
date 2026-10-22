@@ -11,6 +11,14 @@ The page talks to Athena with JSON:
   GET    /api/overview          status, usage statistics, memory and connections
   GET    /api/status            what Athena is doing; ?wait=25&after=<version> waits for a change
   POST   /api/session           start a new session
+  GET    /api/chat              your sessions, newest first, whether Athena's answering you, and what's waiting for
+                                your OK; POST starts a new conversation
+  GET    /api/chat/<id>         a session's messages: the last page, or ?before=<message id>
+  POST   /api/chat/<id>         {"text", "allow": [tools]}: send a message or a command in a session, which makes it
+                                the current one; /api/chat/stop stops the answer
+  POST   /api/chat/<id>/tools   {"allowed": [tools]}: the tools that may run without asking in a session
+  POST   /api/approvals/<id>    {"allow": true | false}: answer a request for your OK, here or in Telegram
+  GET    /api/activity          what Athena did, newest first: ?before=<id>, ?kinds=message,task
   POST   /api/thinking          {"mode": "on" | "short" | "off"}: how much the model thinks before answering
   POST   /api/forget            {"confirm": "forget"}: delete every memory
   GET    /api/tools             every tool, with its settings
@@ -70,6 +78,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from athena.approvals import Approval
 from athena.config import Config
 from athena.config_files import EnvFile
 from athena.documents import DocumentsError
@@ -99,11 +108,12 @@ ASSETS = Path(__file__).parent / "assets"
 FILES = {  # what the page is made of, by path
     "/": (WEB / "index.html", "text/html; charset=utf-8"),
     "/dashboard.css": (WEB / "dashboard.css", "text/css; charset=utf-8"),
-    # The script, as modules: dashboard.js starts it, core.js and steps.js have what the tabs share, and each tab
-    # has its own.
+    # The script, as modules: dashboard.js starts it, core.js, steps.js and md.js have what the tabs share, and each
+    # tab has its own.
     **{
         f"/{name}.js": (WEB / f"{name}.js", "text/javascript; charset=utf-8")
-        for name in ("dashboard", "core", "steps", "status", "activity", "tasks", "memory", "skills", "board", "tools")
+        for name in ("dashboard", "core", "steps", "md")
+        + ("status", "chat", "activity", "tasks", "memory", "skills", "board", "tools")
     },
     "/manifest.webmanifest": (WEB / "manifest.webmanifest", "application/manifest+json"),
     "/athena.svg": (ASSETS / "athena.svg", "image/svg+xml"),
@@ -136,6 +146,13 @@ ROUTES = (
     ("POST", r"/api/thinking", "_set_thinking"),
     ("POST", r"/api/forget", "_forget"),
     ("GET", r"/api/activity", "_get_activity"),
+    ("GET", r"/api/chat", "_get_chat"),
+    ("POST", r"/api/chat", "_new_chat"),
+    ("POST", r"/api/chat/stop", "_stop_chat"),
+    ("GET", r"/api/chat/(?P<session>\d+)", "_get_chat_session"),
+    ("POST", r"/api/chat/(?P<session>\d+)", "_send"),
+    ("POST", r"/api/chat/(?P<session>\d+)/tools", "_allow_in_session"),
+    ("POST", r"/api/approvals/(?P<which>[0-9a-f]+)", "_approve"),
     ("GET", r"/api/tools", "_get_tools"),
     ("POST", r"/api/tools", "_add_server"),
     ("POST", r"/api/reconnect", "_reconnect"),
@@ -202,11 +219,25 @@ class DashboardServer(Server):
             return False
         self._running = True
         self.feed.start()
+        # The page follows your conversation, the chat's replies and requests for your OK as it does the status.
+        self.s.history.listeners.append(self.feed.poke)
+        self.s.chat.listeners.append(self.feed.poke)
+        self.s.approvals.listeners.append(self._approvals_changed)
         self._check_model()  # so it's known when the page first asks
         log.info("Dashboard on http://%s:%d", self.cfg.host, self.port)
         return True
 
+    def _approvals_changed(self, approval: Approval) -> None:
+        self.feed.poke()
+
     async def stop(self) -> None:
+        for listeners, listener in (
+            (self.s.history.listeners, self.feed.poke),
+            (self.s.chat.listeners, self.feed.poke),
+            (self.s.approvals.listeners, self._approvals_changed),
+        ):
+            if listener in listeners:
+                listeners.remove(listener)
         self.feed.stop()
         for task in (self._applier, self._model_check):
             if task and not task.done():
@@ -368,6 +399,62 @@ class DashboardServer(Server):
         return _json(
             {"entries": [e.as_dict() for e in entries[:PAGE]], "more": len(entries) > PAGE, "keep_days": KEEP_DAYS}
         )
+
+    def _get_chat(self, request: Request, method: str) -> Response:
+        return _json(self.s.chat.state())
+
+    def _new_chat(self, request: Request, method: str) -> Response:
+        """A new conversation, as the current session."""
+        try:
+            session = self.s.chat.new_session()
+        except Busy as exc:
+            raise HTTPError(409, str(exc)) from None
+        return _json({**self.s.chat.state(), "session": session.id})
+
+    async def _stop_chat(self, request: Request, method: str) -> Response:
+        return _json({"stopped": await self.s.chat.stop()})
+
+    def _get_chat_session(self, request: Request, method: str, session: str) -> Response:
+        before = request.query.get("before")
+        if before is not None and not before.isdigit():
+            raise HTTPError(400, "Ask with ?before=<a message's id>.")
+        try:
+            return _json(self.s.chat.session(int(session), int(before) if before else None))
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+
+    async def _send(self, request: Request, method: str, session: str) -> Response:
+        """{"text", "allow": [tools allowed without asking for this message]}: a command says what it did."""
+        body = _body(request)
+        try:
+            said = await self.s.chat.send(int(session), body.get("text"), body.get("allow") or [])
+        except Busy as exc:
+            raise HTTPError(409, str(exc)) from None
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        return _json({**self.s.chat.state(), "said": said})
+
+    def _allow_in_session(self, request: Request, method: str, session: str) -> Response:
+        """{"allowed": [tools]}: what may run without asking in a session."""
+        try:
+            self.s.chat.allow_in_session(int(session), _body(request).get("allowed"))
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        return _json(self.s.chat.session(int(session)))
+
+    def _approve(self, request: Request, method: str, which: str) -> Response:
+        """{"allow": true or false}: answer a request for your OK."""
+        allow = _body(request).get("allow")
+        if not isinstance(allow, bool):
+            raise HTTPError(400, 'Send {"allow": true} or {"allow": false}.')
+        if not self.s.approvals.answer(which, allow):
+            raise HTTPError(409, "That's been answered already, or it's expired.")
+        log.info("Dashboard: %s a tool", "allowed" if allow else "denied")
+        return _json(self.s.chat.state())
 
     def _get_memory(self, request: Request, method: str) -> Response:
         return _json(self.memory())
@@ -695,7 +782,18 @@ class DashboardServer(Server):
     # -- what the page shows --------------------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
-        return {"version": self.feed.version, "now": time.time(), "status": dataclasses.asdict(self.feed.snapshot)}
+        chat = self.s.chat
+        return {
+            "version": self.feed.version,
+            "now": time.time(),
+            "status": dataclasses.asdict(self.feed.snapshot),
+            # Enough for the page to know when to ask for more: the Chat tab's badge, and whether to fetch it again.
+            "chat": {
+                "current": self.s.history.session.id,
+                "busy": chat.busy,
+                "approvals": len(self.s.approvals.pending()),
+            },
+        }
 
     def overview(self) -> dict[str, Any]:
         cfg, history = self.s.config, self.s.history

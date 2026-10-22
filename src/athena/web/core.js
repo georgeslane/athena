@@ -34,6 +34,12 @@ const ICONS = {
   lock: "M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z",
   info: "M12 8h.01M11 12h1v5h1M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z",
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  plus: "M12 5v14M5 12h14",
+  back: "M15 6l-6 6 6 6",
+  send: "M5 12h13M13 6l6 6-6 6",
+  stop: "M7 7h10v10H7z",
+  shield: "M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6zM9 12l2 2 4-4",
+  chevron_down: "M6 9l6 6 6-6",
 };
 
 export function icon(name, cls) {

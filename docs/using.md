@@ -6,7 +6,7 @@ Send any message, a [photo](#photos), or a PDF or text file (see [Files](tools.m
 
 | Command | What it does |
 |---|---|
-| `/session` | Start a new session: a new conversation, which the model starts afresh. Memories are kept, and earlier conversations can still be searched. `/reset` does the same. |
+| `/session` | Start a new session: a new conversation, which the model starts afresh. Memories are kept, earlier conversations can still be searched, and the dashboard can carry them on. `/reset` does the same. |
 | `/stop` | Stop the answer Athena is working on, and any messages waiting their turn. |
 | `/compact` | Summarise the conversation so far, keeping the last two exchanges, to make room in the model's context. Athena also does this by itself: see [Sessions and context](#sessions-and-context). |
 | `/retry` | Answer your last message again, say after changing how much Athena thinks. An answer already given is taken out of the conversation and memory first. |
@@ -21,7 +21,7 @@ Send any message, a [photo](#photos), or a PDF or text file (see [Files](tools.m
 
 Only the Telegram users in `telegram.allowed_user_ids` can use it: `athena setup` puts you there. If the list is empty, the bot replies to any message with the sender's ID.
 
-`athena chat` on the Pi has most of them too: see [Sessions and context](#sessions-and-context).
+The dashboard's Chat tab has the same commands, and `athena chat` on the Pi most of them: see [Sessions and context](#sessions-and-context).
 
 ## Photos
 
@@ -33,7 +33,7 @@ It needs a model that can see, such as Qwen 3.6 35B-A3B. Some MLX conversions of
 
 Athena keeps the conversation going, so each reply can build on the last. All of it counts towards the model's context, and the more there is, the longer the model takes to read it.
 
-- **A session** is a conversation. Telegram, Siri and `athena chat` all talk into the current session, the one used last, so you can carry on in one what you started in another. Send `/session`, or press **New session** on the dashboard, to start another: the model starts it afresh, with Athena's memories. Every exchange is kept in memory too, so Athena can search earlier sessions from any of them.
+- **A session** is a conversation. Telegram, the dashboard's Chat tab, Siri and `athena chat` all talk into the current session, the one used last, so you can carry on in one what you started in another. Send `/session`, or press **New chat** on the dashboard, to start another: the model starts it afresh, with Athena's memories. On the dashboard you can carry on any earlier session, which makes it the current one again. Every exchange is kept in memory too, so Athena can search earlier sessions from any of them.
 - **Tasks** each have a conversation of their own, so what they did last time doesn't fill yours. What they tell you goes into your current session, so you can reply to it.
 - **Compacting** keeps a long conversation going without filling the context. Once it's `max_history_messages` long (40), or an answer fills `compact_at` of the context window (80%), Athena has the model summarise all but the last two exchanges, in the background. From then on the model sees the summary, then the messages since. `/compact` does it straight away.
 - **Context**, on the dashboard, is what Athena reads with your next message: the system prompt, the tools' descriptions and this session's conversation. The limit comes from the model server. If yours doesn't say, set `llm.context_window`.
@@ -49,7 +49,7 @@ When the cache is cold, such as just after the Mac restarts, the next message wa
 
 Say **"Hey Siri, Ask Athena"** on your iPhone or Mac, then ask your question. Siri reads the answer out, and your question and the answer go to the Telegram chat too.
 
-- **Approvals still happen in Telegram.** If a tool needs your OK, Siri tells you to look there.
+- **Approvals happen in Telegram, or on the dashboard.** If a tool needs your OK, Siri tells you to look there.
 - **Siri waits about 25 seconds.** A longer answer arrives in Telegram when it's ready.
 - **Say the shortcut's name first,** then your question.
 
