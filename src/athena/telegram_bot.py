@@ -190,11 +190,11 @@ class TelegramBot:
             log.warning("Couldn't send a message about changed tools: %s", exc)
 
     async def _keep_warm(self) -> None:
-        """Keep the model server's prompt cache ready for your conversation, the current session
-        (llm.warm_up_minutes)."""
+        """Keep the model server's prompt cache ready for your conversation: the one you last talked to Athena in,
+        else the master agent's (llm.warm_up_minutes)."""
         while True:
             try:
-                reply = await self.s.agent.warm_up(self.s.history.current_chat)
+                reply = await self.s.agent.warm_up(self.s.agent.last_chat or self.s.history.master_chat)
                 if reply and reply.elapsed > 5:
                     log.info(
                         "The model server had to read the prompt afresh (%s tokens, %.0fs)",
@@ -203,7 +203,7 @@ class TelegramBot:
                     )
             except Exception as exc:  # the Mac might be asleep: try again next time
                 log.debug("Couldn't warm up the model server: %s", exc)
-            with contextlib.suppress(TimeoutError):  # after a reply, or a change to the tools or session
+            with contextlib.suppress(TimeoutError):  # after a reply, or a change to the tools or an agent
                 await asyncio.wait_for(self.s.rewarm.wait(), self.s.config.llm.warm_up_minutes * 60)
             self.s.rewarm.clear()
 
@@ -264,7 +264,7 @@ class TelegramBot:
     ) -> bool:
         timeout = timeout or self.cfg.confirm_timeout_seconds
         if session is None and not why:
-            session = self.s.history.session.id  # your message's: a task's says its own
+            session = self.s.history.master.id  # your message's: a task's says its own
         approval = self.s.approvals.open(tool, args, summary, timeout=timeout, why=why, session=session)
         key = approval.id
         # Show every argument: approving content you can't see isn't approval. Link previews
@@ -461,7 +461,7 @@ class TelegramBot:
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
             return await self._confirm(bot, chat_id, tool, args, summary)
 
-        session = self.s.history.session  # what you say goes into the current session
+        session = self.s.history.master  # what you say here goes to the master agent
         answering = asyncio.create_task(
             self.s.agent.respond(
                 session.chat_id,
@@ -557,13 +557,13 @@ class TelegramBot:
         await update.effective_message.reply_text(commands.help_text(self.s))  # type: ignore[union-attr]
 
     async def cmd_session(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_message.reply_text(commands.new_session(self.s))  # type: ignore[union-attr]
+        await update.effective_message.reply_text(commands.afresh(self.s, self.s.history.master_chat))  # type: ignore[union-attr]
 
     async def cmd_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         assert message is not None
         said = await message.reply_text("Compacting our conversation…")
-        text = await commands.compact(self.s, self.s.history.current_chat)
+        text = await commands.compact(self.s, self.s.history.master_chat)
         with contextlib.suppress(TelegramError):
             await said.edit_text(text)
 
@@ -588,10 +588,10 @@ class TelegramBot:
         last = self._last.get(chat_id)
         if last and not last.answered:  # stopped, or it went wrong
             text, photos = last.text, last.photos
-        elif exchange := await self.s.take_back_last_exchange(self.s.history.current_chat):
+        elif exchange := await self.s.take_back_last_exchange(self.s.history.master_chat):
             text, photos = exchange.question, self._kept_photos(exchange.photos)  # its text says [Photo]
         else:
-            await update.effective_message.reply_text("There's nothing to try again in this session.")  # type: ignore[union-attr]
+            await update.effective_message.reply_text("There's nothing to try again.")  # type: ignore[union-attr]
             return
         shown = text if len(text) <= 200 else text[:199].rstrip() + "…"
         if photos and not shown.startswith(label(len(photos))):

@@ -34,9 +34,14 @@ async def test_running_them(config):
         assert (await run("/tools")).startswith("Tools:\n- remember [")
         assert (await run("/status")).startswith("Model: test-model")
         assert (await run("/compact")).startswith("There's nothing to compact yet")
-        assert (await run("/new")).startswith("Started a new agent (#2)") and services.history.session.id == 2
-        services.agent.answering_you = 1
-        assert await run("/session") == "I'm still answering. Wait until I've finished, or stop me, first."
+        await services.agent.respond(services.history.master_chat, "Hello")
+        assert (await run("/new")).startswith("Started afresh: I won't see what we've said here so far.")
+        assert services.history.load(services.history.master_chat) == []  # the model doesn't
+        assert len(services.history.messages(services.history.master.id)[0]) == 2  # but it's there
+        other = services.history.new_session("Jobs")
+        await services.agent.respond(other.chat_id, "Hi")
+        said = await commands.run(services, "new", "", source="dashboard", chat_id=other.chat_id)
+        assert said.startswith("Started afresh") and services.history.load(other.chat_id) == []
         assert await run("/stop") is None and await run("/nonsense") is None  # each front end's own, or none
     finally:
         await services.close()

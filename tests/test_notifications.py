@@ -49,7 +49,7 @@ async def test_an_answer_to_a_message_sent_on_the_dashboard(chat, phone):  # noq
         await answered(http)
         await until(lambda: phone.received)
         assert phone.received == [
-            ("normal", {"title": "Athena · Hello", "body": "Hello there.", "url": "#agents/1", "tag": "reply-1"})
+            ("normal", {"title": "Athena · Master", "body": "Hello there.", "url": "#agents/1", "tag": "reply-1"})
         ]
 
         # Not while you're looking at the page: it shows the answer itself.

@@ -1,12 +1,12 @@
 """Chatting with Athena's agents on the dashboard.
 
-Each agent is a session (history.py), its conversation, with a model, guidance and DAG of its own (dags/). You
-send a message to an agent, which makes it the main one, the current session, if it wasn't, and Athena
-answers in the background while the page follows how it's going. One message at a time: while Athena's
-answering you, here or anywhere else, nothing more can be sent, so messages can't pile up, and sessions can't be
-changed. If it couldn't answer, your message is kept, here only, for you to try again. A message can come with
-photos, which the model sees, and files, which go into the workspace's inbox/ as Telegram's do (files.py).
-Agents can be named, muted so they don't notify your devices, and deleted, with their DAGs.
+Each agent is a session (history.py), its conversation, with a model, guidance and DAG of its own (dags/). The
+master agent is the one Telegram, Siri and the terminal talk to; the others you talk to here. You send a message
+to an agent, and Athena answers in the background while the page follows how it's going. One message at a time:
+while Athena's answering you, here or anywhere else, nothing more can be sent, so messages can't pile up. If it
+couldn't answer, your message is kept, here only, for you to try again. A message can come with photos, which the
+model sees, and files, which go into the workspace's inbox/ as Telegram's do (files.py). Agents can be named,
+muted so they don't notify your devices, and deleted, with their DAGs, but the master agent.
 
 Tools that ask first ask here, and Telegram's requests can be answered here too (approvals.py). You can allow
 tools without asking for one message, or for a whole session, which Telegram's messages in it get too.
@@ -101,18 +101,12 @@ class DashboardChat:
     # -- sessions ---------------------------------------------------------------------------------
 
     def new_session(self, name: Any = "") -> Session:
-        """A new agent, as the main one: the main one, if nothing's been said in it and it's nothing else yet."""
+        """A new agent."""
         if not isinstance(name, str):
             raise ValueError('Send its name: {"name": "Job hunting"}.')
-        if self.busy:
-            raise Busy()
-        current = self.s.history.session
-        config = self.s.dags.store.get(current.id)
-        empty = not (current.name or config.dag or config.guidance or config.context or config.model)
-        if empty and not self.s.history.messages(current.id, limit=1)[0] and current.id not in self.failed:
-            return self.s.history.rename(current.id, name) if name.strip() else current
-        session = self.s.new_session()
-        return self.s.history.rename(session.id, name) if name.strip() else session
+        session = self.s.history.new_session(name)
+        log.info("Dashboard: made agent %d", session.id)
+        return session
 
     def allow_in_session(self, session_id: int, names: Collection[str]) -> Session:
         """The tools that may run without asking in a session. KeyError if there's no such session."""
@@ -131,12 +125,11 @@ class DashboardChat:
             raise ValueError('Send {"muted": true} or {"muted": false}.')
         return self.s.history.set_muted(session_id, muted)
 
-    async def delete(self, session_id: int) -> Session:
-        """Delete an agent, with its DAG and runs. Returns the main agent. Busy if Athena's answering you in it,
-        KeyError if there's no such agent."""
-        session = await self.s.delete_session(session_id)
+    async def delete(self, session_id: int) -> None:
+        """Delete an agent, with its DAG, runs and files. Busy if Athena's answering you in it, KeyError if there's
+        no such agent, and ValueError if it's the master agent."""
+        await self.s.delete_session(session_id)
         self._changed()
-        return session
 
     # -- sending ------------------------------------------------------------------------------------
 
@@ -203,7 +196,9 @@ class DashboardChat:
     def _start(self, session_id: int, text: str, allowed: tuple[str, ...], photos: list[Photo] | None = None) -> None:
         if self.busy:
             raise Busy()
-        session = self.s.use_session(session_id)  # it becomes the current session
+        session = self.s.history.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
         self.failed.pop(session_id, None)
         self.replying = Reply(session_id, text, allowed, time.time(), photos=list(photos or []))
         self._task = asyncio.create_task(self._answer(self.replying, session), name="dashboard-reply")
@@ -274,7 +269,7 @@ class DashboardChat:
             return ""
         exchange = await self.s.take_back_last_exchange(session.chat_id)
         if exchange is None:
-            return "There's nothing to try again in this session."
+            return "There's nothing to try again here."
         photos = [photo for name in exchange.photos if (photo := self.s.history.photos.load(name))]
         self._start(session_id, exchange.question, (), photos)  # its text says [Photo]
         return ""
@@ -286,12 +281,6 @@ class DashboardChat:
             return "Stopped. Send /retry to have me try again." if await self.stop() else "I'm not working on anything."
         if name == "retry":
             return await self.retry(session_id)
-        if name in ("session", "reset"):
-            try:
-                session = self.new_session()
-            except Busy as exc:
-                return str(exc)
-            return f"Started session {session.id}. Memories are kept, and I can still search what we said before."
         said = await commands.run(
             self.s, name, rest, source="dashboard", chat_id=self.s.history.get_session(session_id).chat_id
         )
@@ -300,12 +289,12 @@ class DashboardChat:
     # -- what the page shows -------------------------------------------------------------------
 
     def state(self) -> dict[str, Any]:
-        """The sessions, whether Athena's answering you and where, and what's waiting for your OK."""
+        """The agents, whether Athena's answering you and where, and what's waiting for your OK."""
         history = self.s.history
         snapshot = self.s.status.snapshot()
         elsewhere = None
-        if self.replying is None and self.s.agent.answering_you:
-            elsewhere = {"session": history.session.id, "channel": snapshot.channel, "text": snapshot.task}
+        if self.replying is None and self.s.agent.answering_you:  # in Telegram, through Siri or in the terminal
+            elsewhere = {"session": history.master.id, "channel": snapshot.channel, "text": snapshot.task}
         dags = self.s.dags
         configs = {c.id: c for c in dags.store.all()}
         current = dags.current
@@ -313,10 +302,11 @@ class DashboardChat:
         for proposal in dags.store.proposals():
             waiting[proposal.agent] = waiting.get(proposal.agent, 0) + 1
         return {
-            "current": history.session.id,
+            "master": history.master.id,
             "sessions": [
                 {
                     "id": s.id,
+                    "master": s.master,
                     "title": s.title,
                     "name": s.name,
                     "started": s.started,
@@ -331,7 +321,7 @@ class DashboardChat:
             ],
             "busy": self.busy,
             "replying": self.replying.as_dict() if self.replying else None,
-            "elsewhere": elsewhere,  # one of yours from Telegram, Siri or the terminal
+            "elsewhere": elsewhere,  # one of yours from Telegram, Siri or the terminal, to the master agent
             "step": snapshot.step if self.busy else "",
             "failed": {str(k): v.as_dict() for k, v in self.failed.items()},
             "approvals": [a.as_dict() for a in self.s.approvals.pending()],
@@ -365,6 +355,7 @@ class DashboardChat:
         messages, more = self.s.history.messages(session_id, before)
         return {
             "id": session.id,
+            "master": session.master,
             "name": session.name,
             "muted": session.muted,
             "started": session.started,

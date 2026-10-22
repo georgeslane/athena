@@ -19,10 +19,10 @@ A personal AI assistant that runs on your own hardware. A small Linux computer, 
 - **Chat in Telegram**, with photos and files, or **ask by voice** through Siri.
 - **Tools**: any MCP server, on the Pi, your Mac or the web, plus built-in news, markets, Trading 212, SQLite databases, files and PDFs, and Python it runs in a sandbox. Anything that can change something or send your data elsewhere asks you first.
 - **Memory**: facts it saves, your past conversations and your Mac's documents, searched by meaning and by words.
-- **Agents**: each is something it keeps an eye on or does for you, such as finding you jobs, with a chat, guidance, and a DAG of tasks, in Airflow-style Python, that it runs by itself, on a schedule or when something happens. Every run ends by reviewing how it went and proposing improvements for you to approve. It keeps an eye on things every hour too, and your messages come first.
+- **Agents**: each is something it keeps an eye on or does for you, such as finding you jobs, with a chat, guidance and files, and a DAG of tasks, in Airflow-style Python, that it runs by itself, on a schedule or when something happens: for each item of a list, or only when a yes or no says so. Every run ends by reviewing how it went and proposing improvements for you to approve, and your messages come first. A master agent, which Telegram talks to, hears the others' news and keeps an eye on things for them to start from.
 - **Skills**: how you like things done, which it reads before doing them, and improves with your approval.
 - **Projects for Claude**: coding projects it hands to Claude as pull requests, which start DAGs when they're done.
-- **A dashboard** for its agents: their chats, with photos and files, and notifications on your iPhone and Mac, their DAGs, drawn and edited, and the history of their runs; and for what it's watching, its memory, skills, tools and status, over Tailscale.
+- **A dashboard** for its agents: their chats, with photos and files, and notifications on your iPhone and Mac, their DAGs, drawn and edited, and the history of their runs; and for its memory, skills, tools and status, over Tailscale.
 - **Private by design**: secrets stay in one file, MCP servers and code run in sandboxes, and the service can't change its own code. See [Privacy and security](docs/privacy-and-security.md).
 
 ## Install
@@ -55,7 +55,7 @@ Then check everything with `athena doctor`, and open the [dashboard](docs/dashbo
 | `athena embeddings test` / `switch` | Test or change the embeddings model ([Memory](docs/memory.md)) |
 | `athena eval` | Compare models on tool calling |
 
-In Telegram, `/new` starts a new agent, `/dags` shows what each does by itself, and `/status` says how Athena is: see [Using Athena](docs/using.md).
+In Telegram, you talk to the master agent: `/new` starts your conversation afresh, `/dags` shows what each agent does by itself, and `/status` says how Athena is: see [Using Athena](docs/using.md).
 
 ## Documentation
 
@@ -64,7 +64,8 @@ In Telegram, `/new` starts a new agent, `/dags` shows what each does by itself, 
 - [The dashboard](docs/dashboard.md), the status board and alerts
 - [Tools](docs/tools.md): built-in tools, MCP servers and adding your own
 - [Memory](docs/memory.md): memories, documents, embeddings and skills
-- [Agents](docs/agents.md): DAGs, their runs, triggers and watching
+- [Agents](docs/agents.md): agents, the master agent, and their runs
+- [Writing DAGs](docs/dags.md): the language, lists and branches, and what starts a DAG
 - [Your Mac](docs/mac.md): Calendar, Reminders and documents
 - [Projects for Claude](docs/claude-projects.md)
 - [Privacy and security](docs/privacy-and-security.md)

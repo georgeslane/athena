@@ -1,4 +1,4 @@
-"""The dashboard's API for agents, their DAGs and what's watched (dashboard.py has the rest, and lists it all).
+"""The dashboard's API for agents, their DAGs and their files (dashboard.py has the rest, and lists it all).
 
 A mixin of DashboardServer's: each handler is given the request, its method and the parts of its path, as
 dashboard.ROUTES says.
@@ -6,13 +6,19 @@ dashboard.ROUTES says.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import time
+import urllib.parse
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athena.dags.spec import DagError, parse, unknown_tools
+from athena import files, workspace
+from athena.dags import files as agent_files
+from athena.dags.spec import CLAUDE_DONE, DagError, parse, unknown_tools
 from athena.history import Busy
-from athena.watching import end_of
+from athena.tools import ToolError
 from athena.webserver import HTTPError, Request, Response
 from athena.webserver import json_body as _body
 from athena.webserver import json_response as _json
@@ -23,6 +29,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MODELS_SECONDS = 60.0  # how long the model server's list of models is taken to stay the same
+MAX_FILE_MB = 20  # each of an agent's files, as a file sent in a chat
+TEXT_TYPES = {".md": "text/markdown", ".csv": "text/csv", ".json": "application/json", ".html": "text/plain"}
 
 
 class AgentsAPI:
@@ -35,7 +43,7 @@ class AgentsAPI:
         return _json(self.s.chat.state())
 
     def _new_agent(self, request: Request, method: str) -> Response:
-        """{"name"}: a new agent, as the main one."""
+        """{"name"}: a new agent."""
         try:
             session = self.s.chat.new_session(_body(request).get("name") or "")
         except Busy as exc:
@@ -83,7 +91,7 @@ class AgentsAPI:
     async def _delete_agent(self, request: Request, method: str, agent: str) -> Response:
         try:
             await self.s.chat.delete(int(agent))
-        except Busy as exc:
+        except (Busy, ValueError) as exc:  # answering you in it, or it's the master agent
             raise HTTPError(409, str(exc)) from None
         except KeyError:
             raise HTTPError(404, "There's no such agent.") from None
@@ -148,14 +156,15 @@ class AgentsAPI:
         return _json(self.dag(self._known(agent)))
 
     def dag(self, agent_id: int) -> dict[str, Any]:
-        """An agent's DAG, and what it can be triggered by, for the DAG tab."""
+        """An agent's DAG, and what can start it, for the DAG tab: the events DAGs wait for, and which tasks'
+        outlets they come from, whether /hooks/<event> takes them, and the tools a DAG can name."""
         dags = self.s.dags
-        watches = dags.watches.all() if dags.watches else []
         return {
             **dags.describe(agent_id),
-            "triggers": {
-                "events": sorted({*dags.waiting_for(), "claude-done"}),
-                "watches": [{"key": w.key, "what": w.what} for w in watches],
+            "events": {
+                "waiting": dags.waiting_for(),  # event: [agents]
+                "sources": dags.sources(),  # event: [{"agent", "name", "task"}], from outlets
+                "claude": CLAUDE_DONE,
                 "hooks": self.hooks.on,  # type: ignore[attr-defined]
             },
             "tools": sorted(t.name for t in self.s.tools.all()),
@@ -233,58 +242,81 @@ class AgentsAPI:
             self.s.rewarm.set()
         return _json(self.dag(decided.agent))
 
-    # -- what's watched --------------------------------------------------------------------------------
+    # -- an agent's files ----------------------------------------------------------------------------
 
-    def _get_watches(self, request: Request, method: str) -> Response:
-        return _json(self.s.dags.watching())
+    def _space(self) -> Path:
+        """The workspace, where agents' files are. 409 if Athena has no files."""
+        if not self.s.config.workspace.enabled:
+            raise HTTPError(409, "Files are switched off: switch them on in the Tools tab to give an agent files.")
+        return workspace.workspace_of(self.s.config)
 
-    def _add_watch(self, request: Request, method: str) -> Response:
-        dags, body = self._watching(), _body(request)
+    def files(self, agent_id: int) -> list[dict[str, Any]]:
+        if not self.s.config.workspace.enabled:
+            return []
+        return [
+            {"name": name, "size": size, "path": f"{agent_files.folder(agent_id)}/{name}"}
+            for name, size in agent_files.listed(self._space(), agent_id)
+        ]
+
+    def _get_files(self, request: Request, method: str, agent: str) -> Response:
+        """The files that come with an agent's guidance."""
+        agent_id = self._known(agent)
+        return _json(
+            {"files": self.files(agent_id), "on": self.s.config.workspace.enabled, "max": agent_files.MAX_FILES}
+        )
+
+    def _add_files(self, request: Request, method: str, agent: str) -> Response:
+        """{"files": [{"name", "data": base64}]}: files for an agent's guidance, which its chat and runs can read."""
+        agent_id, space = self._known(agent), self._space()
+        sent = _body(request).get("files")
+        if (
+            not isinstance(sent, list)
+            or not sent
+            or not all(
+                isinstance(f, dict) and isinstance(f.get("name"), str) and isinstance(f.get("data"), str) for f in sent
+            )
+        ):
+            raise HTTPError(400, 'Send the files as {"files": [{"name", "data": base64}]}.')
+        given = []
+        for each in sent:
+            name = workspace.safe_name(each["name"])
+            try:
+                data = base64.b64decode(each["data"], validate=True)
+            except (binascii.Error, ValueError):
+                raise HTTPError(400, f"{name} didn't arrive whole: try again.") from None
+            if problem := files.why_not(self.s.config, name, len(data), MAX_FILE_MB):
+                raise HTTPError(400, f"{name}: {problem}")
+            given.append((name, data))
+        for name, data in given:
+            try:
+                agent_files.keep(space, agent_id, name, data)
+            except ToolError as exc:
+                raise HTTPError(409, str(exc)) from None
+        self.s.rewarm.set()  # its conversations say what its files are
+        log.info("Dashboard: gave agent %d %d file%s", agent_id, len(given), "" if len(given) == 1 else "s")
+        return _json({"files": self.files(agent_id)})
+
+    def _get_file(self, request: Request, method: str, agent: str, name: str) -> Response:
+        """One of an agent's files, to download."""
+        agent_id, space = self._known(agent), self._space()
+        name = urllib.parse.unquote(name)
         try:
-            dags.watches.add(str(body.get("what") or ""), self._until(body), by="you", key=_key(body))  # type: ignore[union-attr]
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        dags.wake()
-        return _json(dags.watching())
-
-    def _change_watch(self, request: Request, method: str, which: str) -> Response:
-        dags, body = self._watching(), _body(request)
-        assert dags.watches is not None
-        if dags.watches.get(int(which)) is None:
-            raise HTTPError(404, f"Nothing's watched as #{which}.")
-        try:
-            dags.watches.change(int(which), str(body.get("what") or ""), self._until(body), key=_key(body))
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
-        return _json(dags.watching())
-
-    def _check_watches(self, request: Request, method: str) -> Response:
-        dags = self._watching()
-        dags.check_now()
-        return _json(dags.watching())
-
-    def _stop_watching(self, request: Request, method: str, which: str) -> Response:
-        dags = self._watching()
-        assert dags.watches is not None
-        try:
-            dags.watches.remove(int(which))
-        except ValueError as exc:
+            data = workspace.read(space, agent_files.path_of(space, agent_id, name), MAX_FILE_MB * 1024 * 1024)
+        except ToolError as exc:
             raise HTTPError(404, str(exc)) from None
-        return _json(dags.watching())
+        suffix = Path(name).suffix.lower()
+        kind = "application/pdf" if suffix == ".pdf" else TEXT_TYPES.get(suffix, "text/plain")
+        quoted = urllib.parse.quote(name)
+        return Response(data, kind, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"})
 
-    def _watching(self) -> Any:
-        if self.s.dags.watches is None:
-            raise HTTPError(409, "Watching is switched off.")
-        return self.s.dags
-
-    def _until(self, body: dict[str, Any]) -> float | None:
-        """When something's watched until, from {"until": "YYYY-MM-DD"}, the end of that day; null for no end."""
-        until = body.get("until")
-        if until is None:
-            return None
-        if not isinstance(until, str):
-            raise ValueError("Give the day as YYYY-MM-DD, or null for no end.")
-        return end_of(until, self.s.dags.tz)
+    def _delete_file(self, request: Request, method: str, agent: str, name: str) -> Response:
+        agent_id, space = self._known(agent), self._space()
+        try:
+            agent_files.remove(space, agent_id, urllib.parse.unquote(name))
+        except ToolError as exc:
+            raise HTTPError(404, str(exc)) from None
+        self.s.rewarm.set()
+        return _json({"files": self.files(agent_id)})
 
 
 def _source(request: Request) -> str:
@@ -292,10 +324,3 @@ def _source(request: Request) -> str:
     if not isinstance(source, str):
         raise HTTPError(400, 'Send the DAG file: {"source": "..."}.')
     return source
-
-
-def _key(body: dict[str, Any]) -> str:
-    key = body.get("key") or ""
-    if not isinstance(key, str):
-        raise HTTPError(400, "Send the key as text, like job-emails.")
-    return key

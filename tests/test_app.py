@@ -51,10 +51,10 @@ async def test_reloading_applies_the_tools_settings_from_config_toml(services, m
     names = lambda: {t.name for t in services.tools.all()}  # noqa: E731
     memory_and_tasks = {"remember", "search_memory", "read_document", "forget_memory"}
     tasks_and_skills = {
-        "watch",
-        "trigger_task",
+        "task_result",
         "change_dag",
         "run_dag",
+        "agent_runs",
         "read_skill",
         "save_skill",
         "recent_work",
@@ -112,41 +112,38 @@ async def test_a_message_with_nowhere_to_go_isnt_logged_either(services, caplog)
     assert "Nowhere to send a message of 24 characters" in caplog.text and "locker" not in caplog.text
 
 
-async def test_a_new_session_and_forgetting_everything(services):
-    first = services.history.session
-    await services.agent.respond(first.chat_id, "hello")
+async def test_forgetting_everything(services):
+    master = services.history.master
+    await services.agent.respond(master.chat_id, "hello")
     await services.memory.remember("George's locker is number 42.")
 
-    session = services.new_session()
-    assert session.id == first.id + 1 and services.history.load(services.history.current_chat) == []
-    assert services.rewarm.is_set()  # the model server reads the new conversation
-
     session = await services.forget_everything()
-    assert session.id == first.id + 2
+    assert session.id == master.id  # the master agent stays
     assert services.memory.store.count() == {} and services.history.exchanges_after(0) == []
     assert services.stats.summary()["queries"] == 1  # the statistics stay
     await services.agent.respond(session.chat_id, "after")  # and it carries on
     assert services.history.load(session.chat_id)[-1]["content"] == "OK."
 
 
-async def test_sessions_cant_change_while_athena_is_answering_you(services):
-    first = services.history.session
-    services.new_session()
-    services.agent.answering_you = 1  # as while a message of yours is being answered
-    with pytest.raises(Busy, match="still answering"):
-        services.use_session(first.id)
-    with pytest.raises(Busy):
-        services.new_session()
-    assert services.use_session(first.id + 1).id == first.id + 1  # carrying on in the current one is fine
-    services.agent.answering_you = 0
-    assert services.use_session(first.id).id == first.id == services.history.session.id
+async def test_an_agent_cant_be_deleted_while_athena_answers_you_in_it_nor_the_master(services):
+    jobs = services.history.new_session("Jobs")
+    services.chat.replying = type("Reply", (), {"session": jobs.id})()  # as while a message to it is answered
+    with pytest.raises(Busy, match="answering you in that agent"):
+        await services.delete_session(jobs.id)
+    services.chat.replying = None
+    with pytest.raises(ValueError, match="can't be deleted"):
+        await services.delete_session(services.history.master.id)
+    with pytest.raises(KeyError):
+        await services.delete_session(99)
+    await services.delete_session(jobs.id)
+    assert services.history.get_session(jobs.id) is None
 
 
-async def test_what_athena_tells_you_by_itself_goes_into_your_conversation(services):
-    services.new_session()
-    services.keep("(Your task “Briefing” ran.)", "All quiet.")
-    [message, reply], _ = services.history.messages(services.history.session.id)
-    assert (message.text, message.channel, reply.text) == ("(Your task “Briefing” ran.)", "Athena", "All quiet.")
+async def test_what_athena_tells_you_by_itself_goes_into_the_master_agents_conversation(services):
+    services.history.new_session("Jobs")
+    services.keep("(Claude's projects changed.)", "All quiet.")
+    [message, reply], _ = services.history.messages(services.history.master.id)
+    assert (message.text, message.channel, reply.text) == ("(Claude's projects changed.)", "Athena", "All quiet.")
 
 
 async def test_forgetting_everything_forgets_what_runs_found_but_keeps_the_dags(services):
@@ -157,14 +154,10 @@ async def test_forgetting_everything_forgets_what_runs_found_but_keeps_the_dags(
     run = dags.store.start_run(1, "manual", "", source)
     dags.store.finish_task(dags.store.add_task(run.id, "inbox", 0, "running"), "success", "The bank wrote.", [])
     dags.store.finish_run(run, "success", "The bank wrote.")
-    dags.check_result = {"at": 1.0, "outcome": "told you", "said": "The bank wrote.", "steps": []}
-    watch = dags.watches.add("my inbox", None, by="you")
-    dags.watches.note(watch.id, "Told them about the bank.")
 
     await services.forget_everything()
     assert dags.store.get(1).dag == source and dags.store.get(1).context == ""
-    assert dags.store.runs(1) == [] and dags.check_result is None
-    assert [(w.what, w.note) for w in dags.watches.all()] == [("my inbox", "")]
+    assert dags.store.runs(1) == []
 
 
 async def test_the_prompt_says_what_mcp_servers_are_where_their_config_does(tmp_path):
@@ -231,8 +224,8 @@ async def test_taking_back_the_last_reply_takes_it_out_of_memory_too(services):
     await asyncio.sleep(0.2)
     assert services.memory.store.count().get("conversation") == 1
 
-    services.new_session()  # a new conversation has nothing to take back yet
-    assert await services.take_back_last_exchange(services.history.current_chat) is None
+    other = services.history.new_session()  # a new conversation has nothing to take back yet
+    assert await services.take_back_last_exchange(other.chat_id) is None
 
 
 # -- the model's context window ------------------------------------------------------------------------

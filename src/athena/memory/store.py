@@ -329,6 +329,15 @@ class MemoryStore:
             self._delete_source(source)
         return n
 
+    def forget_conversations(self) -> int:
+        """Delete every past conversation from memory, keeping facts and documents. Returns how many there were."""
+        with self._lock, self._conn:
+            self._conn.execute("PRAGMA secure_delete = ON")  # overwrite what's deleted, rather than just unlink it
+            ids = [(row[0],) for row in self._conn.execute("SELECT id FROM memories WHERE kind = 'conversation'")]
+            self._conn.executemany(f"DELETE FROM {VECTOR_TABLES['conversation']} WHERE rowid = ?", ids)
+            self._conn.execute("DELETE FROM memories WHERE kind = 'conversation'")
+        return len(ids)
+
     def clear(self) -> None:
         """Delete every memory, and start a fresh index for the current embeddings model.
 

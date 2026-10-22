@@ -1,10 +1,9 @@
 # The dashboard
 
-A web page for Athena, on your iPhone or Mac. It follows your device's light or dark mode, and in Safari on an iPhone, Share > Add to Home Screen makes it an app. On a phone, tap the shield in the corner for the other tabs.
+A web page for Athena, on your iPhone or Mac. It follows your device's light or dark mode, and in Safari on an iPhone, Share > Add to Home Screen makes it an app. Its tabs are along the top: on a phone, in a row of their own.
 
-- **Status:** what Athena is doing, and how much it's used: messages, tool calls by tool and the average reply time, for the main agent and in total. It shows how much of the model's context the conversation takes up, what's in memory, and its connections. **Thinking** switches the model's thinking on, short or off, as `/think` does.
-- **Agents:** what Athena keeps an eye on and does for you, each with its chat, its DAG, the history of its runs, what its last run kept, and its guidance: see [Agents](#agents) and [Agents](agents.md).
-- **Watching:** what Athena checks on every hour, each with a key that starts the DAGs waiting for it. See [Watching](agents.md#watching).
+- **Status:** what Athena is doing, and how much it's used: messages, tool calls by tool and the average reply time, for the master agent and in total. It shows how much of the model's context the conversation takes up, what's in memory, and its connections. **Thinking** switches the model's thinking on, short or off, as `/think` does.
+- **Agents:** what Athena keeps an eye on and does for you, each with its chat, its DAG, the history of its runs, what its last run kept, and its guidance and files: see [Agents](#agents) and [Agents](agents.md).
 - **Memory:** what Athena wanted to remember while it worked by itself, to save or discard. Search memories, past conversations and documents. Choose folders on your Mac to index. List your private words. See [Memory](memory.md) and [Privacy](privacy-and-security.md#privacy).
 - **Skills:** write, change and delete skills, see each one's history, and approve the changes Athena suggests. See [Skills](memory.md#skills).
 - **Tools:** switch tools and MCP servers on and off, change their settings and give them keys. Choose which of a server's tools Athena uses and which ask first, add servers of your own, and choose the tools found only when they're needed. Changes go into `config.toml`, keeping your comments, and keys into `.env`. They apply as soon as Athena's free, without a restart.
@@ -13,15 +12,15 @@ A number on the Memory and Skills tabs says how many of Athena's suggestions are
 
 ## Agents
 
-Each agent is something Athena keeps an eye on or does for you, such as finding you jobs (see [Agents](agents.md)). They're listed with the main one, the one with the latest news, first, a dot on those with something new, and how many proposals each has waiting. **New agent** makes another. Each has five views:
+Each agent is something Athena keeps an eye on or does for you, such as finding you jobs (see [Agents](agents.md)). The master agent comes first: Telegram, Siri and the terminal talk to it, and it hears the others' news. Then the others, the one with something said in it most recently first, with a dot on those with something new, and how many proposals each has waiting. **New agent** makes another. Each has five views:
 
-- **Chat:** talk to it. Telegram, Siri and the terminal talk to the main agent, and sending a message here makes this one the main agent. What its DAG's tasks with `alert=True` say, and each run's summary, arrive here too, linked to the run.
-- **DAG:** when it runs, with **Run now** and **Pause**; changes its runs propose, showing exactly what would change, to approve or reject; its file, which is checked as you write it, saying what's wrong and on which line; and how it works, drawn.
-- **History:** its last 10 runs, each drawn with how each task went, and what each task was given, said and did.
+- **Chat:** talk to it. What its DAG's tasks with `alert=True` say, and each run's summary, arrive here too, linked to the run. The master agent's chat also has the other agents' news, linked to their runs.
+- **DAG:** one part below another. When it runs, with **Run now** and **Pause**, and what starts it: for each trigger, the agent whose task sends it, and the address to send it to from an iPhone Shortcut or a webhook, to copy. Then changes its runs propose, showing exactly what would change, to approve or reject; how it works, drawn, with each task that runs for each item as a stack, and the edges for a yes or no marked; and its file, which is checked as you write it, saying what's wrong and on which line. **How to write it** has the language in brief: [Writing DAGs](dags.md) has all of it.
+- **History:** its last 10 runs, each drawn with how each task went, and what each task was given, said, returned and did, for each item it ran for.
 - **Context:** what its last run kept for the next, which you can change.
-- **Guidance:** how Athena acts in it, at a high level.
+- **Guidance:** how Athena acts in it, at a high level, and its files: PDFs and text files, such as your CV, which its chat and runs read when they'd help. Add them with **Add files**, or drop them in.
 
-At the top, the bell mutes it, **Tools** chooses what may run without asking when you talk to it, and **⋯** names it, chooses its model, or deletes it.
+At the top, the bell mutes it, **Tools** chooses what may run without asking when you talk to it, and **⋯** names it, chooses its model, or deletes it, though not the master agent.
 
 In its chat:
 

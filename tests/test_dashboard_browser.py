@@ -1,5 +1,5 @@
 """The dashboard in a real browser (headless Chromium, through Playwright), served by Athena's own services as in
-test_dashboard.py: every tab loads without errors and fits a phone, and the task and watch forms work.
+test_dashboard.py: every tab loads without errors and fits a phone, and agents, their DAGs, runs and files work.
 
 CI installs the browser (`playwright install --only-shell chromium`), and there these tests must run. Elsewhere
 they're skipped without one, or ATHENA_TEST_BROWSER can name a Chromium to use.
@@ -8,7 +8,6 @@ they're skipped without one, or ATHENA_TEST_BROWSER can name a Chromium to use.
 import asyncio
 import json
 import os
-import time
 
 import pytest
 from conftest import completion
@@ -20,7 +19,7 @@ try:
 except ImportError:  # pragma: no cover - it's a dev dependency
     async_playwright = None
 
-TABS = ["status", "agents", "watching", "memory", "skills", "tools"]
+TABS = ["status", "agents", "memory", "skills", "tools"]
 LOOKS = [(360, 800, "light"), (1280, 900, "dark")]  # a small phone, and a desktop in dark mode
 
 
@@ -54,34 +53,49 @@ async def signed_in(browser, services, width=1280, height=900, scheme="light"):
     return page, base, errors
 
 
+async def at(page, address):
+    """Wait for the page to be at an address: as wait_for_function would, if the page's Content-Security-Policy let
+    it evaluate a string, which it doesn't, once it has to wait."""
+    for _ in range(200):
+        if await page.evaluate("location.hash") == address:
+            return
+        await page.wait_for_timeout(25)
+    raise AssertionError(f"The page is at {await page.evaluate('location.hash')}, not {address}")
+
+
 def expected(console_error: str) -> bool:
     """The browser logs every 4xx as an error. A 409 is the API saying something's switched off, such as the
     board without Projects for Claude, which the page shows as such."""
     return "Failed to load resource" in console_error and "409 (Conflict)" in console_error
 
 
-JOBS = """from athena import DAG, Task
+JOBS = """from athena import DAG, Task, TaskGroup, trigger
 
-with DAG(schedule="0 9 * * 1-5", triggers=["watch:job-emails"]):
-    find = Task(
-        task_id="find_jobs",
-        prompt="Find new data jobs that fit my CV. Trigger apply for each good one.",
-    )
-    apply = Task(task_id="apply", prompt="Apply to this job: {input}", triggered=True, alert=True)
+with DAG(schedule="0 9 * * 1-5", triggers=["job-emails"]):
+    with TaskGroup("each_job", for_each=trigger) as each_job:
+        fits = Task(prompt="Does this job fit my CV? {item}", return_type=bool)
+        apply = Task(prompt="Apply to {item}", run_if=fits, alert=True)
+        fits >> apply
     report = Task(prompt="Say what was applied for.")
-    find >> apply >> report
+    each_job >> report
 """
 
 
 def seed(services):
-    """An agent with guidance, what its last run kept, a DAG that's run, with its steps, and two proposals; another
-    that's paused; and two things watched."""
+    """The master agent, with a DAG that finds job emails; an agent that applies for each, with guidance, what its
+    last run kept, a DAG that's run for two jobs, with its steps, and two proposals; and another that's paused."""
     dags, history = services.dags, services.history
-    history.rename(1, "Job hunting")
-    dags.save(1, JOBS)
-    dags.store.update(1, guidance="Only remote jobs, or in London.", context="CV: Python, data, five years.")
+    master = history.master.id
+    dags.save(
+        master,
+        "with DAG(schedule='@hourly'):\n    job_emails = Task(prompt='New emails about jobs?', return_type=list,"
+        " outlets=['job-emails'])\n",
+    )
+    jobs = history.new_session("Job hunting").id
+    dags.save(jobs, JOBS)
+    dags.store.update(jobs, guidance="Only remote jobs, or in London.", context="CV: Python, data, five years.")
     store = dags.store
-    run = store.start_run(1, "schedule", "", JOBS)
+    run = store.start_run(jobs, "event:job-emails", "From the master agent.", JOBS, ["Job A", "Job B"])
     long = '{"query": "data engineer", "where": ' + '"London", ' * 20 + "}"  # one long line
     steps = [
         {"tool": "search_web", "given": long, "outcome": "ran", "said": "10 results"},
@@ -92,13 +106,12 @@ def seed(services):
             "said": "Error: timed out.",
         },
     ]
-    store.finish_task(
-        store.add_task(run.id, "find_jobs", 0, "running"), "success", "Three jobs: **A**, B and C.", steps
-    )
-    for i, job in enumerate("ABC"):
-        task = store.add_task(run.id, "apply", i, "running", f"https://jobs.example/{job}", "find_jobs")
-        store.finish_task(task, "success" if job != "C" else "failed", f"Applied to {job}.", [])
-    store.finish_task(store.add_task(run.id, "report", 0, "running"), "success", "Applied to A and B.", [])
+    for i, (job, fit) in enumerate([("Job A", True), ("Job B", False)]):
+        store.finish_task(store.add_task(run.id, "fits", i, "running", job, "trigger"), "success",
+                          "**Yes**: Python." if fit else "No.", steps if fit else [], fit)  # fmt: skip
+        applied = store.add_task(run.id, "apply", i, "running" if fit else "skipped", job, "trigger")
+        store.finish_task(applied, "success" if fit else "skipped", "Applied." if fit else "“fits” said no.", [])
+    store.finish_task(store.add_task(run.id, "report", 0, "running"), "success", "Applied to A.", [])
     for end in ("review_workflow", "review_tools", "review_skills", "save_context", "summary"):
         store.finish_task(
             store.add_task(run.id, end, 0, "running"),
@@ -106,19 +119,18 @@ def seed(services):
             f"{end} said.",
             [],
         )
-    store.finish_run(run, "success", "Found three jobs and applied to two. **One failed.**")
+    store.finish_run(run, "success", "Applied to one job of two. **One didn't fit.**")
     better = JOBS.replace("Say what was applied for.", "List what was applied for, with links.")
-    store.propose(1, run.id, "workflow", "The report should link to each job.", JOBS, source=better)
-    store.propose(1, run.id, "tools", "fetch timed out.", JOBS, changes={"hide": ["read_news"]})
-    other = history.new_session("Briefing", current=False).id
+    store.propose(jobs, run.id, "workflow", "The report should link to each job.", JOBS, source=better)
+    store.propose(jobs, run.id, "tools", "fetch timed out.", JOBS, changes={"hide": ["read_news"]})
+    other = history.new_session("Briefing").id
     dags.save(other, "with DAG(schedule='30 7 * * 1-5'):\n    brief = Task(prompt='Brief me for the day.')\n")
     dags.pause(other)
-    dags.watches.add("new emails about jobs", None, by="you", key="job-emails")
-    dags.watches.add("when the parcel comes", time.time() + 86400 * 5, by="athena")
-    dags.check_result = {"at": time.time() - 600, "outcome": "nothing new", "said": "", "steps": steps}
+    return jobs
 
 
-VIEWS = ["#agents/1", "#agents/1/dag", "#agents/1/runs", "#agents/1/context", "#agents/1/guidance", "#agents/all"]
+VIEWS = ["#agents/2", "#agents/2/dag", "#agents/2/runs", "#agents/2/context", "#agents/2/guidance", "#agents/1/dag"]
+VIEWS += ["#agents/all"]
 
 
 @pytest.mark.parametrize(("width", "height", "scheme"), LOOKS)
@@ -137,84 +149,107 @@ async def test_every_tab_and_view_loads_without_errors_and_fits_the_screen(athen
 
 
 async def test_writing_a_dag_and_seeing_it_drawn(athena, browser):  # noqa: F811
+    jobs = athena.history.new_session("Job hunting").id
     page, base, errors = await signed_in(browser, athena)
-    await page.goto(f"{base}/#agents/1/dag")
+    await page.goto(f"{base}/#agents/{jobs}/dag")
     await page.wait_for_selector(".dag-summary >> text=Not saved yet")
     await page.wait_for_selector(".dag-graph .graph-node >> text=check")  # the file it starts with, drawn
     await page.fill(".code-text", JOBS)
-    await page.wait_for_selector(".dag-graph .graph-node >> text=find_jobs")
-    assert await page.locator(".dag-graph .graph-node").count() == 3
+    await page.wait_for_selector(".dag-graph .graph-node >> text=fits")
+    assert await page.locator(".dag-graph .graph-node").count() == 4  # and what started it, for each_job
     assert await page.locator(".dag-graph .graph-chip").count() == 5  # the tasks every DAG ends with
+    assert await page.inner_text(".dag-graph .graph-group-label") == "each_job"
+    assert await page.locator(".dag-graph .graph-node[data-each]").count() == 2  # it and apply, for each item
+    assert await page.inner_text(".dag-graph .graph-edge-label.yes") == "yes"
     # A mistake is said, where it is, and the drawing waits for it to be put right.
-    await page.fill(".code-text", JOBS.replace("find >> apply >> report", "find >> apply >> nowhere"))
+    await page.fill(".code-text", JOBS.replace("each_job >> report", "each_job >> nowhere"))
     await page.wait_for_selector(".code-problem >> text=There's no task called “nowhere”")
-    assert (await page.inner_text(".code-lines .bad")).strip() == "10"
+    assert (await page.inner_text(".code-lines .bad")).strip() == "9"
     assert await page.is_disabled(".dag-editor button:text-is('Save')")
     await page.fill(".code-text", JOBS)
     await page.wait_for_selector(".code-problem:empty")
     await page.click(".dag-editor button:text-is('Save')")
     await page.wait_for_selector(".dag-summary >> text=Runs every weekday at 09:00")
-    assert athena.dags.store.get(1).dag == JOBS
+    assert athena.dags.store.get(jobs).dag == JOBS
+    # What starts it, and where from.
+    await page.wait_for_selector(".dag-trigger >> text=job-emails")
+    await page.wait_for_selector(".dag-trigger >> text=once TRIGGERS_TOKEN is set")  # no token in the tests
     await page.click(".dag-summary >> text=Pause")
     await page.wait_for_selector(".dag-summary >> text=paused")
-    assert athena.dags.store.get(1).paused
+    assert athena.dags.store.get(jobs).paused
     await page.click(".dag-summary >> text=Resume")
     await page.wait_for_selector(".dag-summary >> text=next")
-    # How it works: the language, and what can start it.
-    await page.click("text=How it works")
-    await page.wait_for_selector("dialog >> text=watch:")
+    # How it's written: every argument.
+    await page.click("text=How to write it")
+    for argument in ("return_type", "for_each", "run_if", "allowed_tools", "outlets", "triggers"):
+        await page.wait_for_selector(f"dialog dt >> text={argument}")
     await page.click("dialog >> text=Close")
     assert errors == []
 
 
 async def test_approving_and_rejecting_what_a_run_proposes(athena, browser):  # noqa: F811
-    seed(athena)
+    jobs = seed(athena)
     page, base, errors = await signed_in(browser, athena)
-    await page.goto(f"{base}/#agents/1/dag")
+    await page.goto(f"{base}/#agents/{jobs}/dag")
     assert await page.inner_text(".agent-view-link[aria-current] .view-count") == "2"
     workflow = page.locator(".proposal", has_text="A change to its tasks")
     await workflow.locator(".diff-line.added >> text=with links").wait_for()
     await workflow.locator("text=Approve").click()
     await page.wait_for_selector("#toast >> text=Approved")
-    assert "with links" in athena.dags.store.get(1).dag
+    assert "with links" in athena.dags.store.get(jobs).dag
     assert "with links" in await page.input_value(".code-text")  # the file shown is the file saved
     await page.locator(".proposal", has_text="Its tools").locator("text=Reject").click()
     await page.wait_for_selector(".proposal", state="detached")
-    assert athena.dags.store.proposals(1) == []
+    assert athena.dags.store.proposals(jobs) == []
     assert errors == []
 
 
 async def test_a_runs_history(athena, browser):  # noqa: F811
-    seed(athena)
+    jobs = seed(athena)
     page, base, errors = await signed_in(browser, athena, 1280, 900)
-    await page.goto(f"{base}/#agents/1/runs")
+    await page.goto(f"{base}/#agents/{jobs}/runs")
     await page.wait_for_selector(".run-row >> text=#1")
-    await page.wait_for_selector(".run-head >> text=Found three jobs and applied to two.")
-    assert await page.get_attribute(".graph-node[aria-label^='find_jobs']", "data-state") == "success"
-    assert "×3" in await page.inner_text(".graph-node[aria-label^='apply']")  # triggered three times
+    await page.wait_for_selector(".run-head >> text=Applied to one job of two.")
+    await page.click(".run-input summary")
+    await page.wait_for_selector(".run-items >> text=Job B")  # what started it came with two
+    assert await page.get_attribute(".graph-node[aria-label^='fits']", "data-state") == "success"
+    assert "×2" in await page.inner_text(".graph-node[aria-label^='fits']")  # once for each
+    assert "1 done, 1 skipped" in await page.get_attribute(".graph-node[aria-label^='apply']", "aria-label")
     assert await page.get_attribute(".graph-chip:text-is('review skills')", "data-state") == "skipped"
-    await page.click(".graph-node[aria-label^='find_jobs']")
-    task = page.locator(".run-task[data-task='find_jobs']")
-    await task.locator("text=Three jobs:").wait_for()
-    assert await task.locator("strong").inner_text() == "A"  # what it said, as Markdown
-    await task.locator("li.step[data-outcome=failed] summary").click()
+    await page.click(".graph-node[aria-label^='fits']")
+    fits = page.locator(".run-task[data-task='fits']")
+    assert await fits.count() == 2
+    first = fits.first
+    await first.locator("text=Said yes").wait_for()
+    await first.locator(".step-io pre >> text=Job A").wait_for()  # its item
+    assert await first.locator(".run-output strong").inner_text() == "Yes"  # what it said, as Markdown
+    await first.locator("li.step[data-outcome=failed] summary").click()
     assert await page.is_visible("text=Error: timed out.")
     applied = page.locator(".run-task[data-task='apply']")
-    assert await applied.count() == 3 and await applied.nth(2).get_attribute("data-state") == "failed"
+    assert await applied.nth(1).get_attribute("data-state") == "skipped"
     # Its proposals are here too.
     assert await page.locator(".run-detail .proposal").count() == 2
     assert errors == []
 
 
-async def test_an_agents_guidance_and_what_it_kept(athena, browser):  # noqa: F811
-    seed(athena)
+async def test_an_agents_guidance_files_and_what_it_kept(athena, browser):  # noqa: F811
+    jobs = seed(athena)
     page, base, errors = await signed_in(browser, athena)
-    await page.goto(f"{base}/#agents/1/guidance")
+    await page.goto(f"{base}/#agents/{jobs}/guidance")
     assert await page.input_value(".text-view") == "Only remote jobs, or in London."
     await page.fill(".text-view", "Only remote jobs.")
     await page.click(".text-card >> text=Save")
     await page.wait_for_selector("#toast >> text=Saved.")
-    assert athena.dags.store.get(1).guidance == "Only remote jobs."
+    assert athena.dags.store.get(jobs).guidance == "Only remote jobs."
+    # Files with its guidance: added, listed, and deleted.
+    await page.set_input_files(
+        ".files-card input[type=file]", files=[{"name": "cv.md", "mimeType": "text/markdown", "buffer": b"# CV"}]
+    )
+    await page.wait_for_selector(".file-row >> text=cv.md")
+    assert await page.get_attribute(".file-name", "href") == f"/api/agents/{jobs}/files/cv.md"
+    assert f"agents/{jobs}/cv.md" in athena.dags.intro_for(jobs)
+    await page.click(".file-remove")
+    await page.wait_for_selector(".file-row", state="detached")
     await page.click(".agent-view-link >> text=Context")
     await page.wait_for_selector(".text-card >> text=Kept")
     assert await page.input_value(".text-view") == "CV: Python, data, five years."
@@ -226,26 +261,24 @@ async def test_an_agents_guidance_and_what_it_kept(athena, browser):  # noqa: F8
     assert errors == []
 
 
-async def test_the_watching_tab(athena, browser):  # noqa: F811
+async def test_the_master_agent_comes_first_and_stays(athena, browser):  # noqa: F811
     seed(athena)
     page, base, errors = await signed_in(browser, athena)
-    await page.goto(f"{base}/#watching")
-    item = page.locator("article.task", has_text="new emails about jobs")
-    assert await item.locator(".watch-key").inner_text() == "watch:job-emails"
-    await item.locator("text=it starts the DAG of “Job hunting”").wait_for()
-    await page.click("text=Watch for…")
-    await page.fill("dialog textarea", "anything from the bank")
-    await page.fill("dialog input[aria-label=Key]", "bank")
-    await page.check("dialog input[type=checkbox]")  # no end
-    assert await page.is_disabled("dialog input[type=date]")
-    await page.click("dialog button[type=submit]")
-    await page.wait_for_selector("article.task:has-text('the bank') >> text=No end")
-    assert athena.dags.watches.all()[-1].key == "bank"
-    await page.click("article.task:has-text('the bank') >> text=Edit")
-    await page.uncheck("dialog input[type=checkbox]")
-    await page.fill("dialog input[type=date]", "2099-01-31")
-    await page.click("dialog button[type=submit]")
-    await page.wait_for_selector("article.task >> text=Until Sat 31 Jan")
+    await page.goto(f"{base}/#agents")
+    await at(page, "#agents/1")  # the master agent, at its own address
+    first = page.locator(".session").first
+    assert (
+        await first.get_attribute("data-master") == ""
+        and await first.locator(".session-title").inner_text() == "Master"
+    )
+    await page.wait_for_selector(".chat-sub >> text=Telegram, Siri and the terminal talk to it")
+    await page.click(".chat-more")
+    await page.wait_for_selector("dialog >> text=The master agent")
+    assert await page.locator("dialog >> text=Delete agent").count() == 0  # it can't be
+    await page.click("dialog button:text-is('Cancel')")
+    # What its DAG finds starts another's: it says so.
+    await page.goto(f"{base}/#agents/1/dag")
+    await page.wait_for_selector(".dag-trigger.outlet >> text=the DAG of Job hunting waits for it")
     assert errors == []
 
 
@@ -277,14 +310,14 @@ def talking(athena):  # noqa: F811
     return athena
 
 
-async def test_chatting_approving_and_carrying_on_an_earlier_session(talking, browser):
+async def test_chatting_approving_and_talking_to_another_agent(talking, browser):
     page, base, errors = await signed_in(browser, talking)
     await page.goto(f"{base}/#agents")
     await page.fill(".composer textarea", "Hello **there**")
     await page.press(".composer textarea", "Enter")
     await page.wait_for_selector(".msg.theirs >> text=Hello there.")
     assert await page.input_value(".composer textarea") == ""
-    assert await page.inner_text(".session[aria-current] .session-title") == "Hello **there**"  # your words, as typed
+    assert await page.inner_text(".msg.mine .msg-text") == "Hello **there**"  # your words, as typed
 
     # It asks before send_note: Allow, here.
     await page.fill(".composer textarea", "Please use send_note")
@@ -303,7 +336,7 @@ async def test_chatting_approving_and_carrying_on_an_earlier_session(talking, br
     await page.press(".composer textarea", "Enter")
     await page.wait_for_selector(".msg.note >> text=Just send me a message.")
 
-    # A new agent, then back to the first, which says sending makes it the main one.
+    # A new agent, then back to the master, which is still the one Telegram talks to.
     await page.click(".chat-sessions-head >> text=New agent")
     await page.fill("dialog input[aria-label='Its name']", "Second")
     await page.click("dialog >> text=Make it")
@@ -312,14 +345,14 @@ async def test_chatting_approving_and_carrying_on_an_earlier_session(talking, br
     await page.fill(".composer textarea", "Second conversation")
     await page.press(".composer textarea", "Enter")
     await page.wait_for_selector(".msg.theirs >> text=Hello there.")
-    await page.click(".session >> text=Hello **there**")
-    await page.wait_for_selector(".chat-notice >> text=Sending a message makes this the main agent")
+    await page.click(".session >> text=Master")
+    await page.wait_for_selector(".chat-title:text-is('Master')")
     await page.fill(".composer textarea", "Back again")
+    await page.wait_for_selector(".chat-send:enabled")  # once the page knows the last answer's finished
     await page.press(".composer textarea", "Enter")
     await page.wait_for_selector(".msg.mine >> text=Back again")
-    await page.wait_for_selector(".chat-notice", state="hidden")
-    assert talking.history.session.id == 1
-    assert await page.inner_text(".session[aria-current] .current") == "Main"
+    assert talking.history.master.id == 1 and len(talking.history.messages(2)[0]) == 2
+    assert await page.inner_text(".session[aria-current] .current") == "Telegram"
     assert errors == []
 
 
@@ -340,27 +373,21 @@ async def test_allowing_a_tool_for_a_message_or_the_session(talking, browser):
     await page.locator(".allow-tool", has_text="send_note").locator("text=Always here").click()
     await page.click("dialog >> text=Done")
     await page.wait_for_selector(".chat-tools >> text=1 allowed")
-    assert talking.history.session.allowed_tools == ("send_note",)
+    assert talking.history.master.allowed_tools == ("send_note",)
     assert errors == []
 
 
-async def test_on_a_phone_the_shield_opens_the_menu(talking, browser):
+async def test_on_a_phone_the_tabs_are_a_row_of_their_own(talking, browser):
     page, base, errors = await signed_in(browser, talking, 375, 760)
-    assert await page.is_hidden("#tabs")
-    await page.wait_for_selector("#brand-where:text-is('Agents')")  # where it opens
-    await page.wait_for_function("location.hash === '#agents/1'")  # the main agent, at its own address
-    await page.click("#brand")
     await page.wait_for_selector("#tabs")
-    assert await page.get_attribute("#brand", "aria-expanded") == "true"
-    await page.click('.tab[data-tab="watching"]')
-    await page.wait_for_selector("#tabs", state="hidden")
-    await page.wait_for_selector("#brand-where:text-is('Watching')")
-    await page.click("#brand")
+    assert await page.locator(".tab").count() == 5
+    await at(page, "#agents/1")  # the master agent, at its own address
+    await page.click('.tab[data-tab="memory"]')
+    await page.wait_for_selector("#tab-memory:not([hidden])")
     await page.click('.tab[data-tab="agents"]')
-    await page.wait_for_selector("#brand-where:text-is('Agents')")
-    await page.click("#brand")
-    await page.keyboard.press("Escape")
-    await page.wait_for_selector("#tabs", state="hidden")
+    await page.wait_for_selector('.tab[data-tab="agents"][aria-current=page]')
+    tabs = await page.evaluate("[...document.querySelectorAll('.tab')].map((t) => t.getBoundingClientRect().right)")
+    assert max(tabs) <= 375  # all of them, on the screen
 
     # A conversation, or the list of them, one at a time.
     await page.wait_for_selector(".chat-main")
@@ -517,6 +544,9 @@ async def test_sending_photos_and_files(talking, browser):
 async def test_naming_muting_and_deleting_an_agent(talking, browser):
     page, base, errors = await signed_in(browser, talking)
     await page.goto(f"{base}/#agents")
+    await page.click(".chat-sessions-head >> text=New agent")
+    await page.click("dialog >> text=Make it")
+    await page.wait_for_selector(".chat-empty")
     await page.fill(".composer textarea", "Find me a job in data")
     await page.press(".composer textarea", "Enter")
     await page.wait_for_selector(".msg.theirs >> text=Hello there.")
@@ -532,40 +562,36 @@ async def test_naming_muting_and_deleting_an_agent(talking, browser):
     await page.click(".chat-head .bell")
     await page.wait_for_selector(".chat-head .bell[aria-pressed=false]")
     await page.wait_for_selector(".session [aria-label=Muted]")
-    assert talking.history.get_session(1).muted
+    assert talking.history.get_session(2).muted
 
-    talking.dags.save(1, "with DAG(schedule='0 9 * * *'):\n    find = Task(prompt='Look for new postings.')\n")
-    await page.click(".chat-sessions-head >> text=New agent")
-    await page.click("dialog >> text=Make it")
-    await page.wait_for_selector(".chat-empty")
-    await page.goto(f"{base}/#agents/1")
+    talking.dags.save(2, "with DAG(schedule='0 9 * * *'):\n    find = Task(prompt='Look for new postings.')\n")
     await page.click(".chat-more")
     await page.click("dialog >> text=Delete agent")
     await page.wait_for_selector("dialog >> text=and so are its DAG")
     await page.click("dialog button:text-is('Delete')")
     await page.wait_for_selector("#toast >> text=Deleted.")
     await page.wait_for_selector(".session-title:text-is('Job hunting')", state="detached")
-    await page.wait_for_function("location.hash === '#agents/2'")
-    assert talking.history.get_session(1) is None and talking.dags.store.get(1).dag == ""
+    await at(page, "#agents/1")  # back to the master agent
+    assert talking.history.get_session(2) is None and talking.dags.store.get(2).dag == ""
     assert errors == []
 
 
-async def test_what_a_run_says_arrives_in_the_agents_chat(talking, browser):
+async def test_what_a_run_says_arrives_in_the_agents_chat_and_the_masters(talking, browser):
     from conftest import FakeLLMServer
 
     page, base, errors = await signed_in(browser, talking)
     await page.goto(f"{base}/#agents")
-    await page.fill(".composer textarea", "My CV: Python, five years")
-    await page.press(".composer textarea", "Enter")
-    await page.wait_for_selector(".msg.theirs >> text=Hello there.")
-    talking.dags.save(1, "with DAG():\n    find = Task(prompt='Look for new postings that fit my CV.')\n")
+    await page.click(".chat-sessions-head >> text=New agent")
+    await page.fill("dialog input[aria-label='Its name']", "Jobs")
+    await page.click("dialog >> text=Make it")
+    await page.wait_for_selector(".chat-empty")
+    talking.dags.save(2, "with DAG():\n    find = Task(prompt='Look for new postings that fit my CV.')\n")
     await page.click(".agent-view-link >> text=DAG")
     await page.wait_for_selector(".dag-summary >> text=only when you run it")
 
-    # It runs while you're looking at another agent: this one's marked as having something new.
-    await page.click(".chat-sessions-head >> text=New agent")
-    await page.click("dialog >> text=Make it")
-    await page.wait_for_selector(".chat-empty")
+    # It runs while you're looking at another agent: that one's marked as having something new.
+    await page.click(".session >> text=Master")
+    await page.wait_for_selector(".chat-main")
     talking.llm = talking.agent.llm = FakeLLMServer(
         lambda body: completion(
             "Two new jobs at Acme."
@@ -573,12 +599,14 @@ async def test_what_a_run_says_arrives_in_the_agents_chat(talking, browser):
             else "NO CHANGES"
         )
     ).client(talking.config.llm)
-    await talking.dags.runner.run(1, "manual")
-    await page.wait_for_selector(".session[data-unread=true] >> text=My CV: Python, five years")
-    await page.click(".session >> text=My CV: Python, five years")
-    await page.wait_for_selector(".msg-task-link >> text=Run #1: how it went")
+    await talking.dags.runner.run(2, "manual")
+    # The master agent's told too, where Telegram talks to you, with a link to the agent's runs.
+    await page.wait_for_selector(".msg-task-link >> text=Jobs · run #1")
     await page.wait_for_selector(".msg.theirs >> text=Two new jobs at Acme.")
-    await page.wait_for_selector(".session[data-unread=true]", state="detached")
+    await page.wait_for_selector(".session[data-unread=true] >> text=Jobs")
+    await page.click(".session >> text=Jobs")
+    await page.wait_for_selector(".msg-task-link >> text=Run #1: how it went")
+    await page.wait_for_selector(".session[data-unread=true] >> text=Jobs", state="detached")
     await page.click(".msg-task-link")
     await page.wait_for_selector(".run-row >> text=#1")
     assert errors == []

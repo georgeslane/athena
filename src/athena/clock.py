@@ -1,4 +1,4 @@
-"""The time, for what Athena does by itself on a schedule (tasks/scheduler.py, watching.py): the real time, or a
+"""The time, for what Athena does by itself on a schedule (dags/scheduler.py): the real time, or a
 test's, which moves on by itself whenever the scheduler waits, so a week of schedules runs in a moment."""
 
 from __future__ import annotations

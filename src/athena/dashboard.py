@@ -10,16 +10,17 @@ The page talks to Athena with JSON:
 
   GET    /api/overview          status, usage statistics, memory and connections
   GET    /api/status            what Athena is doing; ?wait=25&after=<version> waits for a change
-  POST   /api/session           start a new agent, as the main one
-  GET    /api/agents            your agents, the one used last first, whether Athena's answering you, and what's
-                                waiting for your OK; POST {"name"} starts a new one
+  GET    /api/agents            your agents, the master agent first, then the latest to have something said in
+                                them, whether Athena's answering you, and what's waiting for your OK; POST {"name"}
+                                makes a new one
   GET    /api/agents/<id>       an agent's messages: the last page, or ?before=<message id>, and its settings
   POST   /api/agents/<id>       change any of {"name", "model", "muted", "guidance", "context"}
-  DELETE /api/agents/<id>       delete an agent: what was said to it, its DAG and its runs
+  DELETE /api/agents/<id>       delete an agent, but the master: what was said to it, its DAG, runs and files
   POST   /api/agents/<id>/messages  {"text", "allow": [tools], "attachments": [{"name", "data": base64}]}: send a
-                                message or a command, which makes the agent the main one; /api/agents/stop stops
-                                the answer
+                                message or a command; /api/agents/stop stops the answer
   POST   /api/agents/<id>/tools {"allowed": [tools]}: the tools that may run without asking when you talk to it
+  GET    /api/agents/<id>/files the files that come with its guidance; POST {"files": [{"name", "data": base64}]}
+                                adds some, and GET or DELETE /files/<name> downloads or deletes one
   GET    /api/agents/<id>/dag   its DAG: the file, its tasks, when it runs, and what's proposed for it; POST
                                 {"source"} saves a new file, /dag/check {"source"} checks one as it's written, and
                                 /dag/run, /dag/pause, /dag/resume and /dag/stop do what they say
@@ -41,10 +42,6 @@ The page talks to Athena with JSON:
   POST   /api/tools/<id>/approve  let the model use tools held back because they changed: {"tools": {name: fingerprint}}
   POST   /api/tools/on-demand   {"tools": [names]}: the tools the model finds when it needs them, not in every prompt
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
-  GET    /api/watches           what's watched, and the hourly checks; POST {"what", "key", "until": "YYYY-MM-DD"
-                                or null for no end} watches for something
-  POST   /api/watches/<id>      change it, the same way; /api/watches/check checks on everything now
-  DELETE /api/watches/<id>      stop watching it
   GET    /api/memory            what's in memory, the documents indexed from your Mac, and suggested memories
   POST   /api/memory/search     {"query", "kind"}: search memories and documents by meaning and by words
   POST   /api/memory/suggestions/<id>  {"action": "approve" | "discard", "text"}: a memory a task suggested
@@ -88,7 +85,6 @@ from athena.config import Config
 from athena.config_files import EnvFile
 from athena.dags.api import AgentsAPI
 from athena.documents import DocumentsError
-from athena.history import Busy
 from athena.memory import KINDS, relevance
 from athena.push import Push
 from athena.settings import Running, Settings, SettingsError, hand_written
@@ -118,7 +114,7 @@ FILES = {  # what the page is made of, by path
     **{
         f"/{name}.js": (WEB / f"{name}.js", "text/javascript; charset=utf-8")
         for name in ("dashboard", "core", "steps", "md", "graph", "notifications")
-        + ("status", "agents", "chat", "dag", "runs", "watching", "memory", "skills", "tools")
+        + ("status", "agents", "chat", "dag", "runs", "memory", "skills", "tools")
     },
     "/sw.js": (WEB / "sw.js", "text/javascript; charset=utf-8"),  # shows notifications (notifications.js)
     "/manifest.webmanifest": (WEB / "manifest.webmanifest", "application/manifest+json"),
@@ -142,7 +138,7 @@ SIGN_IN_WINDOW = 600.0
 MODEL_CHECK_SECONDS = 60.0
 USED_DAYS = 30  # how far back the Tools tab counts each tool's use
 LOOKING_SECONDS = 40.0  # after the page last said you're looking at it, how long you're taken still to be
-SENDING = re.compile(r"/api/agents/\d+/messages")  # a message to an agent, which can come with photos and files
+SENDING = re.compile(r"/api/agents/\d+/(messages|files)")  # a message, which can come with photos and files, or files
 MAX_SENDING_BYTES = 40_000_000  # what they're sent as, base64, comes to: about 30 MB of them
 SENDING_SECONDS = 300.0  # to send them, on a slow connection
 
@@ -152,7 +148,6 @@ SENDING_SECONDS = 300.0  # to send them, on a slow connection
 ROUTES = (
     ("GET", r"/api/overview", "_get_overview"),
     ("GET", r"/api/status", "_get_status"),
-    ("POST", r"/api/session", "_new_session"),
     ("GET", r"/api/agents", "_get_agents"),
     ("POST", r"/api/agents", "_new_agent"),
     ("POST", r"/api/agents/stop", "_stop_chat"),
@@ -161,6 +156,10 @@ ROUTES = (
     ("DELETE", r"/api/agents/(?P<agent>\d+)", "_delete_agent"),
     ("POST", r"/api/agents/(?P<agent>\d+)/messages", "_send"),
     ("POST", r"/api/agents/(?P<agent>\d+)/tools", "_allow_in_session"),
+    ("GET", r"/api/agents/(?P<agent>\d+)/files", "_get_files"),
+    ("POST", r"/api/agents/(?P<agent>\d+)/files", "_add_files"),
+    ("GET", r"/api/agents/(?P<agent>\d+)/files/(?P<name>[^/]+)", "_get_file"),
+    ("DELETE", r"/api/agents/(?P<agent>\d+)/files/(?P<name>[^/]+)", "_delete_file"),
     ("GET", r"/api/agents/(?P<agent>\d+)/dag", "_get_dag"),
     ("POST", r"/api/agents/(?P<agent>\d+)/dag", "_save_dag"),
     ("POST", r"/api/agents/(?P<agent>\d+)/dag/check", "_check_dag"),
@@ -193,11 +192,6 @@ ROUTES = (
     ("POST", r"/api/privacy/check", "_check_privacy"),
     (None, r"/api/skills(?:/(?P<which>.*))?", "_skills"),
     (None, r"/api/documents/(?P<action>.*)", "_documents"),
-    ("GET", r"/api/watches", "_get_watches"),
-    ("POST", r"/api/watches", "_add_watch"),
-    ("POST", r"/api/watches/check", "_check_watches"),
-    ("POST", r"/api/watches/(?P<which>\d+)", "_change_watch"),
-    ("DELETE", r"/api/watches/(?P<which>\d+)", "_stop_watching"),
 )
 _ROUTES = [(method, re.compile(path), handler) for method, path, handler in ROUTES]
 
@@ -408,14 +402,6 @@ class DashboardServer(AgentsAPI, Server):
         if not await push.send(name, said, url="#agents", tag="test", only=endpoint):
             raise HTTPError(502, "The push service didn't take it. Turn notifications off and on again.")
         return _json({"sent": True})
-
-    def _new_session(self, request: Request, method: str) -> Response:
-        try:
-            session = self.s.new_session()
-        except Busy as exc:
-            raise HTTPError(409, str(exc)) from None
-        log.info("Dashboard: started session %d", session.id)
-        return _json(self.overview())
 
     def _set_thinking(self, request: Request, method: str) -> Response:
         try:
@@ -714,7 +700,7 @@ class DashboardServer(AgentsAPI, Server):
             "status": dataclasses.asdict(self.feed.snapshot),
             # Enough for the page to know when to ask for more: the Agents tab's badge, and whether to fetch it again.
             "chat": {
-                "current": self.s.history.session.id,
+                "master": self.s.history.master.id,
                 "busy": chat.busy,
                 "approvals": len(self.s.approvals.pending()),
                 "last": self._last_message(),
@@ -729,7 +715,7 @@ class DashboardServer(AgentsAPI, Server):
     def overview(self) -> dict[str, Any]:
         cfg, history = self.s.config, self.s.history
         self._check_model()
-        session = history.session
+        session = history.master
         stats = self.s.stats
         counts = self.s.memory.store.count()
         servers = self.s.mcp.status()

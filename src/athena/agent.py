@@ -69,7 +69,7 @@ class Directory(Protocol):
 
 @dataclass
 class Background:
-    """How Athena works on a task by itself (tasks.py), rather than answering you."""
+    """How Athena works on something by itself, such as a task in a DAG (dags/), rather than answering you."""
 
     label: str  # what the status board shows, such as "Task: Morning briefing"
     # Takes each step, a call to the model: it waits while you're chatting, and stops the call if you
@@ -147,9 +147,10 @@ class Agent:
         self._idle.set()
         self._busy = 0
         self._pausing = asyncio.Lock()
-        # You, rather than a task: how many of your messages are being answered, and when one last was.
+        # You, rather than a task: how many of your messages are being answered, when one last was, and where.
         self.answering_you = 0
         self.last_answered_you = float("-inf")  # time.monotonic()
+        self.last_chat: str | None = None  # which the model server's cache is kept warm for
         self.chatting = asyncio.Event()  # set while one of your messages is being answered
 
     # -- pausing --------------------------------------------------------------------------
@@ -379,7 +380,7 @@ class Agent:
                 *self.history.load(chat_id, intro=self._intro(chat_id)),
                 {"role": "user", "content": "Hi"},  # the next message goes here; only what's before it is reused
             ]
-            session = self.history.session.id
+            session = session_of(chat_id) or self.history.master.id
             reply = await self.llm.chat(
                 messages, self.tools.schemas() or None, max_tokens=1, model=self._model(chat_id)
             )
@@ -413,13 +414,14 @@ class Agent:
             if background is None:
                 await stack.enter_async_context(self._working())
                 self.answering_you += 1
+                self.last_chat = chat_id
                 self.chatting.set()
                 stack.callback(self._answered_you)
             shown = text or (label(len(photos)) if photos else "")  # a photo without a caption
             task = self.status.begin(background.label if background else shown)
             session = session_of(chat_id)
             record = QueryRecord(
-                session=session if session is not None else self.history.session.id,
+                session=session if session is not None else self.history.master.id,
                 channel=channel or self.status.channel,
             )
             result: AgentResult | None = None
@@ -471,7 +473,7 @@ class Agent:
         nothing's kept in the history, and ``messages`` gets what the model and tools said along the way. ``hidden``
         tools are found when they're needed, as well as [tools] on_demand; ``dag`` is the run it's for."""
         task = self.status.begin(background.label)
-        record = QueryRecord(session=session if session is not None else self.history.session.id, channel=channel)
+        record = QueryRecord(session=session if session is not None else self.history.master.id, channel=channel)
         try:
             result = await self._work(
                 messages, task, confirm, on_tool, record, background, frozenset(allowed), None, hidden, model, dag
@@ -629,6 +631,9 @@ class Agent:
                     if on_tool:
                         await on_tool(event)
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
+                if turn.finished is not None:  # a tool gave the answer, as task_result does in a DAG run
+                    result.text = turn.finished
+                    break
             else:
                 # Out of tool rounds: ask for a final answer with tools switched off.
                 task.thinking()
