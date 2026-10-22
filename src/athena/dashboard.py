@@ -113,12 +113,12 @@ ASSETS = Path(__file__).parent / "assets"
 FILES = {  # what the page is made of, by path
     "/": (WEB / "index.html", "text/html; charset=utf-8"),
     "/dashboard.css": (WEB / "dashboard.css", "text/css; charset=utf-8"),
-    # The script, as modules: dashboard.js starts it, core.js, steps.js, md.js and notifications.js have what the
-    # tabs share, and each tab has its own.
+    # The script, as modules: dashboard.js starts it, core.js, steps.js, md.js, graph.js and notifications.js have
+    # what the tabs share, and each tab has its own: the Agents tab's chat, DAG and runs in modules of their own.
     **{
         f"/{name}.js": (WEB / f"{name}.js", "text/javascript; charset=utf-8")
-        for name in ("dashboard", "core", "steps", "md", "notifications")
-        + ("status", "chat", "activity", "tasks", "memory", "skills", "board", "tools")
+        for name in ("dashboard", "core", "steps", "md", "graph", "notifications")
+        + ("status", "agents", "chat", "dag", "runs", "watching", "memory", "skills", "tools")
     },
     "/sw.js": (WEB / "sw.js", "text/javascript; charset=utf-8"),  # shows notifications (notifications.js)
     "/manifest.webmanifest": (WEB / "manifest.webmanifest", "application/manifest+json"),

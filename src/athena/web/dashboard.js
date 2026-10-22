@@ -8,10 +8,8 @@ import { renderOverview, renderStatus } from "./status.js";
 import { loadTools } from "./tools.js";
 import { loadMemory } from "./memory.js";
 import { loadSkills } from "./skills.js";
-import { loadBoard } from "./board.js";
-import { loadTasks } from "./tasks.js";
-import { loadActivity } from "./activity.js";
-import { followChat, loadChat } from "./chat.js";
+import { loadWatching } from "./watching.js";
+import { followAgents, loadAgents } from "./agents.js";
 import { setUpNotifications } from "./notifications.js";
 
 // -- signing in -------------------------------------------------------------------------------------------
@@ -85,19 +83,21 @@ function refresh() {
   loadOverview().catch(() => {});
   if (location.hash === "#tools") loadTools().catch(() => {});
   if (location.hash === "#memory") loadMemory().catch(() => {});
-  if (location.hash === "#tasks") loadTasks().catch(() => {});
-  if (location.hash === "#activity") loadActivity().catch(() => {});
-  if (location.hash.startsWith("#chat")) loadChat().catch(() => {});
+  if (location.hash === "#watching") loadWatching().catch(() => {});
+  if (location.hash.startsWith("#agents")) loadAgents().catch(() => {});
   if (location.hash === "#skills") loadSkills().catch(() => {});
-  if (location.hash === "#board") loadBoard().catch(() => {});
   if (!state.watching) watchStatus();
 }
 
-const TABS = ["status", "chat", "activity", "tasks", "memory", "skills", "board", "tools"];
+const TABS = ["status", "agents", "watching", "memory", "skills", "tools"];
 
 function showTab() {
-  const named = location.hash.slice(1).split("/")[0]; // #chat/12 is the Chat tab, showing session 12
-  const tab = TABS.includes(named) ? named : "status";
+  if (location.hash.startsWith("#chat")) {
+    // From before agents: #chat/12, as an old notification or bookmark says, is agent 12.
+    history.replaceState(null, "", location.hash.replace(/^#chat/, "#agents"));
+  }
+  const named = location.hash.slice(1).split("/")[0]; // #agents/12/dag is the Agents tab, showing agent 12's DAG
+  const tab = TABS.includes(named) ? named : location.hash ? "status" : "agents";
   const was = document.querySelector(".tab[aria-current]");
   for (const link of document.querySelectorAll(".tab")) {
     if (link.dataset.tab === tab) link.setAttribute("aria-current", "page");
@@ -106,16 +106,14 @@ function showTab() {
   for (const panel of document.querySelectorAll(".panel")) panel.hidden = panel.dataset.panel !== tab;
   document.getElementById("brand-where").textContent = document.querySelector(`.tab[data-tab="${tab}"]`).title;
   menu_.close();
-  if (tab === "chat") {
-    loadChat().catch((e) => toast(e.message, true));
-    if (was && was.dataset.tab === "chat") return; // another session, or the list of them: stay where you are
+  if (tab === "agents") {
+    loadAgents().catch((e) => toast(e.message, true));
+    if (was && was.dataset.tab === "agents") return; // another agent, view or the list of them: stay where you are
   }
   if (tab === "tools") loadTools().catch((e) => toast(e.message, true));
   if (tab === "memory") loadMemory().catch((e) => toast(e.message, true));
-  if (tab === "tasks") loadTasks().catch((e) => toast(e.message, true));
-  if (tab === "activity") loadActivity().catch((e) => toast(e.message, true));
+  if (tab === "watching") loadWatching().catch((e) => toast(e.message, true));
   if (tab === "skills") loadSkills().catch((e) => toast(e.message, true));
-  if (tab === "board") loadBoard().catch((e) => toast(e.message, true));
   window.scrollTo(0, 0);
 }
 
@@ -164,7 +162,7 @@ function setUpMenu() {
   new MutationObserver(count).observe(document.getElementById("tabs"), { childList: true, subtree: true, characterData: true });
 }
 
-// The chat fills the screen, less the header, and less the keyboard while it's up on a phone.
+// An agent fills the screen, less the header, and less the keyboard while it's up on a phone.
 function followViewport() {
   const root = document.documentElement;
   const top = document.querySelector(".top");
@@ -220,7 +218,7 @@ async function watchStatus() {
       setOffline(false);
       if (version && was !== "idle" && data.status.state === "idle") {
         loadOverview().catch(() => {}); // new numbers
-        if (location.hash === "#activity") loadActivity().catch(() => {}); // and what it's just done
+        if (location.hash === "#watching") loadWatching().catch(() => {}); // and what a check found
       }
       version = data.version;
     } catch (e) {
@@ -238,7 +236,7 @@ function setStatus(data) {
   state.status = data;
   state.skew = data.now - Date.now() / 1000;
   renderStatus();
-  if (changed) followChat(data);
+  if (changed) followAgents(data);
 }
 
 export async function loadOverview() {

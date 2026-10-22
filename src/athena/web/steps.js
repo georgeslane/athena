@@ -1,5 +1,5 @@
 // What Athena did for something, step by step: each tool it used, what it was given and what came back, whether
-// it worked, and who allowed it. On the Tasks and Activity tabs.
+// it worked, and who allowed it. On an agent's History, and the Watching tab.
 
 import { h, plural } from "./core.js";
 

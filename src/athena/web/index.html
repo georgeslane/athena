@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Athena</title>
-  <meta name="description" content="Athena's dashboard: what it's doing and has done, how it's used, its skills and its tools.">
+  <meta name="description" content="Athena's dashboard: its agents and what they do, what it's watching, its memory, skills and tools.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f5eee2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0e0b08" media="(prefers-color-scheme: dark)">
@@ -56,12 +56,10 @@
         <span class="pill" id="top-pill" data-state="idle"><span class="dot"></span><span class="pill-label">Idle</span></span>
         <nav class="tabs" id="tabs" aria-label="Sections">
           <a class="tab" href="#status" data-tab="status" title="Status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Status</span></a>
-          <a class="tab" href="#chat" data-tab="chat" title="Chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-5 4v-4H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg><span>Chat</span></a>
-          <a class="tab" href="#activity" data-tab="activity" title="Activity"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg><span>Activity</span></a>
-          <a class="tab" href="#tasks" data-tab="tasks" title="Tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"/></svg><span>Tasks</span></a>
+          <a class="tab" href="#agents" data-tab="agents" title="Agents"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h5v5H5zM14 3h5v5h-5zM9.5 16h5v5h-5zM7.5 8v3.5h9V8M12 11.5V16"/></svg><span>Agents</span></a>
+          <a class="tab" href="#watching" data-tab="watching" title="Watching"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg><span>Watching</span></a>
           <a class="tab" href="#memory" data-tab="memory" title="Memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.8-4.8"/></svg><span>Memory</span></a>
           <a class="tab" href="#skills" data-tab="skills" title="Skills"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4 4.5v13c4 0 6.5.5 8 2 1.5-1.5 4-2 8-2v-13c-4 0-6.5.5-8 2zM12 6.5v13"/></svg><span>Skills</span></a>
-          <a class="tab" href="#board" data-tab="board" title="Board"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v7h-4z"/></svg><span>Board</span></a>
           <a class="tab" href="#tools" data-tab="tools" title="Tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg><span>Tools</span></a>
         </nav>
       </div>
@@ -72,12 +70,10 @@
     <div class="banner" id="offline" role="status" hidden>Can't reach Athena. Trying again…</div>
 
     <section id="tab-status" class="panel" data-panel="status" aria-label="Status"></section>
-    <section id="tab-chat" class="panel chat-panel" data-panel="chat" aria-label="Chat" hidden></section>
-    <section id="tab-activity" class="panel" data-panel="activity" aria-label="Activity" hidden></section>
-    <section id="tab-tasks" class="panel" data-panel="tasks" aria-label="Tasks" hidden></section>
+    <section id="tab-agents" class="panel chat-panel" data-panel="agents" aria-label="Agents" hidden></section>
+    <section id="tab-watching" class="panel" data-panel="watching" aria-label="Watching" hidden></section>
     <section id="tab-memory" class="panel" data-panel="memory" aria-label="Memory" hidden></section>
     <section id="tab-skills" class="panel" data-panel="skills" aria-label="Skills" hidden></section>
-    <section id="tab-board" class="panel" data-panel="board" aria-label="Board" hidden></section>
     <section id="tab-tools" class="panel" data-panel="tools" aria-label="Tools" hidden></section>
   </div>
 

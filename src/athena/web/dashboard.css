@@ -998,3 +998,126 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .bell svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .bell[data-on="true"] { color: var(--accent); }
 .bell[data-on="true"] svg { fill: currentColor; }
+
+/* -- agents: their list beside one agent, its views (agents.js) ----------------------------------------------- */
+
+.agent-views { display: flex; gap: 4px; overflow-x: auto; padding: 8px 12px; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+.agent-views::-webkit-scrollbar { display: none; }
+.agent-view-link { position: relative; flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; color: var(--muted); font-size: 13.5px; font-weight: 600; text-decoration: none; }
+.agent-view-link:hover { background: var(--surface-2); color: var(--text); }
+.agent-view-link[aria-current="page"] { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); color: var(--text); }
+.view-count { min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--approval); color: var(--on-accent); font-size: 11px; line-height: 18px; text-align: center; }
+.view-live { width: 7px; height: 7px; border-radius: 50%; background: var(--working); animation: blink 1.6s ease-in-out infinite; }
+.agent-view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.agents[data-agent-view="chat"] .agent-view { overflow: hidden; }
+.agents[data-agent-view]:not([data-agent-view="chat"]) .agent-view { padding: 14px; background: var(--bg); }
+.agents[data-agent-view]:not([data-agent-view="chat"]) .chat-tools { display: none; } /* tools for talking to it */
+.chat-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.session-meta .running { color: var(--working); font-weight: 650; }
+.msg-task-link { display: inline-flex; align-items: center; gap: 7px; padding: 4px 12px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 12.5px; text-decoration: none; }
+.msg-task-link:hover { color: var(--text); }
+.chat .msg-task-link svg { width: 14px; height: 14px; }
+.msg-task-link .msg-meta { padding: 0; }
+.text-card textarea { min-height: 260px; font-family: var(--font); font-size: 15px; line-height: 1.5; }
+
+/* An agent's DAG (dag.js): when it runs, what's proposed, its file and how it works. */
+.dag-view, .runs-view { display: grid; gap: 14px; align-content: start; min-width: 0; }
+.dag-view > *, .runs-view > *, .dag-layout > *, .run-detail > * { min-width: 0; } /* long lines scroll in their own box */
+.dag-when { font-weight: 600; }
+.dag-last { font-size: 13.5px; }
+.dag-layout { display: grid; gap: 14px; align-items: start; }
+@media (min-width: 1180px) {
+  .dag-layout { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); }
+  .dag-graph { position: sticky; top: 0; }
+}
+.code { display: flex; min-height: 300px; max-height: 62vh; margin-top: 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); overflow: hidden; }
+.code:focus-within { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); border-color: var(--accent); }
+.code-lines { flex: none; margin: 0; padding: 10px 8px 10px 10px; overflow: hidden; color: var(--faint); font: 13px/1.55 var(--font-mono); text-align: right; user-select: none; border-right: 1px solid var(--border); background: var(--surface-2); }
+.code-lines .bad { color: var(--failed); font-weight: 700; }
+.code textarea.code-text { flex: 1; min-width: 0; min-height: 0; height: auto; margin: 0; padding: 10px 12px; border: 0; border-radius: 0; background: transparent; font: 13px/1.55 var(--font-mono); white-space: pre; overflow: auto; resize: none; tab-size: 4; outline: none; }
+.code-problem { min-height: 1.4em; margin-top: 6px; font-size: 13.5px; }
+.code-problem[data-kind="error"] { color: var(--failed); }
+.code-problem[data-kind="warning"] { color: var(--approval); }
+.dag-drawing.stale { opacity: 0.45; }
+.code-sample { margin: 8px 0; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); font: 12.5px/1.5 var(--font-mono); white-space: pre; overflow-x: auto; }
+.help-list { display: grid; gap: 6px; margin: 8px 0; padding-left: 20px; font-size: 14px; }
+.dialog h3 { margin-top: 12px; font-size: 15px; }
+.tool-names { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.proposals { display: grid; gap: 14px; }
+.proposals:empty { display: none; }
+.proposal { border-color: color-mix(in srgb, var(--approval) 55%, var(--border)); }
+.proposal[data-state="pending"] { background: color-mix(in srgb, var(--approval) 7%, var(--surface)); }
+.diff { margin: 10px 0; padding: 8px 0; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); font: 12.5px/1.5 var(--font-mono); overflow-x: auto; max-height: 360px; }
+.diff-line { display: block; padding: 0 12px; white-space: pre; }
+.diff-line.added { background: color-mix(in srgb, var(--idle) 16%, transparent); }
+.diff-line.removed { background: color-mix(in srgb, var(--failed) 14%, transparent); }
+.diff-line.where { color: var(--faint); }
+.proposal-tools { font-family: var(--font-mono); font-size: 13px; }
+
+/* A DAG, drawn (graph.js). */
+.graph-scroll { overflow-x: auto; padding: 10px 2px 4px; }
+.graph { position: relative; margin: 0 auto; }
+.graph-edges { position: absolute; inset: 0; overflow: visible; }
+.graph-edges path { fill: none; stroke: var(--divider); stroke-width: 1.6; }
+.graph-edges path.faint { stroke-dasharray: 4 4; opacity: 0.6; }
+.graph-edges marker path { fill: var(--divider); stroke: none; }
+.graph-node { position: absolute; display: grid; align-content: start; gap: 3px; padding: 8px 10px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow); color: inherit; font: inherit; text-align: left; overflow: hidden; }
+button.graph-node { cursor: pointer; }
+button.graph-node:hover { border-color: var(--divider); }
+.graph-node[aria-pressed="true"] { outline: 2px solid var(--accent); }
+.graph-node-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.graph-node-head code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 700; }
+.graph-node-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; line-height: 1.3; }
+.graph-mark { flex: none; display: inline-flex; align-items: center; padding: 0 5px; border-radius: 6px; background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 700; }
+.graph-mark svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
+.graph-node[data-state] { border-left-width: 4px; }
+.graph-node[data-state="success"], .graph-chip[data-state="success"] { border-color: var(--idle); }
+.graph-node[data-state="running"], .graph-chip[data-state="running"] { border-color: var(--working); }
+.graph-node[data-state="failed"], .graph-chip[data-state="failed"], .graph-node[data-state="upstream_failed"] { border-color: var(--failed); }
+.graph-node[data-state="skipped"], .graph-node[data-state="stopped"], .graph-chip[data-state="skipped"], .graph-chip[data-state="stopped"] { opacity: 0.55; }
+.graph-end { display: grid; gap: 6px; width: fit-content; max-width: min(100%, 440px); margin: 0 auto; padding: 8px 10px; border-radius: 12px; border: 1px dashed var(--divider); background: var(--surface-2); }
+.graph-end-label { color: var(--faint); font-size: 11px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
+.graph-end-tasks { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; }
+.graph-chip { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); font: 12px var(--font); white-space: nowrap; }
+button.graph-chip { cursor: pointer; }
+.graph-chip[aria-pressed="true"] { outline: 2px solid var(--accent); }
+
+/* An agent's runs (runs.js). */
+@media (min-width: 1180px) {
+  .runs-view { grid-template-columns: 280px minmax(0, 1fr); align-items: start; }
+  .runs-card { position: sticky; top: 0; }
+}
+.run-list { display: grid; gap: 2px; margin: 8px 0 0; padding: 0; list-style: none; }
+.run-row { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 10px; padding: 8px 10px; border-radius: 10px; color: inherit; text-decoration: none; }
+.run-row:hover { background: var(--surface-2); }
+.run-row[aria-current="true"] { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+.run-number { font-weight: 700; }
+.run-when { font-size: 13.5px; }
+.run-meta { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; }
+.run-state { font-size: 12.5px; font-weight: 650; color: var(--muted); }
+[data-state="success"] > .run-state, .run-head[data-state="success"] .run-state { color: var(--idle); }
+[data-state="running"] > .run-state, .run-head[data-state="running"] .run-state { color: var(--working); }
+[data-state="failed"] > .run-state, .run-head[data-state="failed"] .run-state { color: var(--failed); }
+.run-detail { display: grid; gap: 14px; min-width: 0; }
+.run-doing { color: var(--working); font-weight: 600; }
+.run-input pre, .run-task pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.5 var(--font-mono); }
+.run-summary, .run-output { margin-top: 8px; font-size: 14.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-task-list { display: grid; gap: 6px; margin-top: 8px; }
+.run-task { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); border-left-width: 4px; }
+.run-task[data-state="success"] { border-left-color: var(--idle); }
+.run-task[data-state="running"] { border-left-color: var(--working); }
+.run-task[data-state="failed"], .run-task[data-state="upstream_failed"] { border-left-color: var(--failed); }
+.run-task summary { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.run-task summary code { font-weight: 700; }
+
+/* The Watching tab. */
+.watch-key { flex: none; padding: 1px 7px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; }
+.watch-starts { display: flex; align-items: center; gap: 6px; color: var(--working); font-size: 13.5px; }
+.watch-starts svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
+
+@media (max-width: 719px) {
+  .agents[data-agent-view]:not([data-agent-view="chat"]) .agent-view { padding: 10px; }
+  .agent-views { gap: 2px; padding: 6px 8px; }
+  .agent-view-link { padding: 5px 9px; font-size: 13px; }
+  .code { max-height: 55vh; }
+}
