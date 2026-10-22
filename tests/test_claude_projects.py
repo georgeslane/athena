@@ -15,13 +15,13 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from pi_assistant.builtin import FAIL, OK, WARN, Unavailable
-from pi_assistant.claude_projects import BoardStore, ClaudeProjects, ClaudeProjectsConfig
-from pi_assistant.project_files import apply_status, check_stories, folder_of, parse, render, render_more, slug
-from pi_assistant.tools import ToolError
+from athena.builtin import FAIL, OK, WARN, Unavailable
+from athena.claude_projects import BoardStore, ClaudeProjects, ClaudeProjectsConfig
+from athena.project_files import apply_status, check_stories, folder_of, parse, render, render_more, slug
+from athena.tools import ToolError
 
 REPO = "someone/zeus-solutions"
-GUIDE = Path(__file__).resolve().parents[1] / "deploy" / "zeus-solutions" / "CLAUDE.md"
+GUIDE = Path(__file__).resolve().parents[1] / "docs" / "claude-projects" / "CLAUDE.md"
 STORIES = [
     {
         "title": "Read the bank's CSV",
@@ -616,7 +616,7 @@ async def test_doctor_says_whether_athena_can_push(github, config):
     assert await check() == [(OK, f"can read and write {REPO}, which is private")]
     github.commits[github.heads["main"]][0].pop("CLAUDE.md")
     github.commits[github.heads["main"]][0]["README.md"] = "x"
-    missing = f"{REPO} has no CLAUDE.md on main: copy deploy/zeus-solutions/CLAUDE.md there (README)"
+    missing = f"{REPO} has no CLAUDE.md on main: copy Athena's docs/claude-projects/CLAUDE.md"
     assert (await check())[1] == (WARN, missing)
     github.push = False
     can_not = f"the token can read {REPO} but not write to it: give it Contents, read and write"
@@ -635,7 +635,7 @@ def test_it_needs_a_token_and_a_repo(config):
 
 
 def test_a_task_always_asks_before_pushing_to_github():
-    from pi_assistant.tasks import NEVER_UNASKED
+    from athena.tasks import NEVER_UNASKED
 
     assert {"hand_to_claude", "answer_claude", "extend_claude_project"} <= NEVER_UNASKED
 

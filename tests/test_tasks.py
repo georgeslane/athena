@@ -10,15 +10,15 @@ from zoneinfo import ZoneInfo
 import pytest
 from conftest import FakeLLMServer, completion
 
-from pi_assistant import tasks as tasks_module
-from pi_assistant.agent import Agent
-from pi_assistant.config import TasksConfig
-from pi_assistant.history import ConversationStore
-from pi_assistant.llm import LLMReply
-from pi_assistant.status import StatusTracker
-from pi_assistant.tasks import NOTHING, Schedule, ScheduleError, Scheduler, TaskStore, old_to_cron
-from pi_assistant.tools import Tool, ToolError, ToolRegistry
-from pi_assistant.watching import WatchStore
+from athena.agent import Agent
+from athena.config import TasksConfig
+from athena.history import ConversationStore
+from athena.llm import LLMReply
+from athena.status import StatusTracker
+from athena.tasks import NOTHING, Schedule, ScheduleError, Scheduler, TaskStore
+from athena.tasks import scheduler as scheduler_module
+from athena.tools import Tool, ToolError, ToolRegistry
+from athena.watching import WatchStore
 
 LONDON = ZoneInfo("Europe/London")
 THURSDAY = datetime(2026, 10, 15, 12, 0, tzinfo=LONDON)  # a Thursday, at noon
@@ -99,86 +99,6 @@ def test_when_each_kind_runs_next():
 def test_schedules_that_cant_be_understood_say_why(said, why):
     with pytest.raises(ScheduleError, match=why):
         Schedule.parse(said, LONDON, THURSDAY)
-
-
-@pytest.mark.parametrize(
-    ("said", "why"),
-    [
-        ("daily 07:30", "cron schedules now .*: “daily 07:30” is “30 7 \\* \\* \\*”"),
-        ("weekdays 13:00", "“weekdays 13:00” is “0 13 \\* \\* 1-5”"),
-        ("weekly mon,thu 18:00", "“weekly mon,thu 18:00” is “0 18 \\* \\* 1,4”"),
-        ("every 6h", "“every 6h” is “0 0,6,12,18 \\* \\* \\*”"),
-        ("every 90m", "cron schedules now .*Schedules:"),  # cron can't say it: no suggestion that's wrong
-        ("daily 25:00", "cron schedules now .*Schedules:"),
-    ],
-)
-def test_schedules_from_before_cron_say_what_they_are_in_cron(said, why):
-    with pytest.raises(ScheduleError, match=why):
-        Schedule.parse(said, LONDON, THURSDAY)
-
-
-@pytest.mark.parametrize(
-    ("old", "due", "cron", "exact"),
-    [
-        ("daily 07:30", None, "30 7 * * *", True),
-        ("weekdays 07:30", None, "30 7 * * 1-5", True),
-        ("weekly sun,mon 10:00", None, "0 10 * * 0,1", True),
-        ("every 15m", datetime(2026, 10, 15, 12, 7), "7-59/15 * * * *", True),  # keeps to when it was due
-        ("every 30m", datetime(2026, 10, 15, 12, 30), "*/30 * * * *", True),
-        ("every 1h", datetime(2026, 10, 15, 12, 20), "20 * * * *", True),
-        ("every 6h", datetime(2026, 10, 15, 14, 20), "20 2,8,14,20 * * *", True),
-        ("every 1d", datetime(2026, 10, 15, 9, 5), "5 9 * * *", True),
-        ("every 90m", datetime(2026, 10, 15, 12, 0), "0 0,2,4,6,8,10,12,14,16,18,20,22 * * *", False),  # 2 hours
-        ("every 5h", datetime(2026, 10, 15, 12, 0), "0 0,6,12,18 * * *", False),
-        ("every 2d", datetime(2026, 10, 15, 9, 0), "0 9 */2 * *", False),
-    ],
-)
-def test_schedules_from_before_cron_become_the_cron_that_does_the_same(old, due, cron, exact):
-    assert old_to_cron(old, due and due.replace(tzinfo=LONDON)) == (cron, exact)
-    Schedule.parse(cron, LONDON)  # and it's one that can be used
-
-
-async def test_tasks_kept_from_before_cron_are_given_cron_schedules_and_you_hear_of_any_that_changed(athena):
-    a = athena([])
-    store = a["scheduler"].store
-    due = datetime(2026, 10, 15, 14, 20, tzinfo=LONDON).timestamp()
-    briefing = store.add("Briefing", "Brief me.", "weekdays 07:30", [], "you", due)
-    often = store.add("Often", "Look.", "every 6h", [], "you", due)
-    odd = store.add("Odd", "Look.", "every 90m", [], "you", due)
-    paused = store.add("Paused", "Look.", "weekly fri 18:00", [], "you", None)
-    paused.status = "paused"
-    store.save(paused)
-
-    scheduler = make_scheduler(a, store)
-    assert [store.get(t.id).schedule for t in (briefing, often, odd, paused)] == [
-        "30 7 * * 1-5",
-        "20 2,8,14,20 * * *",
-        "20 0,2,4,6,8,10,12,14,16,18,20,22 * * *",
-        "0 18 * * 5",
-    ]
-    assert store.get(briefing.id).next_run == due and store.get(often.id).next_run == due  # as they were
-    assert store.get(odd.id).next_run > time.time() and store.get(paused.id).status == "paused"
-    scheduler.start()
-    try:
-        async with asyncio.timeout(3):
-            while not a["channel"].said:
-                await asyncio.sleep(0.01)
-    finally:
-        await scheduler.stop()
-    [said] = a["channel"].said
-    assert said.startswith("🗓️ Tasks' regular schedules are cron schedules now, and for some it's changed:")
-    assert "“Odd” was every 90m, which cron can't say: it now runs every day at 00:20, 02:20" in said
-    assert "Briefing" not in said and "Often" not in said  # they do just what they did
-
-    again = make_scheduler(a, store)  # converted once: nothing to do or say the next time
-    assert again._changed == []
-
-
-def make_scheduler(a, store):
-    old = a["scheduler"]
-    return Scheduler(
-        old.cfg, store, old.agent, timezone="Europe/London", channel=old.channel, tools=old._tools, poll_seconds=0.01
-    )
 
 
 # -- running them -------------------------------------------------------------------------------------
@@ -405,8 +325,8 @@ async def test_stopping_a_task(athena):
 
 
 async def test_a_due_task_waits_until_you_have_stopped_chatting(athena, monkeypatch):
-    monkeypatch.setattr(tasks_module, "FIRST_WAIT", 0.02)
-    monkeypatch.setattr(tasks_module, "LONGEST_WAIT", 0.08)
+    monkeypatch.setattr(scheduler_module, "FIRST_WAIT", 0.02)
+    monkeypatch.setattr(scheduler_module, "LONGEST_WAIT", 0.08)
     a = athena([completion("Done.")], quiet_minutes=1)
     scheduler, agent = a["scheduler"], a["agent"]
     agent.last_answered_you = time.monotonic()  # you've just had a reply

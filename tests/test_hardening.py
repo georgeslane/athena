@@ -1,6 +1,7 @@
-"""deploy/pi-assistant.service's hardening, under systemd: what Athena can still do, and what it can't.
+"""Athena's unit's hardening (resources/systemd/athena.service), under systemd: what Athena can still do, and
+what it can't.
 
-It installs the real unit with scripts/install-units.sh, for an Athena that's tests/fixtures/hardening_probe.py,
+It installs the real unit with `athena service install`, for an Athena that's tests/fixtures/hardening_probe.py,
 which tries each thing and says what happened. It needs systemd and sudo, so it runs only in CI, on Linux.
 """
 
@@ -16,6 +17,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from athena import service
 
 REPO = Path(__file__).resolve().parents[1]
 PROBE = REPO / "tests" / "fixtures" / "hardening_probe.py"
@@ -61,9 +64,8 @@ MUST = [
     "connect out from a sandbox with the network",
 ]
 MUST_NOT = [
-    "add a file to the repo",
-    "change a script",
-    "change its environment",
+    "change its code",
+    "add a file to its environment",
     "write to your home folder",
     "change ~/.bashrc",
     "see the system's /tmp",
@@ -109,16 +111,15 @@ def listener():
 @pytest.fixture(scope="module")
 def probed(listener, tmp_path_factory):
     # Not in /tmp, which the unit gives Athena a private one of. The data folder has a space in its name,
-    # as a drive's might, and is outside the repo.
+    # as a drive's might, and is outside Athena's home folder.
     root = Path.home() / f".athena-hardening-{os.getpid()}"
-    repo, data = root / "athena", root / "athena data"
-    (repo / "scripts").mkdir(parents=True)
-    shutil.copy(REPO / "scripts" / "install-units.sh", repo / "scripts")
-    shutil.copy(REPO / "scripts" / "update.sh", repo / "scripts")
-    shutil.copytree(REPO / "deploy", repo / "deploy")
-    (repo / "config.toml").write_text(CONFIG)
-    (repo / ".env").write_text("LLM_API_KEY=a-key\n")
-    program = repo / ".venv" / "bin" / "pi-assistant"
+    athena_home, data = root / ".athena", root / "athena data"
+    athena_home.mkdir(parents=True)
+    (athena_home / "config.toml").write_text(CONFIG)
+    (athena_home / ".env").write_text("LLM_API_KEY=a-key\n")
+    # Where `uv tool install` puts Athena: the unit keeps it read-only, though the rest of uv's folder isn't.
+    code = Path.home() / ".local" / "share" / "uv" / "tools" / f"athena-hardening-{os.getpid()}"
+    program = code / "bin" / "athena"
     program.parent.mkdir(parents=True)
     program.write_text(f"#!/bin/sh\nexec {sys.executable} {PROBE}\n")
     program.chmod(0o755)
@@ -132,39 +133,44 @@ def probed(listener, tmp_path_factory):
         "uv": shutil.which("uv"),
         "home_canary": str(home_canary),
         "tmp_canary": str(tmp_canary),
+        "code": str(code),
     }
-    (repo / "probe.json").write_text(json.dumps(plan))
-    installed = subprocess.run(["bash", str(repo / "scripts" / "install-units.sh")], capture_output=True, text=True)
+    (athena_home / "probe.json").write_text(json.dumps(plan))
     try:
-        assert installed.returncode == 0, installed.stderr
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("ATHENA_HOME", str(athena_home))
+            mp.delenv("ATHENA_CONFIG", raising=False)
+            mp.setattr(service, "program", lambda: program)
+            service.install()
         since = time.time() - 1
-        sudo("systemctl", "start", "pi-assistant")
+        sudo("systemctl", "start", "athena")
         deadline = time.monotonic() + 180
         results = data / "probe-results.json"
         while not results.exists() and time.monotonic() < deadline:
             time.sleep(0.5)
-        log = sudo("journalctl", "--no-pager", "-o", "cat", "-u", "pi-assistant", f"--since=@{int(since)}").stdout
+        log = sudo("journalctl", "--no-pager", "-o", "cat", "-u", "athena", f"--since=@{int(since)}").stdout
         assert results.exists(), f"the probe didn't finish:\n{log}"
-        yield json.loads(results.read_text()), repo
+        yield json.loads(results.read_text()), athena_home
     finally:
-        sudo("systemctl", "stop", "pi-assistant")
-        sudo("rm", "-f", "/etc/systemd/system/pi-assistant.service", "/etc/systemd/system/pi-assistant-stopped.service")
+        sudo("systemctl", "stop", "athena")
+        sudo("rm", "-f", "/etc/systemd/system/athena.service", "/etc/systemd/system/athena-stopped.service")
         sudo("systemctl", "daemon-reload")
         sudo("systemctl", "reset-failed")
         shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(code, ignore_errors=True)
 
 
 def test_athena_can_do_its_job_under_its_unit_and_nothing_more(probed):
-    results, repo = probed
+    results, athena_home = probed
     print(json.dumps(results, indent=2))  # what happened, for when it fails
     assert results["(mounted over /proc)"] == "nothing", "the sandbox can't mount /proc"
     assert {name: results[name] for name in MUST} == dict.fromkeys(MUST, "yes")
     assert [name for name in MUST_NOT if results[name] == "yes"] == []
-    assert "SET_BY_PROBE=yes" in (repo / ".env").read_text()
+    assert "SET_BY_PROBE=yes" in (athena_home / ".env").read_text()
 
 
 def test_the_units_exposure_stays_low(probed):
-    shown = sudo("systemd-analyze", "security", "--no-pager", "pi-assistant.service").stdout
+    shown = sudo("systemd-analyze", "security", "--no-pager", "athena.service").stdout
     print(shown)
-    score = float(re.search(r"Overall exposure level for pi-assistant\.service: ([\d.]+)", shown).group(1))
+    score = float(re.search(r"Overall exposure level for athena\.service: ([\d.]+)", shown).group(1))
     assert score <= MAX_EXPOSURE

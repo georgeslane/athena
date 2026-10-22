@@ -7,11 +7,11 @@ import httpx
 import pytest
 from test_telegram import ME, FakeBot, button_update, make_bot
 
-from pi_assistant.agent import AgentResult
-from pi_assistant.config import SiriConfig, TelegramConfig
-from pi_assistant.doctor import FAIL, OK, WARN, check_siri
-from pi_assistant.siri import VOICE_NOTE, SiriServer
-from pi_assistant.status import StatusTracker
+from athena.agent import AgentResult
+from athena.config import SiriConfig, TelegramConfig
+from athena.doctor import FAIL, OK, WARN, check_siri
+from athena.siri import VOICE_NOTE, SiriServer
+from athena.status import StatusTracker
 
 TOKEN = "test-" * 4
 AUTH = {"Authorization": f"Bearer {TOKEN}"}

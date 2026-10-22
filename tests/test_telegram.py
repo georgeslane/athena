@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 from telegram.ext import CallbackQueryHandler, MessageHandler
 
-from pi_assistant.agent import AgentResult
-from pi_assistant.config import TelegramConfig
-from pi_assistant.telegram_bot import TelegramBot
+from athena.agent import AgentResult
+from athena.config import TelegramConfig
+from athena.telegram_bot import TelegramBot
 
 ME = 111
 STRANGER = 999
@@ -249,7 +249,7 @@ async def test_session_starts_a_new_session(config):
 
 
 async def test_you_hear_when_a_servers_tools_change(config):
-    from pi_assistant.tool_approvals import ToolChange, ToolVersion
+    from athena.tool_approvals import ToolChange, ToolVersion
 
     bot = make_bot(config, None)
     fake = FakeBot()
@@ -267,7 +267,7 @@ async def test_you_hear_when_a_servers_tools_change(config):
 
 
 async def test_recall_shows_documents_by_path(config, memory, tmp_path):
-    from pi_assistant.memory import DOCUMENTS_HOME, IndexedDocument
+    from athena.memory import DOCUMENTS_HOME, IndexedDocument
 
     bot = make_bot(config, None)
     bot.s.memory = memory
@@ -496,8 +496,8 @@ async def test_retry_takes_back_the_last_answer_and_asks_again(config):
 
 
 def task_scheduler(config):
-    from pi_assistant.config import TasksConfig
-    from pi_assistant.tasks import Scheduler, TaskStore
+    from athena.config import TasksConfig
+    from athena.tasks import Scheduler, TaskStore
 
     agent = SimpleNamespace(answering_you=0, last_answered_you=float("-inf"))
     return Scheduler(TasksConfig(), TaskStore(config.db_path), agent, timezone="Europe/London",
@@ -635,7 +635,7 @@ async def test_a_photo_and_its_caption_go_to_the_model(config):
 
 
 async def test_an_album_is_answered_once(config, monkeypatch):
-    import pi_assistant.telegram_bot as telegram_bot
+    import athena.telegram_bot as telegram_bot
 
     monkeypatch.setattr(telegram_bot, "ALBUM_SECONDS", 0.2)
     asked, respond = asking("Two cats.")
@@ -688,7 +688,7 @@ async def test_a_model_that_cant_take_photos_says_so(config):
 
 
 async def test_retry_sends_the_photos_again(config, tmp_path):
-    from pi_assistant.photos import Photo, PhotoStore
+    from athena.photos import Photo, PhotoStore
 
     asked, respond = asking()
     store = PhotoStore(tmp_path / "photos")

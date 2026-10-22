@@ -11,9 +11,9 @@ from typing import Any
 import httpx
 import pytest
 
-from pi_assistant.config import AgentConfig, Config, EmbeddingsConfig, LLMConfig, MemoryConfig
-from pi_assistant.llm import LLMClient
-from pi_assistant.memory import Embedder, MemoryService, MemoryStore
+from athena.config import AgentConfig, Config, EmbeddingsConfig, LLMConfig, MemoryConfig
+from athena.llm import LLMClient
+from athena.memory import Embedder, MemoryService, MemoryStore
 
 DIMS = 256
 
@@ -97,6 +97,7 @@ class FakeLLMServer:
     ):
         self.replies = replies
         self.requests: list[dict] = []
+        self.error: str | None = None  # set to have every chat request refused with this message, as a broken model's
         self.model = model or {}
         self.status = status
 
@@ -108,6 +109,8 @@ class FakeLLMServer:
             return httpx.Response(200, json=self.status) if self.status else httpx.Response(404, json={"error": "no"})
         body = json.loads(request.content)
         self.requests.append(body)
+        if self.error:
+            return httpx.Response(400, json={"error": {"message": self.error}})
         if callable(self.replies):
             return httpx.Response(200, json=self.replies(body))
         if not self.replies:

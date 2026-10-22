@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 from test_sandbox import REAL, needs_bwrap
 
-from pi_assistant.builtin import Unavailable
-from pi_assistant.run_code import CodeConfig, CodeRunner, Ran, SandboxedPython
-from pi_assistant.sandbox import Sandbox
-from pi_assistant.tools import ToolError
-from pi_assistant.workspace import clear_workspace, workspace_of
+from athena.builtin import Unavailable
+from athena.run_code import CodeConfig, CodeRunner, Ran, SandboxedPython
+from athena.sandbox import Sandbox
+from athena.tools import ToolError
+from athena.workspace import clear_workspace, workspace_of
 
 
 def runner(tmp_path, **settings) -> CodeRunner:

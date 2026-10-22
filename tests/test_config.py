@@ -2,14 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from pi_assistant.config import ConfigError, MCPServerConfig, load_config
+from athena.config import ConfigError, MCPServerConfig, load_config
+from athena.resources import CONFIG_EXAMPLE
 
 REPO = Path(__file__).resolve().parents[1]
 
 
 def test_example_config_loads_with_env(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.toml"
-    cfg_path.write_text((REPO / "config.example.toml").read_text())
+    cfg_path.write_text(CONFIG_EXAMPLE.read_text())
     (tmp_path / ".env").write_text(
         "TELEGRAM_BOT_TOKEN=123:abc\nLLM_API_KEY=secret\nSIRI_TOKEN=for-the-shortcut\nDASHBOARD_TOKEN=open-sesame-123\n"
     )
@@ -52,7 +53,7 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
     assert cfg.agent.assistant_name == "Athena"
     # The status board's API only listens on the Pi, and the LED is set on the board's side now.
     assert cfg.display.enabled and (cfg.display.host, cfg.display.port) == ("127.0.0.1", 8091)
-    assert cfg.display.show_task and cfg.display.led is None
+    assert cfg.display.show_task
     # Siri is off until you set it up, and only listens on this machine.
     assert not cfg.siri.enabled and cfg.siri.host == "127.0.0.1"
     assert cfg.siri.token == "for-the-shortcut"
@@ -65,7 +66,7 @@ def test_example_config_loads_with_env(tmp_path, monkeypatch):
 
 
 def test_missing_config_has_helpful_error(tmp_path):
-    with pytest.raises(ConfigError, match="config.example.toml"):
+    with pytest.raises(ConfigError, match="athena setup"):
         load_config(tmp_path / "nope.toml")
 
 
@@ -94,13 +95,6 @@ def test_mcp_http_transport_detection():
     assert MCPServerConfig(url="http://mac:8765/sse").http_transport == "sse"
     assert MCPServerConfig(url="http://mac:8765/mcp").http_transport == "http"
     assert MCPServerConfig(url="http://mac:8765/mcp", transport="sse").http_transport == "sse"
-
-
-def test_a_config_from_before_the_board_moved_still_loads(tmp_path):
-    p = tmp_path / "config.toml"
-    p.write_text('[llm]\nmodel = "m"\n[display]\nshow_task = false\nled = true\n')
-    cfg = load_config(p)
-    assert cfg.display.show_task is False and cfg.display.led is True  # doctor says led has moved
 
 
 def test_problems_in_the_config_never_show_its_values(tmp_path, monkeypatch):

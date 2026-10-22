@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from pi_assistant.config import MCPServerConfig
-from pi_assistant.mcp_manager import MCPManager
-from pi_assistant.tools import ToolRegistry
+from athena.config import MCPServerConfig
+from athena.mcp_manager import MCPManager
+from athena.tools import ToolRegistry
 
 DEMO = str(Path(__file__).parent / "fixtures" / "demo_mcp_server.py")
 

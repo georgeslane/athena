@@ -1,5 +1,5 @@
-"""The link to the Mac: scripts/mac/install.sh (with stand-ins for launchctl, uv and friends) and
-scripts/connect-mac.sh."""
+"""The link to the Mac: `athena mac install` on the Mac, which runs resources/scripts/mac-install.sh (here with
+stand-ins for launchctl, uv and friends), and `athena mac connect` on the Pi (connect-mac.sh)."""
 
 import os
 import plistlib
@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
+from athena.resources import SCRIPTS
+
+SOURCE = "git+https://github.com/georgeslane/athena@0123abc"  # as `athena mac install` says
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq5tBo4d5w0tFqkLXYOEOOQhX7r3uB9nI2TQ2hS0j8f athena@pi"
 OTHER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherKeyOtherKeyOtherKeyOtherKeyOtherKey12 athena@new-pi"
 
@@ -21,7 +23,7 @@ STUBS = {
     "uname": '#!/bin/sh\necho "${STUB_UNAME:-Darwin}"\n',
     "launchctl": RECORD,
     "plutil": RECORD,
-    "uv": RECORD + 'echo "UV_PROJECT_ENVIRONMENT=$UV_PROJECT_ENVIRONMENT" >> "$STUB_LOG"\n',
+    "uv": RECORD,
     "nc": RECORD + "exit 1\n",  # nothing listening, so Remote Login looks off
     "curl": RECORD + "exit 1\n",
 }
@@ -38,7 +40,7 @@ def mac(tmp_path):
         (stubs / name).chmod(0o755)
     log = tmp_path / "log"
     log.touch()
-    env = {"HOME": str(home), "PATH": f"{stubs}:/usr/bin:/bin", "STUB_LOG": str(log)}
+    env = {"HOME": str(home), "PATH": f"{stubs}:/usr/bin:/bin", "STUB_LOG": str(log), "ATHENA_SOURCE": SOURCE}
 
     class Mac:
         app = home / "Library" / "Application Support" / "Athena"
@@ -48,7 +50,7 @@ def mac(tmp_path):
         def __init__(self):
             self.home, self.log = home, log
 
-        def install(self, *args, script=REPO / "scripts" / "mac" / "install.sh", **extra_env):
+        def install(self, *args, script=SCRIPTS / "mac-install.sh", **extra_env):
             return subprocess.run(
                 ["bash", str(script), *args],
                 env={**env, **extra_env},
@@ -108,10 +110,13 @@ def test_a_mac_that_offers_its_documents(mac):
     # stderr goes to a log, so it can't garble the conversation with the Pi.
     assert (mac.app / "run-documents").read_text().splitlines()[1:] == [
         f'exec 2>>"{mac.home}/Library/Logs/Athena/documents.log"',
-        f'exec "{mac.app}/venv/bin/python" -m pi_assistant.mac_documents --scope-file "{mac.app}/scope"',
+        f'exec "{mac.app}/venv/bin/python" -m athena.mac_documents --scope-file "{mac.app}/scope"',
     ]
-    assert mac.calls("uv") == [f"uv sync --project {REPO} --frozen --no-dev --extra mac --no-editable --quiet"]
-    assert f"UV_PROJECT_ENVIRONMENT={mac.app}/venv" in mac.log.read_text()
+    # Its own environment, with the same Athena as the Pi's, copied in.
+    assert mac.calls("uv") == [
+        f"uv venv --quiet {mac.app}/venv",
+        f"uv pip install --quiet --python {mac.app}/venv/bin/python --reinstall-package athena athena[mac] @ {SOURCE}",
+    ]
     assert "Remote Login is off" in result.stdout and "iMCP" not in result.stdout
     assert "open Memory, choose folders" in result.stdout
 
@@ -188,26 +193,6 @@ def test_rerunning_keeps_what_the_mac_offers_and_a_new_key_replaces_the_old_one(
     assert f"launchctl bootout gui/{os.getuid()}/local.athena.documents" in mac.calls("launchctl")
 
 
-def test_an_older_install_with_the_files_server_moves_on(mac):
-    """Before documents, a Mac offered "files" (searching folders with Spotlight) and "apple"."""
-    mac.agents.mkdir(parents=True)
-    mac.app.mkdir(parents=True)
-    for name in ["files", "apple"]:
-        (mac.agents / f"local.athena.{name}.plist").write_text("<plist/>")
-        (mac.app / f"run-{name}").write_text("#!/bin/sh\n")
-    (mac.app / "folders").write_text(f"{mac.home}/Documents\n")
-    mac.keys.parent.mkdir(mode=0o700)
-    mac.keys.write_text(our_line(mac) + "\n")
-
-    result = mac.install()  # what the README says to do after updating the repo
-    assert result.returncode == 0, result.stderr
-    assert offered(mac) == ["apple"]  # Calendar carries on
-    assert not (mac.app / "run-files").exists() and not (mac.app / "folders").exists()
-    assert f"launchctl bootout gui/{os.getuid()}/local.athena.files" in mac.calls("launchctl")
-    assert "Athena now indexes your documents instead" in result.stdout
-    assert mac.keys.read_text() == our_line(mac) + "\n"
-
-
 @pytest.mark.parametrize(
     "key",
     [
@@ -230,8 +215,8 @@ def test_needs_a_key_and_to_know_what_to_offer(mac):
     assert result.returncode != 0 and "Say what this Mac offers" in result.stderr
     result = mac.install("--pi-key", KEY, "--server", "nothing")
     assert result.returncode != 0 and "no server called 'nothing'" in result.stderr
-    result = mac.install("--pi-key", KEY, "--folder", f"{mac.home}/Documents")
-    assert result.returncode != 0 and "you choose folders on Athena's dashboard now" in result.stderr
+    result = mac.install("--pi-key", KEY, "--documents", ATHENA_SOURCE="")
+    assert result.returncode != 0 and "Run this with athena mac install" in result.stderr
     assert not mac.agents.exists()
 
 
@@ -241,9 +226,8 @@ def test_only_runs_on_a_mac(mac):
 
 
 def test_adding_a_server_is_one_line(mac, tmp_path):
-    script = tmp_path / "repo" / "scripts" / "mac" / "install.sh"
-    script.parent.mkdir(parents=True)
-    original = (REPO / "scripts" / "mac" / "install.sh").read_text()
+    script = tmp_path / "mac-install.sh"
+    original = (SCRIPTS / "mac-install.sh").read_text()
     script.write_text(original.replace('  "apple|', '  "notes|/opt/notes-mcp --read-only"\n  "apple|', 1))
     mac.install("--pi-key", KEY, "--server", "notes", "--calendar", script=script).check_returncode()
 
@@ -266,7 +250,7 @@ def test_uninstall_removes_everything_it_added(mac):
         assert f"launchctl bootout gui/{os.getuid()}/local.athena.{name}" in mac.calls("launchctl")
 
 
-# -- the Pi's end: scripts/connect-mac.sh --------------------------------------------------
+# -- the Pi's end: connect-mac.sh ---------------------------------------------------------
 
 
 @pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="needs ssh-keygen")
@@ -276,8 +260,8 @@ def test_connect_mac_makes_a_key_and_an_ssh_entry(tmp_path):
 
     def connect(*args):
         return subprocess.run(
-            ["bash", str(REPO / "scripts" / "connect-mac.sh"), *args],
-            env={"HOME": str(home), "PATH": os.environ["PATH"]},
+            ["bash", str(SCRIPTS / "connect-mac.sh"), *args],
+            env={"HOME": str(home), "PATH": os.environ["PATH"], "ATHENA_SOURCE": SOURCE},
             capture_output=True,
             text=True,
         )
@@ -288,6 +272,7 @@ def test_connect_mac_makes_a_key_and_an_ssh_entry(tmp_path):
     public = (home / ".ssh" / "athena_mac.pub").read_text().strip()
     assert public.startswith("ssh-ed25519 ") and oct(key.stat().st_mode & 0o777) == "0o600"
     assert f'--pi-key "{public}"' in first.stdout
+    assert f'uvx --from "{SOURCE}" athena mac install' in first.stdout  # the same version as the Pi's
 
     connect("my-mac.tail1234.ts.net", "georges").check_returncode()  # safe to re-run
     config = (home / ".ssh" / "config").read_text()
@@ -313,3 +298,10 @@ def test_connect_mac_makes_a_key_and_an_ssh_entry(tmp_path):
         ("my-mac", "georges", "laptop", "extra"),
     ]:
         assert connect(*bad).returncode == 2
+
+
+def test_help_says_how_to_use_it(mac):
+    result = mac.install("--help")
+    assert result.returncode == 0
+    assert 'athena mac install --pi-key "ssh-ed25519 AAAA... athena@pi" --calendar' in result.stdout
+    assert "set -euo" not in result.stdout and not mac.calls("uv")

@@ -11,11 +11,11 @@ import pytest
 from test_sandbox import REAL, needs_bwrap
 from test_telegram import ME, PhotoBot, asking, make_bot
 
-from pi_assistant import pdfs, workspace
-from pi_assistant.agent import AgentResult
-from pi_assistant.files import SENT, Files, FilesConfig
-from pi_assistant.run_code import CodeConfig, SandboxedPython
-from pi_assistant.tools import ToolError, Turn, begin_turn
+from athena import pdfs, workspace
+from athena.agent import AgentResult
+from athena.files import SENT, Files, FilesConfig
+from athena.run_code import CodeConfig, SandboxedPython
+from athena.tools import ToolError, Turn, begin_turn
 
 
 @pytest.fixture
@@ -316,11 +316,11 @@ async def athena_tasks(config, memory):
     from conftest import FakeLLMServer, completion
     from test_tasks import FakeChannel
 
-    from pi_assistant.agent import Agent
-    from pi_assistant.config import TasksConfig
-    from pi_assistant.history import ConversationStore
-    from pi_assistant.tasks import Scheduler, TaskStore
-    from pi_assistant.tools import ToolRegistry
+    from athena.agent import Agent
+    from athena.config import TasksConfig
+    from athena.history import ConversationStore
+    from athena.tasks import Scheduler, TaskStore
+    from athena.tools import ToolRegistry
 
     tools = ToolRegistry()
     for tool in Files(FilesConfig(), workspace.workspace_of(config), None).tools():
@@ -362,4 +362,4 @@ def test_the_files_builtin_is_there_and_kept_apart_from_an_old_files_server():
 
 def test_its_pdf_module_needs_nothing_of_athenas():
     source = Path(pdfs.__file__).read_text()
-    assert "pi_assistant" not in source  # its source is all that's in the sandbox
+    assert "athena" not in source  # its source is all that's in the sandbox

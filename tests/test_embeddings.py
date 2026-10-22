@@ -1,4 +1,4 @@
-"""Testing embeddings models and switching between them: `pi-assistant embeddings test` and `use`."""
+"""Testing embeddings models and switching between them: `athena embeddings test` and `use`."""
 
 import asyncio
 import sqlite3
@@ -6,10 +6,10 @@ import sqlite3
 import pytest
 from conftest import DIMS
 
-from pi_assistant import cli
-from pi_assistant.config import EmbeddingsConfig, MemoryConfig, load_config
-from pi_assistant.memory import Embedder, MemoryService, MemoryStore
-from pi_assistant.search_eval import DIFFERENT, DUPLICATES, QUESTIONS, UNRELATED, SearchReport, run_search_test
+from athena import cli
+from athena.config import EmbeddingsConfig, MemoryConfig, load_config
+from athena.memory import Embedder, MemoryService, MemoryStore
+from athena.search_eval import DIFFERENT, DUPLICATES, QUESTIONS, UNRELATED, SearchReport, run_search_test
 
 CONFIG = """\
 # Athena's settings
@@ -120,7 +120,7 @@ async def test_reembedding_changes_nothing_unless_it_finishes(tmp_path, embeddin
     await switched.embedder.close()
 
 
-# -- switching: pi-assistant embeddings use -------------------------------------------------------------
+# -- switching: athena embeddings use -------------------------------------------------------------
 
 
 @pytest.fixture
@@ -213,7 +213,7 @@ def test_it_wont_switch_while_athena_runs(athena, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_athena_running", lambda: True)
     original = athena.read_text()
     assert _run(athena, "use", "fake-b", "--yes") == 1
-    assert "sudo systemctl stop pi-assistant" in capsys.readouterr().out
+    assert "sudo systemctl stop athena" in capsys.readouterr().out
     assert athena.read_text() == original
 
 

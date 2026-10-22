@@ -1,4 +1,4 @@
-"""scripts/tell-stopped.py: telling you in Telegram that Athena has stopped, which systemd runs when it does.
+"""resources/tell_stopped.py: telling you in Telegram that Athena has stopped, which systemd runs when it does.
 
 The last test installs the real units and has systemd stop Athena for real, so it runs only in CI, on Linux,
 where it can use sudo. The others run the script with a stand-in for Telegram and for journalctl.
@@ -16,7 +16,9 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
+from athena import service
+from athena.resources import TELL_STOPPED
+
 TOKEN = "123456789:fake-token-for-the-tests-only-xyz"
 SECRET = "an-api-key-from-env"
 OTHER_TOKEN = "987654321:" + "B" * 35  # shaped like a real one, built here so the file holds none
@@ -57,24 +59,23 @@ def telegram():
     server.close()
 
 
-def athena_repo(root: Path, config: str) -> Path:
-    repo = root / "athena"
-    (repo / "scripts").mkdir(parents=True)
-    shutil.copy(REPO / "scripts" / "tell-stopped.py", repo / "scripts")
-    (repo / "config.toml").write_text(config)
-    (repo / ".env").write_text(f'TELEGRAM_BOT_TOKEN={TOKEN}\nLLM_API_KEY="{SECRET}"\n# a comment\n')
-    return repo
+def athena_home(root: Path, config: str) -> Path:
+    home = root / ".athena"
+    home.mkdir(parents=True)
+    (home / "config.toml").write_text(config)
+    (home / ".env").write_text(f'TELEGRAM_BOT_TOKEN={TOKEN}\nLLM_API_KEY="{SECRET}"\n# a comment\n')
+    return home
 
 
 CONFIG = '[telegram]\nbot_token = "${TELEGRAM_BOT_TOKEN}"\nallowed_user_ids = [42, 43]\n'
 JOURNAL = f"""\
-Started pi-assistant.service - pi-assistant (Telegram AI assistant).
+Started athena.service - athena (Telegram AI assistant).
 Traceback (most recent call last):
   File "app.py", line 1, in <module>
-pi_assistant.memory.MemoryStoreError: the memory index was built with another model (key {SECRET})
+athena.memory.MemoryStoreError: the memory index was built with another model (key {SECRET})
 token {TOKEN} and another {OTHER_TOKEN}
-pi-assistant.service: Main process exited, code=exited, status=1/FAILURE
-pi-assistant.service: Failed with result 'exit-code'.
+athena.service: Main process exited, code=exited, status=1/FAILURE
+athena.service: Failed with result 'exit-code'.
 """
 
 
@@ -91,7 +92,7 @@ RESTARTING = "ActiveState=activating|SubState=auto-restart|Result=exit-code"
 RUNNING = "ActiveState=active|SubState=running|Result=success"
 
 
-def run(repo: Path, tmp_path: Path, telegram: FakeTelegram, journal: str = JOURNAL, states=(GAVE_UP,), **env):
+def run(home: Path, tmp_path: Path, telegram: FakeTelegram, journal: str = JOURNAL, states=(GAVE_UP,), **env):
     stubs = tmp_path / "stubs"
     stubs.mkdir(exist_ok=True)
     (stubs / "journalctl").write_text(f"#!/bin/sh\ncat <<'EOF'\n{journal}EOF\n")
@@ -100,8 +101,9 @@ def run(repo: Path, tmp_path: Path, telegram: FakeTelegram, journal: str = JOURN
         stub.chmod(0o755)
     (tmp_path / "states").write_text("".join(f"{state}\n" for state in states))
     return subprocess.run(
-        [sys.executable, "-I", str(repo / "scripts" / "tell-stopped.py")],
+        [sys.executable, "-I", str(TELL_STOPPED)],
         env={
+            "ATHENA_HOME": str(home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "TELEGRAM_API": telegram.url,
             "STATES": str(tmp_path / "states"),
@@ -117,10 +119,10 @@ def run(repo: Path, tmp_path: Path, telegram: FakeTelegram, journal: str = JOURN
 
 
 def test_it_tells_you_why_with_the_end_of_the_log_and_no_secrets(tmp_path, telegram):
-    repo = athena_repo(tmp_path, CONFIG)
+    home = athena_home(tmp_path, CONFIG)
     # Started at the first failure, it waits while systemd restarts Athena, until systemd gives up. On newer
     # systemd, Athena shows as failed for a moment before each restart: that doesn't count.
-    result = run(repo, tmp_path, telegram, states=(FAILED, RESTARTING, FAILED, RESTARTING, GAVE_UP))
+    result = run(home, tmp_path, telegram, states=(FAILED, RESTARTING, FAILED, RESTARTING, GAVE_UP))
     assert result.returncode == 0, result.stderr
     ((path, body),) = telegram.sent
     assert path == f"/bot{TOKEN}/sendMessage" and body["chat_id"] == "42"
@@ -129,37 +131,37 @@ def test_it_tells_you_why_with_the_end_of_the_log_and_no_secrets(tmp_path, teleg
         "The end of its log:\n"
         "Traceback (most recent call last):\n"
         '  File "app.py", line 1, in <module>\n'
-        "pi_assistant.memory.MemoryStoreError: the memory index was built with another model (key [hidden])\n"
+        "athena.memory.MemoryStoreError: the memory index was built with another model (key [hidden])\n"
         "token [hidden] and another [hidden]\n\n"
-        "Once it's fixed, start it again on the Pi with:\nsudo systemctl restart pi-assistant"
+        "Once it's fixed, start it again on the Pi with:\nsudo systemctl restart athena"
     )
 
 
 def test_a_blip_it_recovers_from_says_nothing(tmp_path, telegram):
-    repo = athena_repo(tmp_path, CONFIG)
-    result = run(repo, tmp_path, telegram, states=(RESTARTING, RUNNING))
+    home = athena_home(tmp_path, CONFIG)
+    result = run(home, tmp_path, telegram, states=(RESTARTING, RUNNING))
     assert result.returncode == 0 and "started again by itself" in result.stdout and telegram.sent == []
 
 
 def test_stopped_without_an_error_says_nothing(tmp_path, telegram):
-    repo = athena_repo(tmp_path, CONFIG)
-    result = run(repo, tmp_path, telegram, states=(RESTARTING, STOPPED))
+    home = athena_home(tmp_path, CONFIG)
+    result = run(home, tmp_path, telegram, states=(RESTARTING, STOPPED))
     assert result.returncode == 0 and "stopped without an error" in result.stdout and telegram.sent == []
 
 
 def test_failed_for_good_without_hitting_the_limit(tmp_path, telegram):
-    repo = athena_repo(tmp_path, CONFIG)
-    result = run(repo, tmp_path, telegram, states=(FAILED,), MONITOR_SERVICE_RESULT="exit-code")
+    home = athena_home(tmp_path, CONFIG)
+    result = run(home, tmp_path, telegram, states=(FAILED,), MONITOR_SERVICE_RESULT="exit-code")
     assert result.returncode == 0, result.stderr
     expected = "🛑 Athena has stopped, and systemd has stopped restarting it. The last time, it stopped with an error."
     assert telegram.sent[0][1]["text"].startswith(expected)
 
 
 def test_stopping_and_restarting_for_a_long_time_is_worth_saying(tmp_path, telegram):
-    repo = athena_repo(tmp_path, CONFIG)
+    home = athena_home(tmp_path, CONFIG)
     # Running for a moment at a time, then failing again, until it's watched for long enough.
     states = (RUNNING, RESTARTING) * 3
-    result = run(repo, tmp_path, telegram, states=states, STEADY_SECONDS="60", SETTLE_SECONDS="0.3")
+    result = run(home, tmp_path, telegram, states=states, STEADY_SECONDS="60", SETTLE_SECONDS="0.3")
     assert result.returncode == 0, result.stderr
     ((_, body),) = telegram.sent
     assert body["text"].startswith("⚠️ Athena keeps stopping and restarting.\n\nThe end of its log:\n")
@@ -167,9 +169,9 @@ def test_stopping_and_restarting_for_a_long_time_is_worth_saying(tmp_path, teleg
 
 
 def test_a_broken_config_still_says_where_to(tmp_path, telegram):
-    repo = athena_repo(tmp_path, "[telegram\nallowed_user_ids = [ 42 ]\n")  # not TOML, as might have stopped it
+    home = athena_home(tmp_path, "[telegram\nallowed_user_ids = [ 42 ]\n")  # not TOML, as might have stopped it
     # And systemctl can't be asked: it goes by what systemd said when it started this.
-    result = run(repo, tmp_path, telegram, journal="", states=(), MONITOR_SERVICE_RESULT="exit-code")
+    result = run(home, tmp_path, telegram, journal="", states=(), MONITOR_SERVICE_RESULT="exit-code")
     assert result.returncode == 0, result.stderr
     ((_, body),) = telegram.sent
     assert body["chat_id"] == "42"
@@ -177,14 +179,14 @@ def test_a_broken_config_still_says_where_to(tmp_path, telegram):
 
 
 def test_without_a_chat_it_says_so(tmp_path, telegram):
-    repo = athena_repo(tmp_path, "[telegram]\nallowed_user_ids = []\n")
-    result = run(repo, tmp_path, telegram)
+    home = athena_home(tmp_path, "[telegram]\nallowed_user_ids = []\n")
+    result = run(home, tmp_path, telegram)
     assert result.returncode != 0 and "no telegram.allowed_user_ids" in result.stderr and telegram.sent == []
 
 
 def test_when_telegram_cant_be_reached_it_says_so_without_the_token(tmp_path, telegram):
-    repo = athena_repo(tmp_path, CONFIG)
-    result = run(repo, tmp_path, telegram, TELEGRAM_API="http://127.0.0.1:9")
+    home = athena_home(tmp_path, CONFIG)
+    result = run(home, tmp_path, telegram, TELEGRAM_API="http://127.0.0.1:9")
     assert result.returncode == 1 and "Couldn't tell you" in result.stderr and TOKEN not in result.stderr
 
 
@@ -200,7 +202,7 @@ def sudo(*args):
 
 @pytest.fixture
 def outside_tmp():
-    """A folder for a repo that systemd runs Athena from: not in /tmp, as the unit gives Athena a /tmp of its own."""
+    """A folder for an Athena that systemd runs: not in /tmp, as the unit gives Athena a /tmp of its own."""
     root = Path.home() / f".athena-test-{os.getpid()}-{time.monotonic_ns()}"
     root.mkdir()
     yield root
@@ -208,49 +210,48 @@ def outside_tmp():
 
 
 @pytest.fixture
-def systemd_athena(outside_tmp, telegram):
+def systemd_athena(outside_tmp, telegram, monkeypatch):
     """Install the real units, for an Athena that runs ``athena`` (a shell script), and start it."""
     units = Path("/etc/systemd/system")
     dropins = {
-        "pi-assistant.service.d": "[Service]\nRestartSec=1\n",  # so it gives up in seconds, not a minute
-        "pi-assistant-stopped.service.d": f"[Service]\nEnvironment=TELEGRAM_API={telegram.url} STEADY_SECONDS=3\n",
+        "athena.service.d": "[Service]\nRestartSec=1\n",  # so it gives up in seconds, not a minute
+        "athena-stopped.service.d": f"[Service]\nEnvironment=TELEGRAM_API={telegram.url} STEADY_SECONDS=3\n",
     }
 
     def start(athena: str) -> Path:
-        repo = athena_repo(outside_tmp, CONFIG)
-        shutil.copy(REPO / "scripts" / "install-units.sh", repo / "scripts")
-        shutil.copytree(REPO / "deploy", repo / "deploy")
-        program = repo / ".venv" / "bin" / "pi-assistant"
+        home = athena_home(outside_tmp, CONFIG)
+        program = outside_tmp / "bin" / "athena"
         program.parent.mkdir(parents=True)
         program.write_text(athena)
         program.chmod(0o755)
-        installed = subprocess.run(["bash", str(repo / "scripts" / "install-units.sh")], capture_output=True, text=True)
-        assert installed.returncode == 0, installed.stderr
+        monkeypatch.setenv("ATHENA_HOME", str(home))
+        monkeypatch.setattr(service, "program", lambda: program)
+        service.install()
         for folder, text in dropins.items():
             sudo("mkdir", "-p", str(units / folder))
             subprocess.run(["sudo", "-n", "tee", str(units / folder / "test.conf")], input=text, text=True, check=True)
         sudo("systemctl", "daemon-reload")
-        sudo("systemctl", "reset-failed", "pi-assistant", "pi-assistant-stopped")  # restarts the test before made
-        sudo("systemctl", "start", "pi-assistant")
-        return repo
+        sudo("systemctl", "reset-failed", "athena", "athena-stopped")  # restarts the test before made
+        sudo("systemctl", "start", "athena")
+        return home
 
     try:
         yield start
     finally:
-        sudo("systemctl", "stop", "pi-assistant", "pi-assistant-stopped")
-        for name in ("pi-assistant.service", "pi-assistant-stopped.service", *dropins):
+        sudo("systemctl", "stop", "athena", "athena-stopped")
+        for name in ("athena.service", "athena-stopped.service", *dropins):
             sudo("rm", "-rf", str(units / name))
         sudo("systemctl", "daemon-reload")
         sudo("systemctl", "reset-failed")
 
 
 def watched(since: float, timeout=90) -> str:
-    """Wait for pi-assistant-stopped to have run, since ``since``, and finished; returns its log since then."""
-    log = ["journalctl", "--no-pager", "-o", "cat", "-u", "pi-assistant-stopped", f"--since=@{int(since)}"]
+    """Wait for athena-stopped to have run, since ``since``, and finished; returns its log since then."""
+    log = ["journalctl", "--no-pager", "-o", "cat", "-u", "athena-stopped", f"--since=@{int(since)}"]
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        ran = "pi-assistant-stopped" in sudo(*log).stdout
-        if ran and sudo("systemctl", "is-active", "pi-assistant-stopped").stdout.strip() in ("inactive", "failed"):
+        ran = "athena-stopped" in sudo(*log).stdout
+        if ran and sudo("systemctl", "is-active", "athena-stopped").stdout.strip() in ("inactive", "failed"):
             break
         time.sleep(0.5)
     return sudo(*log).stdout
@@ -261,8 +262,8 @@ def test_systemd_tells_you_when_athena_stops_for_good(systemd_athena, telegram):
     since = time.time() - 1
     systemd_athena(f"#!/bin/sh\necho 'ConfigError: something is wrong (token {TOKEN})' >&2\nexit 1\n")
     log = watched(since)
-    state = sudo("systemctl", "show", "-p", "ActiveState,Result", "pi-assistant").stdout
-    assert telegram.sent, f"nothing sent; pi-assistant: {state}\npi-assistant-stopped's log:\n{log}"
+    state = sudo("systemctl", "show", "-p", "ActiveState,Result", "athena").stdout
+    assert telegram.sent, f"nothing sent; athena: {state}\nathena-stopped's log:\n{log}"
     ((path, body),) = telegram.sent
     assert path == f"/bot{TOKEN}/sendMessage" and body["chat_id"] == "42"
     assert body["text"].startswith("🛑 Athena has stopped, and systemd has stopped restarting it.")
@@ -272,10 +273,10 @@ def test_systemd_tells_you_when_athena_stops_for_good(systemd_athena, telegram):
 
 @pytest.mark.skipif(not _can_use_systemd(), reason="needs systemd and sudo: runs in CI")
 def test_systemd_says_nothing_when_athena_starts_again_by_itself(systemd_athena, telegram, outside_tmp):
-    marker = outside_tmp / "athena" / "data" / "failed-once"  # where Athena can write
+    marker = outside_tmp / ".athena" / "data" / "failed-once"  # where Athena can write
     since = time.time() - 1
     systemd_athena(f"#!/bin/sh\n[ -e {marker} ] && exec sleep 600\ntouch {marker}\necho 'A blip' >&2\nexit 1\n")
     log = watched(since)
     assert "started again by itself" in log, log
     assert telegram.sent == []
-    assert sudo("systemctl", "is-active", "pi-assistant").stdout.strip() == "active"
+    assert sudo("systemctl", "is-active", "athena").stdout.strip() == "active"

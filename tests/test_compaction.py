@@ -6,10 +6,10 @@ import pytest
 from conftest import FakeLLMServer, completion
 from test_agent import make_agent
 
-from pi_assistant import agent as agent_module
-from pi_assistant.compaction import KEEP_MESSAGES, MESSAGE_CHARS, summarise
-from pi_assistant.history import Older
-from pi_assistant.status import State
+from athena import agent as agent_module
+from athena.compaction import KEEP_MESSAGES, MESSAGE_CHARS, summarise
+from athena.history import Older
+from athena.status import State
 
 
 async def test_the_summary_is_asked_for_with_the_conversation_as_quoted_data(config):

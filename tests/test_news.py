@@ -5,8 +5,8 @@ import json
 import httpx
 import pytest
 
-from pi_assistant.app import build_services
-from pi_assistant.news import MAX_FEED_BYTES, NewsConfig, NewsReader, parse_feed
+from athena.app import build_services
+from athena.news import MAX_FEED_BYTES, NewsConfig, NewsReader, parse_feed
 
 RSS = b"""<?xml version="1.0"?>
 <rss version="2.0"><channel><title>Example News</title>

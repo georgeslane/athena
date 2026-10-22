@@ -1,7 +1,7 @@
 import httpx
 import openai
 
-from pi_assistant.status import Snapshot, State, StatusTracker, describe_error, shorten
+from athena.status import Snapshot, State, StatusTracker, describe_error, shorten
 
 
 class Clock:
@@ -84,7 +84,7 @@ def test_shorten_and_describe_error():
 
 
 async def test_the_status_api_and_the_dashboard_can_both_follow_it():
-    from pi_assistant.status import StatusFeed
+    from athena.status import StatusFeed
 
     t, seen, _ = tracker()
     board, dashboard = StatusFeed(t), StatusFeed(t)

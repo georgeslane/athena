@@ -5,10 +5,10 @@ import sys
 import pytest
 from conftest import FakeEmbedder, FakeLLMServer, completion
 
-from pi_assistant import alerts
-from pi_assistant.alerts import HealthMonitor, check_health
-from pi_assistant.app import build_services
-from pi_assistant.config import AlertsConfig, load_config
+from athena import alerts
+from athena.alerts import HealthMonitor, check_health
+from athena.app import build_services
+from athena.config import AlertsConfig, load_config
 
 
 class Checks:

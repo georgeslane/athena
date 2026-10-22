@@ -12,15 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from pi_assistant import mac_documents
-from pi_assistant.config import MCPServerConfig
-from pi_assistant.mac_documents import Scope
-from pi_assistant.mcp_manager import MCPManager
+from athena import mac_documents
+from athena.config import MCPServerConfig
+from athena.mac_documents import Scope
+from athena.mcp_manager import MCPManager
 
 
 @contextlib.asynccontextmanager
 async def documents_server(home: Path, *scope: Path):
-    args = ["-m", "pi_assistant.mac_documents", *[a for root in scope for a in ("--scope", str(root))]]
+    args = ["-m", "athena.mac_documents", *[a for root in scope for a in ("--scope", str(root))]]
     server = MCPServerConfig(command=sys.executable, args=args, env={"HOME": str(home)}, confirm=[])
     manager = MCPManager({"documents": server})
     await manager.start()

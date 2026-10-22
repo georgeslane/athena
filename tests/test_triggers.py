@@ -9,10 +9,11 @@ import pytest
 from conftest import completion
 from test_tasks import LONDON, THURSDAY, athena  # noqa: F401 - athena is a fixture
 
-from pi_assistant.config import TriggersConfig
-from pi_assistant.tasks import EVENT_GAP, Schedule, ScheduleError
-from pi_assistant.triggers import Hooks
-from pi_assistant.webserver import Request
+from athena.config import TriggersConfig
+from athena.tasks import Schedule, ScheduleError
+from athena.tasks.scheduler import EVENT_GAP
+from athena.triggers import Hooks
+from athena.webserver import Request
 
 TOKEN = "a-token-for-the-tests-0123456789"
 
@@ -95,7 +96,7 @@ def request(name, token=TOKEN, body=b"", method="POST"):
 
 
 def answer(hooks, req):
-    from pi_assistant.webserver import HTTPError
+    from athena.webserver import HTTPError
 
     try:
         response = hooks.handle(req)
@@ -160,8 +161,8 @@ async def test_a_shortcut_starts_a_task_through_the_dashboards_address(tmp_path,
     from conftest import FakeEmbedder, FakeLLMServer
     from test_dashboard import CONFIG, PASSWORD
 
-    from pi_assistant.app import build_services
-    from pi_assistant.config import load_config
+    from athena.app import build_services
+    from athena.config import load_config
 
     monkeypatch.setenv("DASHBOARD_TOKEN", PASSWORD)
     monkeypatch.setenv("TRIGGERS_TOKEN", TOKEN)

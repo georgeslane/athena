@@ -3,9 +3,9 @@
 import httpx
 import pytest
 
-from pi_assistant.builtin import FAIL, OK
-from pi_assistant.mcp_registry import MCPRegistry, MCPRegistryConfig
-from pi_assistant.tools import ToolError
+from athena.builtin import FAIL, OK
+from athena.mcp_registry import MCPRegistry, MCPRegistryConfig
+from athena.tools import ToolError
 
 LISTING = {
     "servers": [

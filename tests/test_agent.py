@@ -5,11 +5,11 @@ import openai
 import pytest
 from conftest import FakeLLMServer, completion
 
-from pi_assistant.agent import Agent
-from pi_assistant.history import ConversationStore
-from pi_assistant.stats import UsageStats
-from pi_assistant.status import State, StatusTracker
-from pi_assistant.tools import Tool, ToolError, ToolRegistry
+from athena.agent import Agent
+from athena.history import ConversationStore
+from athena.stats import UsageStats
+from athena.status import State, StatusTracker
+from athena.tools import Tool, ToolError, ToolRegistry
 
 
 def make_agent(config, memory, server: FakeLLMServer, extra_tools=(), status=None, stats=None):
@@ -97,13 +97,13 @@ async def test_the_log_says_which_tools_ran_but_not_what_they_were_given_or_gave
         ]
     )
     agent = make_agent(config, memory, server)
-    caplog.set_level(logging.INFO, logger="pi_assistant.agent")
+    caplog.set_level(logging.INFO, logger="athena.agent")
     await agent.respond("chat1", "My sister Anna's birthday is 14 March")
     assert "tool remember: ran" in caplog.text
     assert "Anna" not in caplog.text and "Saved as memory" not in caplog.text
 
     caplog.clear()
-    caplog.set_level(logging.DEBUG, logger="pi_assistant.agent")  # with --verbose
+    caplog.set_level(logging.DEBUG, logger="athena.agent")  # with --verbose
     await agent.respond("chat1", "When's Anna's birthday?")
     assert 'tool search_memory({"query": "Anna"})' in caplog.text
 

@@ -1,23 +1,18 @@
-"""Runs install.sh and update.sh with stand-ins for sudo, apt-get, uv, systemctl and friends,
-which record what they were asked to do instead of changing the machine."""
+"""The scripts that come with Athena (resources/scripts/), run with stand-ins for sudo, systemctl, ollama,
+curl and athena itself, which record what they were asked to do instead of changing the machine. The Mac's
+scripts are in test_mac_scripts.py."""
 
-import os
-import re
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
+from athena.resources import SCRIPTS
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("bash") is None or os.geteuid() == 0, reason="needs bash, and install.sh refuses to run as root"
-)
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
 RECORD = '#!/bin/sh\necho "$(basename "$0") $*" >> "$STUB_LOG"\n'
 STUBS = {
-    "apt-get": RECORD,
     # Ollama's installer, piped to sh, "updates" Ollama: it stops being too old.
     "curl": RECORD + 'case "$*" in *ollama.com/install.sh*) echo "rm -f \'$STUB_FILES/ollama-too-old\'";; esac\n',
     # While $STUB_FILES/ollama-too-old exists, pulls fail.
@@ -25,49 +20,36 @@ STUBS = {
     + 'if [ "$1" = pull ] && [ -e "$STUB_FILES/ollama-too-old" ]; then\n'
     + '  echo "Error: pull model manifest: 412: this model requires a newer version of Ollama"; exit 1\nfi\n'
     + 'if [ "$1" = pull ] && [ "$2" = missing ]; then echo "Error: file does not exist"; exit 1; fi\n',
-    # `uv run pi-assistant embeddings where` says EMBEDDINGS_FROM, Ollama on the Pi unless it's set.
-    "uv": RECORD + 'if [ "$4" = where ]; then echo "${EMBEDDINGS_FROM:-ollama}"; exit 0; fi\nexit "${UV_EXIT:-0}"\n',
-    # `dpkg -s bubblewrap` says it's installed only if BWRAP_INSTALLED is set.
-    "dpkg": RECORD + '[ -n "$BWRAP_INSTALLED" ]\n',
-    "uvx": RECORD,
-    "raspi-config": RECORD,
-    "getent": RECORD,
-    # sudo records the command; for `sudo tee FILE` it also keeps what would have been written.
-    "sudo": RECORD + 'if [ "$1" = tee ]; then cat > "$STUB_FILES/$(basename "$2")"; fi\n',
-    # `systemctl cat` finds the status board's unit only if DISPLAY_INSTALLED is set.
-    "systemctl": RECORD + 'if [ "$1" = cat ]; then [ -n "$DISPLAY_INSTALLED" ]; fi\n',
+    # `athena embeddings where` says EMBEDDINGS_FROM, Ollama on the Pi unless it's set.
+    "athena": RECORD
+    + 'if [ "$2" = where ]; then echo "${EMBEDDINGS_FROM:-ollama}"; exit 0; fi\nexit "${ATHENA_EXIT:-0}"\n',
+    "sudo": RECORD,
 }
 
 
 @pytest.fixture
 def sandbox(tmp_path):
-    repo = tmp_path / "pi-assistant"
-    for item in ["scripts", "deploy", "config.example.toml", ".env.example"]:
-        (shutil.copytree if (REPO / item).is_dir() else shutil.copy)(REPO / item, repo / item)
-    stubs, git_stub, files, home = (tmp_path / d for d in ("stubs", "git-stub", "written", "home"))
-    for d in (stubs, git_stub, files, home):
+    stubs, files, home = (tmp_path / d for d in ("stubs", "written", "home"))
+    for d in (stubs, files, home):
         d.mkdir()
-    for path, script in [*((stubs / name, script) for name, script in STUBS.items()), (git_stub / "git", RECORD)]:
-        path.write_text(script)
-        path.chmod(0o755)
+    for name, script in STUBS.items():
+        (stubs / name).write_text(script)
+        (stubs / name).chmod(0o755)
     log = tmp_path / "log"
     log.touch()
     env = {
         "PATH": f"{stubs}:/usr/bin:/bin",
         "HOME": str(home),
-        "USER": "pi",
         "STUB_LOG": str(log),
         "STUB_FILES": str(files),
-        "UNIT_DIR": str(files),  # where install-units.sh looks for the units, which `sudo tee` writes here
-        "GIT_CEILING_DIRECTORIES": str(tmp_path),
+        "ATHENA": str(stubs / "athena"),  # as `athena embeddings switch` sets it
     }
 
-    def run(script, *args, display_installed=False, fake_git=False, answer="", **extra_env):
-        path = f"{git_stub}:{env['PATH']}" if fake_git else env["PATH"]  # install.sh needs the real git
+    def run(script, *args, answer="", **extra_env):
         result = subprocess.run(
-            ["bash", f"scripts/{script}", *args],
-            cwd=repo,
-            env={**env, "PATH": path, "DISPLAY_INSTALLED": "1" if display_installed else "", **extra_env},
+            ["bash", str(SCRIPTS / script), *args],
+            cwd=tmp_path,
+            env={**env, **extra_env},
             input=answer,
             capture_output=True,
             text=True,
@@ -75,126 +57,44 @@ def sandbox(tmp_path):
         )
         return result, log.read_text().splitlines()
 
-    return repo, files, run
-
-
-def test_install(sandbox):
-    repo, files, run = sandbox
-    result, calls = run("install.sh")
-    assert result.returncode == 0, result.stderr
-
-    assert "sudo apt-get install -y -qq git curl ca-certificates sqlite3 bubblewrap" in calls
-    assert "uv sync --no-dev --compile-bytecode" in calls
-    assert not [c for c in calls if "display" in c]  # the status board is its own project now
-    assert not [c for c in calls if "ollama" in c]  # embeddings come from the Mac
-    unit = (files / "pi-assistant.service").read_text()
-    assert f"ExecStart={repo}/.venv/bin/pi-assistant run" in unit
-    assert "User=pi" in unit
-    assert "OnFailure=pi-assistant-stopped.service" in unit
-    stopped = (files / "pi-assistant-stopped.service").read_text()
-    assert f"ExecStart=/usr/bin/python3 -I {repo}/scripts/tell-stopped.py" in stopped and "User=pi" in stopped
-    for text in (unit, stopped):
-        assert not re.search(r"^[^#].*@[A-Z_]+@", text, re.MULTILINE)  # every placeholder filled in
-    assert "sudo systemctl enable pi-assistant" in calls
-    # Hardened: it can write to its data folder, config.toml and .env, and uv's own folders, and nothing else.
-    data = (repo / "data").resolve()
-    assert "ProtectSystem=strict" in unit and data.is_dir()
-    assert f'ReadWritePaths="{data}" -{repo}/config.toml -{repo}/.env' in unit
-    assert all((repo.parent / "home" / d).is_dir() for d in (".cache/uv", ".local/share/uv"))
-    assert (repo / "config.toml").read_text() == (repo / "config.example.toml").read_text()
-    assert (repo / ".env").stat().st_mode & 0o777 == 0o600
-
-
-def test_install_says_where_the_status_board_went(sandbox):
-    _, _, run = sandbox
-    result, calls = run("install.sh", "--display")
-    assert result.returncode == 2
-    assert "pi-display-microservice" in result.stderr
-    assert calls == []
-
-
-def test_install_rejects_unknown_options(sandbox):
-    _, _, run = sandbox
-    result, calls = run("install.sh", "--dispaly")
-    assert result.returncode == 2
-    assert "Unknown option: --dispaly" in result.stderr
-    assert calls == []
-
-
-def test_update(sandbox):
-    _, files, run = sandbox
-    result, calls = run("update.sh", fake_git=True, BWRAP_INSTALLED="1")
-    assert result.returncode == 0, result.stderr
-    assert calls == [
-        "git pull --ff-only",
-        "uv sync --no-dev --compile-bytecode",
-        "dpkg -s bubblewrap",
-        f"sudo tee {files}/pi-assistant.service",  # units that are new or changed are installed
-        f"sudo tee {files}/pi-assistant-stopped.service",
-        "sudo systemctl daemon-reload",
-        "sudo systemctl restart pi-assistant",
-        "systemctl cat pi-assistant-display.service",
-    ]
-    assert "Installed pi-assistant.service pi-assistant-stopped.service" in result.stdout
-    (files.parent / "log").write_text("")
-    result, calls = run("update.sh", fake_git=True, BWRAP_INSTALLED="1")
-    assert not [c for c in calls if "tee" in c or "daemon-reload" in c]  # the same: nothing to do
-
-
-def test_update_installs_the_mcp_servers_sandbox(sandbox):
-    _, _, run = sandbox
-    result, calls = run("update.sh", fake_git=True)
-    assert result.returncode == 0, result.stderr
-    assert calls[2:4] == ["dpkg -s bubblewrap", "sudo apt-get install -y -qq bubblewrap"]
-
-
-def test_update_retires_the_old_status_board(sandbox):
-    _, _, run = sandbox
-    result, calls = run("update.sh", display_installed=True, fake_git=True)
-    assert result.returncode == 0, result.stderr
-    assert calls[-3:] == [
-        "sudo systemctl disable --now pi-assistant-display",
-        "sudo rm -f /etc/systemd/system/pi-assistant-display.service",
-        "sudo systemctl daemon-reload",
-    ]
-    assert "pi-display-microservice" in result.stdout
+    return files, run
 
 
 # -- switch-embeddings.sh --------------------------------------------------------------------------------
 
 
 def test_switching_the_embeddings_model(sandbox):
-    _, _, run = sandbox
+    _, run = sandbox
     result, calls = run("switch-embeddings.sh", "new-model")
     assert result.returncode == 0, result.stderr
     assert calls == [
-        "uv run pi-assistant embeddings where",
+        "athena embeddings where",
         "ollama pull new-model",
-        "sudo systemctl stop pi-assistant",
-        "uv run pi-assistant embeddings use new-model",
+        "sudo systemctl stop athena",
+        "athena embeddings use new-model",
         "sudo systemctl restart ollama",  # lets go of the old model
-        "sudo systemctl start pi-assistant",
+        "sudo systemctl start athena",
     ]
 
 
 def test_athena_starts_again_if_switching_fails(sandbox):
-    _, _, run = sandbox
-    result, calls = run("switch-embeddings.sh", "new-model", UV_EXIT="1")
+    _, run = sandbox
+    result, calls = run("switch-embeddings.sh", "new-model", ATHENA_EXIT="1")
     assert result.returncode == 1
-    assert calls[-2:] == ["uv run pi-assistant embeddings use new-model", "sudo systemctl start pi-assistant"]
+    assert calls[-2:] == ["athena embeddings use new-model", "sudo systemctl start athena"]
     assert "sudo systemctl restart ollama" not in calls
 
 
 def test_a_model_that_wont_download_changes_nothing(sandbox):
-    _, _, run = sandbox
+    _, run = sandbox
     result, calls = run("switch-embeddings.sh", "missing")
     assert result.returncode == 1 and "nothing was changed" in result.stderr
-    assert calls == ["uv run pi-assistant embeddings where", "ollama pull missing"]  # Athena wasn't stopped
+    assert calls == ["athena embeddings where", "ollama pull missing"]  # Athena wasn't stopped
 
 
 @pytest.mark.parametrize("answer", ["y\n", "n\n", ""])
 def test_an_ollama_too_old_for_the_model_is_updated_if_you_say_so(sandbox, answer):
-    _, files, run = sandbox
+    files, run = sandbox
     (files / "ollama-too-old").touch()
     result, calls = run("switch-embeddings.sh", "new-model", answer=answer)
     if answer == "y\n":
@@ -204,59 +104,38 @@ def test_an_ollama_too_old_for_the_model_is_updated_if_you_say_so(sandbox, answe
             "curl -fsSL https://ollama.com/install.sh",
             "curl -sf http://127.0.0.1:11434/api/version",
         ]
-        assert calls[4:6] == ["ollama pull new-model", "sudo systemctl stop pi-assistant"]
+        assert calls[4:6] == ["ollama pull new-model", "sudo systemctl stop athena"]
     else:
         assert result.returncode == 1 and "Nothing was changed" in result.stderr
-        assert calls == ["uv run pi-assistant embeddings where", "ollama pull new-model"]
+        assert calls == ["athena embeddings where", "ollama pull new-model"]
 
 
 def test_switching_to_a_model_on_the_mac(sandbox):
-    _, _, run = sandbox
+    _, run = sandbox
     result, calls = run("switch-embeddings.sh", "embeddinggemma-2-bf16", "--on-mac")
     assert result.returncode == 0, result.stderr
     assert calls == [  # nothing to download on the Pi, and Ollama there is left as it is
-        "sudo systemctl stop pi-assistant",
-        "uv run pi-assistant embeddings use embeddinggemma-2-bf16 --on-mac",
-        "sudo systemctl start pi-assistant",
+        "sudo systemctl stop athena",
+        "athena embeddings use embeddinggemma-2-bf16 --on-mac",
+        "sudo systemctl start athena",
     ]
 
 
 def test_switching_models_on_the_mac(sandbox):
     """Embeddings already from the Mac, such as bf16 to 8-bit there: nothing for Ollama to download."""
-    _, _, run = sandbox
+    _, run = sandbox
     result, calls = run("switch-embeddings.sh", "embeddinggemma-2-8bit", EMBEDDINGS_FROM="server")
     assert result.returncode == 0, result.stderr
     assert calls == [
-        "uv run pi-assistant embeddings where",
-        "sudo systemctl stop pi-assistant",
-        "uv run pi-assistant embeddings use embeddinggemma-2-8bit",
-        "sudo systemctl start pi-assistant",
+        "athena embeddings where",
+        "sudo systemctl stop athena",
+        "athena embeddings use embeddinggemma-2-8bit",
+        "sudo systemctl start athena",
     ]
 
 
 def test_switching_needs_one_model(sandbox):
-    _, _, run = sandbox
+    _, run = sandbox
     for args in [(), ("a", "b"), ("--on-mac",), ("a", "--other")]:
         result, calls = run("switch-embeddings.sh", *args)
         assert result.returncode == 2 and "Usage" in result.stderr and calls == []
-
-
-@pytest.mark.parametrize(
-    "setting, where",
-    [
-        ('data_dir = "~/athena data"  # on the hard drive\n', "home/athena data"),
-        ("data_dir='/ABS'\n", "ABS"),  # a full path: the test's /ABS is made in its own folder below
-        ('[llm]\ndata_dir = "not/this/one"\n', "pi-assistant/data"),  # in a section, so not Athena's
-        ("", "pi-assistant/data"),
-    ],
-)
-def test_the_unit_can_write_to_the_data_folder_set_in_config(sandbox, setting, where, tmp_path):
-    repo, files, run = sandbox
-    if "/ABS" in setting:
-        setting = setting.replace("/ABS", str(tmp_path / "ABS"))
-    (repo / "config.toml").write_text(setting + (repo / "config.example.toml").read_text())
-    result, _ = run("install-units.sh")
-    assert result.returncode == 0, result.stderr
-    data = (tmp_path / where).resolve()
-    assert data.is_dir()
-    assert f'ReadWritePaths="{data}" -{repo}/config.toml' in (files / "pi-assistant.service").read_text()

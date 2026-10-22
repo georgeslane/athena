@@ -1,7 +1,7 @@
 [project]
-name = "pi-assistant"
+name = "athena"
 version = "0.1.0"
-description = "A personal AI assistant for a Raspberry Pi: Telegram front end, a local LLM over an OpenAI-compatible API, MCP tools and long-term memory."
+description = "A personal AI assistant that runs on your own hardware: Telegram, a local model, MCP tools, memory and tasks."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -22,13 +22,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The read-only files server that runs on your Mac (scripts/mac/install.sh): reading PDFs.
+# The read-only documents server that runs on your Mac (athena mac install): reading PDFs.
 mac = [
     "pypdf>=6.21.1",
 ]
 
 [project.scripts]
-pi-assistant = "pi_assistant.cli:main"
+athena = "athena.cli:main"
 
 [dependency-groups]
 dev = [
@@ -36,6 +36,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pypdf>=6.21.1",  # the Mac files server's tests read a real PDF
     "ruff==0.17.1",  # exact, so a new release's rules can't fail CI by themselves
+    "playwright>=1.50",
 ]
 
 [build-system]
@@ -43,7 +44,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pi_assistant"]
+packages = ["src/athena"]
 
 [tool.uv]
 # Use uv's own Python builds. Some others, like the python.org installer for macOS,

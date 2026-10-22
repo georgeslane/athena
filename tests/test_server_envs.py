@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from pi_assistant.config import MCPServerConfig
-from pi_assistant.mcp_manager import MCPManager
-from pi_assistant.server_envs import (
+from athena.config import MCPServerConfig
+from athena.mcp_manager import MCPManager
+from athena.resources import CONFIG_EXAMPLE, MCP_LOCKS
+from athena.server_envs import (
     Audit,
     Finding,
     ServerEnvError,
@@ -53,15 +54,15 @@ def test_reading_what_uvx_would_run(args, expected):
 
 def test_the_recommended_servers_have_reviewed_locks():
     """mcp-locks/ holds a lock for every uvx server in config.example.toml, and nothing else.
-    After changing one: uv run python -m pi_assistant.server_envs"""
-    servers = tomllib.loads((REPO / "config.example.toml").read_text())["mcp_servers"]
+    After changing one: uv run python -m athena.server_envs"""
+    servers = tomllib.loads(CONFIG_EXAMPLE.read_text())["mcp_servers"]
     uvx = {name: parse_uvx(cfg["args"]) for name, cfg in servers.items() if cfg.get("command") == "uvx"}
     assert uvx and None not in uvx.values()
-    assert {p.name for p in (REPO / "mcp-locks").iterdir()} == set(uvx)
+    assert {p.name for p in MCP_LOCKS.iterdir()} == set(uvx)
     for name, server in uvx.items():
         assert server.pinned
-        assert (REPO / "mcp-locks" / name / "pyproject.toml").read_text() == project_text(name, server)
-        lock = tomllib.loads((REPO / "mcp-locks" / name / "uv.lock").read_text())
+        assert (MCP_LOCKS / name / "pyproject.toml").read_text() == project_text(name, server)
+        lock = tomllib.loads((MCP_LOCKS / name / "uv.lock").read_text())
         packages = {p["name"]: p for p in lock["package"]}
         name_only = server.requirement.split("[")[0].split("==")[0]
         assert packages[name_only]["version"] == server.requirement.split("==")[1]
@@ -336,9 +337,9 @@ def test_the_fix_for_each_package_is_the_lowest_version_that_fixes_every_advisor
 
 
 async def test_doctor_says_how_each_server_is_locked(tmp_path):
-    from pi_assistant.doctor import check_lock
-    from pi_assistant.mcp_manager import ServerStatus
-    from pi_assistant.server_envs import Audit, Finding
+    from athena.doctor import check_lock
+    from athena.mcp_manager import ServerStatus
+    from athena.server_envs import Audit, Finding
 
     idna = Finding("idna", "2.7", ("PYSEC-1",), "Denial of service", "3.7")
     bash = Finding("bashlex", "0.1", ("GHSA-2",), "Bad parse", None)

@@ -2,9 +2,9 @@
 
 from types import SimpleNamespace
 
-from pi_assistant.config import SecurityUpdatesConfig
-from pi_assistant.server_envs import Audit, Finding, Fixed
-from pi_assistant.server_security import ServerSecurity
+from athena.config import SecurityUpdatesConfig
+from athena.server_envs import Audit, Finding, Fixed
+from athena.server_security import ServerSecurity
 
 CERTIFI = Finding("certifi", "2026.7.22", ("GHSA-6q48", "PYSEC-4320"), "certifi bundles emSign roots", "2026.10.19")
 IDNA = Finding("idna", "2.7", ("PYSEC-1",), "Denial of service", None)

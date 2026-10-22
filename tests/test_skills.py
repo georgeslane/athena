@@ -2,19 +2,18 @@
 Athena's working by itself, and looked back on after they're used."""
 
 import asyncio
-import sqlite3
 import time
 
 import pytest
 from conftest import FakeLLMServer, completion
 from test_tasks import FakeChannel
 
-from pi_assistant.agent import Agent, Background
-from pi_assistant.config import TasksConfig
-from pi_assistant.history import ConversationStore
-from pi_assistant.skills import NO_CHANGE, Skills, SkillStore, check, diff
-from pi_assistant.tasks import NOTHING, Scheduler, TaskStore
-from pi_assistant.tools import ToolError, ToolRegistry, Turn, begin_turn
+from athena.agent import Agent, Background
+from athena.config import TasksConfig
+from athena.history import ConversationStore
+from athena.skills import NO_CHANGE, Skills, SkillStore, check, diff
+from athena.tasks import NOTHING, Scheduler, TaskStore
+from athena.tools import ToolError, ToolRegistry, Turn, begin_turn
 
 TRIP = (
     "Trip plans",
@@ -356,21 +355,6 @@ async def test_a_task_suggests_memories_and_skills_and_says_so(athena, skills, m
         "📋 **Skills from habits**: nothing new to tell you.\n\n"
         "🧠 I've suggested a skill for you to review on the dashboard."
     ]
-
-
-def test_a_database_from_before_replies_noted_their_tools(tmp_path):
-    db = tmp_path / "old.db"
-    with sqlite3.connect(db) as conn:
-        conn.execute(
-            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, role TEXT NOT NULL, "
-            "content TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
-        conn.execute("INSERT INTO messages (chat_id, role, content, created_at) VALUES ('1', 'user', 'hi', '2026')")
-    history = ConversationStore(db)
-    history.append_exchange("1", "Weather?", "Rain.", tools=["get_weather"])
-    assert [e.tools for e in history.exchanges_since("2000")] == [["get_weather"]]
-    assert history.load("1")[0] == {"role": "user", "content": "hi"}
-    history.close()
 
 
 async def test_background_work_can_be_limited_to_some_tools(config, memory, skills):

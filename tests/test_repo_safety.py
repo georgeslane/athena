@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from athena.resources import ENV_EXAMPLE
+
 REPO = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.skipif(
@@ -36,7 +38,6 @@ PRIVATE_PATHS = [
     "data/assistant.db",
     "data/status.json",  # what you last asked the assistant, left by the old built-in status board
     "data/logs/mcp-fetch.log",
-    "prompts/system.local.md",
     ".personal-blocklist",  # your personal details, for scripts/check-secrets.sh to look for
     "other-data-dir/assistant.db",
     "other-data-dir/assistant.db-wal",
@@ -79,17 +80,20 @@ def test_private_files_are_git_ignored(checkout):
         assert result.returncode == 0, f"{path} isn't git-ignored here. Is .gitignore committed?"
 
 
-def test_example_files_are_committed_and_not_ignored(checkout):
-    for name in ["config.example.toml", ".env.example"]:
-        assert (checkout / name).is_file(), f"{name} is missing here, but install.sh copies it. Is it committed?"
-        assert git("check-ignore", "--quiet", "--no-index", name, cwd=checkout, check=False).returncode == 1
+def test_the_files_athena_comes_with_are_committed_and_not_ignored(checkout):
+    resources = Path("src/athena/resources")
+    files = [p.relative_to(REPO) for p in (REPO / resources).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+    assert resources / "config.example.toml" in files and resources / "env.example" in files
+    for name in files:
+        assert (checkout / name).is_file(), f"{name} is missing here, but it comes with Athena. Is it committed?"
+        assert git("check-ignore", "--quiet", "--no-index", str(name), cwd=checkout, check=False).returncode == 1
 
 
 def test_env_example_holds_no_values():
-    for line in (REPO / ".env.example").read_text().splitlines():
+    for line in ENV_EXAMPLE.read_text().splitlines():
         if line.strip() and not line.lstrip().startswith("#"):
             name, _, value = line.partition("=")
-            assert not value.strip(), f".env.example has a value for {name}; real values belong in .env"
+            assert not value.strip(), f"env.example has a value for {name}; real values belong in .env"
 
 
 def test_no_secrets_in_files_git_would_commit():
@@ -103,26 +107,6 @@ def test_no_secrets_in_files_git_would_commit():
         text = path.read_text(errors="ignore")
         found += [f"{name}: {label}" for label, pattern in SECRET_PATTERNS.items() if re.search(pattern, text)]
     assert not found, "Possible secrets that git would commit:\n" + "\n".join(found)
-
-
-def test_disable_git_push_blocks_pushes_but_not_pulls(tmp_path):
-    github = tmp_path / "github.git"
-    git("init", "--quiet", "--bare", str(github))
-    pi = tmp_path / "pi"
-    git("clone", "--quiet", str(github), str(pi))
-    (pi / "scripts").mkdir()
-    shutil.copy(REPO / "scripts" / "disable-git-push.sh", pi / "scripts")
-    git("commit", "--quiet", "--allow-empty", "-m", "first", cwd=pi)
-    git("push", "--quiet", "origin", "HEAD", cwd=pi)
-
-    for _ in range(2):  # install.sh is safe to re-run, so this must be too
-        subprocess.run(["bash", "scripts/disable-git-push.sh"], cwd=pi, env=GIT_ENV, check=True, capture_output=True)
-
-    git("commit", "--quiet", "--allow-empty", "-m", "second", cwd=pi)
-    assert git("push", "origin", "HEAD", cwd=pi, check=False).returncode != 0
-    assert git("push", str(github), "HEAD", cwd=pi, check=False).returncode != 0  # by URL: the hook refuses
-    assert git("fetch", "origin", cwd=pi, check=False).returncode == 0  # so `git pull` still works
-    assert git("rev-list", "--all", "--count", cwd=github).stdout.strip() == "1"
 
 
 # -- The checks before commits and pushes (scripts/install-git-hooks.sh, scripts/check-secrets.sh) --
@@ -253,16 +237,15 @@ def test_install_git_hooks_is_safe_to_rerun_and_leaves_other_hooks_alone(dev_clo
     assert "someone else" in hook.read_text()
 
 
-def test_install_git_hooks_refuses_on_the_pi(tmp_path):
+def test_install_git_hooks_refuses_where_pushing_is_turned_off(tmp_path):
+    """As in a checkout an older Athena ran from on the Pi, which turned pushing off."""
     github = tmp_path / "github.git"
     git("init", "--quiet", "--bare", str(github))
     pi = tmp_path / "pi"
     git("clone", "--quiet", str(github), str(pi))
     (pi / "scripts").mkdir()
-    for name in ["disable-git-push.sh", "install-git-hooks.sh"]:
-        shutil.copy(REPO / "scripts" / name, pi / "scripts")
-    subprocess.run(["bash", "scripts/disable-git-push.sh"], cwd=pi, env=GIT_ENV, check=True, capture_output=True)
+    shutil.copy(REPO / "scripts" / "install-git-hooks.sh", pi / "scripts")
+    git("config", "remote.origin.pushurl", "pushing-is-disabled-on-this-machine", cwd=pi)
 
     result = install_hooks(pi)
     assert result.returncode != 0 and "Pushing is turned off" in result.stderr
-    assert "disabled" in (pi / ".git" / "hooks" / "pre-push").read_text()  # still the hook that blocks pushes

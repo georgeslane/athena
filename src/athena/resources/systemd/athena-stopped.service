@@ -1,0 +1,31 @@
+# Tells you in Telegram that Athena has stopped, which it can't do itself (resources/tell_stopped.py).
+# systemd starts it whenever athena.service fails; it waits to see whether systemd restarts it or
+# gives up. `athena service install` fills in the @PLACEHOLDERS@ and installs it to
+# /etc/systemd/system/athena-stopped.service.
+
+[Unit]
+Description=Tell you that Athena has stopped
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@ATHENA_HOME@
+EnvironmentFile=-@ATHENA_HOME@/.env
+Environment=ATHENA_HOME=@ATHENA_HOME@
+# The system's own Python, with nothing from Athena's environment: that may be what's broken.
+ExecStart=/usr/bin/python3 -I @TELL_STOPPED@
+# It watches for up to 15 minutes.
+TimeoutStartSec=20min
+
+# It only reads Athena's log and sends one message, so it can change nothing at all.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

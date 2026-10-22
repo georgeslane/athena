@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 
-from pi_assistant.config import load_config
-from pi_assistant.databases import SQLiteConfig
-from pi_assistant.news import NewsConfig
-from pi_assistant.settings import (
+from athena.config import ConfigError, load_config
+from athena.databases import SQLiteConfig
+from athena.news import NewsConfig
+from athena.resources import CONFIG_EXAMPLE
+from athena.settings import (
     BY_ID,
     CATALOG,
     PROTECTED_SECRETS,
@@ -23,7 +24,7 @@ from pi_assistant.settings import (
     Settings,
     SettingsError,
 )
-from pi_assistant.trading212 import Trading212Config
+from athena.trading212 import Trading212Config
 
 REPO = Path(__file__).resolve().parents[1]
 # The names of the keys these tests set. One a line, or gitleaks takes each name for the value of the one before.
@@ -42,7 +43,7 @@ def setup(tmp_path, monkeypatch):
     for name in [*SECRETS, "WEATHER_API_KEY", "WEATHER_AUTHORIZATION"]:
         monkeypatch.delenv(name, raising=False)
     config = tmp_path / "config.toml"
-    config.write_text((REPO / "config.example.toml").read_text())
+    config.write_text(CONFIG_EXAMPLE.read_text())
     config.chmod(0o644)
     env = tmp_path / ".env"
     env.write_text("# Secrets\nTELEGRAM_BOT_TOKEN=123:abc\nGITHUB_TOKEN=\n")
@@ -68,7 +69,7 @@ def entry(settings: Settings, name: str, running: Running | None = None) -> dict
 
 
 def test_the_recommended_servers_are_the_ones_in_the_example_config():
-    example = tomllib.loads((REPO / "config.example.toml").read_text())
+    example = tomllib.loads(CONFIG_EXAMPLE.read_text())
     servers = [i for i in CATALOG if not i.builtin]
     assert [i.id for i in servers] == list(example["mcp_servers"])
     for integ in servers:
@@ -179,7 +180,7 @@ def test_a_server_set_up_before_a_setting_came_in_is_given_it(setup):
     settings, config, _ = setup
     old = re.sub(r"\n(arguments|about) = .*", "", config.read_text())
     config.write_text(old)
-    assert settings.add_later_settings() == ["apple", "email"]
+    assert settings.upgrade() == ["gave apple about", "gave email arguments, about"]
     assert changed_lines(old, config.read_text()) == [
         f'+about = "{BY_ID["apple"].defaults["about"]}"',
         '+arguments = {account_name = "athena"}',
@@ -187,14 +188,23 @@ def test_a_server_set_up_before_a_setting_came_in_is_given_it(setup):
     ]
     email = load_config(config).mcp_servers["email"]
     assert email.arguments == {"account_name": "athena"} and email.about.startswith("Your own inbox, not the user's")
-    assert settings.add_later_settings() == [] and config.read_text().count("\narguments =") == 1  # just once
+    assert settings.upgrade() == [] and config.read_text().count("\narguments =") == 1  # just once
+
+
+def test_settings_that_no_longer_exist_are_taken_out_so_the_config_loads(setup):
+    settings, config, _ = setup
+    config.write_text(config.read_text().replace("[display]\n", "[display]\nled = true   # the board's light\n", 1))
+    with pytest.raises(ConfigError, match="led"):
+        load_config(config)
+    assert settings.upgrade() == ["removed display.led"]
+    assert "led" not in load_config(config).display.model_dump()
 
 
 def test_later_settings_arent_added_to_a_server_that_isnt_set_up(setup):
     settings, config, _ = setup
     config.write_text(config.read_text().split("# Email: an address")[0])
     before = config.read_text()
-    assert settings.add_later_settings() == [] and config.read_text() == before
+    assert settings.upgrade() == [] and config.read_text() == before
 
 
 def test_a_recommended_server_that_isnt_there_yet_is_added(setup, monkeypatch):
