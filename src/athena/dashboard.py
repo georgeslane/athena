@@ -78,6 +78,8 @@ from athena.settings import Running, Settings, SettingsError, hand_written
 from athena.status import StatusFeed
 from athena.status_api import wait_seconds
 from athena.tasks import EXAMPLES, NEVER_UNASKED, Scheduler
+from athena.timeline import KEEP_DAYS, PAGE
+from athena.timeline import KINDS as ACTIVITIES
 from athena.tool_search import NAMES as META_TOOLS
 from athena.tools import ToolError, matches_any
 from athena.triggers import PREFIX as HOOKS
@@ -96,10 +98,11 @@ ASSETS = Path(__file__).parent / "assets"
 FILES = {  # what the page is made of, by path
     "/": (WEB / "index.html", "text/html; charset=utf-8"),
     "/dashboard.css": (WEB / "dashboard.css", "text/css; charset=utf-8"),
-    # The script, as modules: dashboard.js starts it, core.js has what the tabs share, and each tab has its own.
+    # The script, as modules: dashboard.js starts it, core.js and steps.js have what the tabs share, and each tab
+    # has its own.
     **{
         f"/{name}.js": (WEB / f"{name}.js", "text/javascript; charset=utf-8")
-        for name in ("dashboard", "core", "status", "tasks", "memory", "skills", "board", "tools")
+        for name in ("dashboard", "core", "steps", "status", "activity", "tasks", "memory", "skills", "board", "tools")
     },
     "/manifest.webmanifest": (WEB / "manifest.webmanifest", "application/manifest+json"),
     "/athena.svg": (ASSETS / "athena.svg", "image/svg+xml"),
@@ -131,6 +134,7 @@ ROUTES = (
     ("POST", r"/api/session", "_new_session"),
     ("POST", r"/api/thinking", "_set_thinking"),
     ("POST", r"/api/forget", "_forget"),
+    ("GET", r"/api/activity", "_get_activity"),
     ("GET", r"/api/tools", "_get_tools"),
     ("POST", r"/api/tools", "_add_server"),
     ("POST", r"/api/reconnect", "_reconnect"),
@@ -347,6 +351,19 @@ class DashboardServer(Server):
         if self.s.mcp.approvals:
             self.s.mcp.approvals.forget(name)  # a server added later with this name starts afresh
         return response
+
+    def _get_activity(self, request: Request, method: str) -> Response:
+        """What Athena did, newest first: ?before=<id> for what came before, ?kinds=message,task for only those."""
+        if self.s.timeline is None:
+            raise HTTPError(409, "Athena isn't keeping a timeline.")
+        before = request.query.get("before")
+        kinds = [k for k in request.query.get("kinds", "").split(",") if k]
+        if (before is not None and not before.isdigit()) or any(k not in ACTIVITIES for k in kinds):
+            raise HTTPError(400, f"Ask with ?before=<an id> and ?kinds= some of {', '.join(ACTIVITIES)}.")
+        entries = self.s.timeline.page(int(before) if before else None, kinds, PAGE + 1)
+        return _json(
+            {"entries": [e.as_dict() for e in entries[:PAGE]], "more": len(entries) > PAGE, "keep_days": KEEP_DAYS}
+        )
 
     def _get_memory(self, request: Request, method: str) -> Response:
         return _json(self.memory())

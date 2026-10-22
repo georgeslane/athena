@@ -10,6 +10,7 @@ import { loadMemory } from "./memory.js";
 import { loadSkills } from "./skills.js";
 import { loadBoard } from "./board.js";
 import { loadTasks } from "./tasks.js";
+import { loadActivity } from "./activity.js";
 
 // -- signing in -------------------------------------------------------------------------------------------
 
@@ -77,13 +78,14 @@ function refresh() {
   if (location.hash === "#tools") loadTools().catch(() => {});
   if (location.hash === "#memory") loadMemory().catch(() => {});
   if (location.hash === "#tasks") loadTasks().catch(() => {});
+  if (location.hash === "#activity") loadActivity().catch(() => {});
   if (location.hash === "#skills") loadSkills().catch(() => {});
   if (location.hash === "#board") loadBoard().catch(() => {});
   if (!state.watching) watchStatus();
 }
 
 function showTab() {
-  const tab = { "#tools": "tools", "#memory": "memory", "#tasks": "tasks", "#skills": "skills", "#board": "board" }[location.hash] || "status";
+  const tab = { "#activity": "activity", "#tools": "tools", "#memory": "memory", "#tasks": "tasks", "#skills": "skills", "#board": "board" }[location.hash] || "status";
   for (const link of document.querySelectorAll(".tab")) {
     if (link.dataset.tab === tab) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -92,6 +94,7 @@ function showTab() {
   if (tab === "tools") loadTools().catch((e) => toast(e.message, true));
   if (tab === "memory") loadMemory().catch((e) => toast(e.message, true));
   if (tab === "tasks") loadTasks().catch((e) => toast(e.message, true));
+  if (tab === "activity") loadActivity().catch((e) => toast(e.message, true));
   if (tab === "skills") loadSkills().catch((e) => toast(e.message, true));
   if (tab === "board") loadBoard().catch((e) => toast(e.message, true));
   window.scrollTo(0, 0);
@@ -116,7 +119,10 @@ async function watchStatus() {
       const was = state.status && state.status.status.state;
       setStatus(data);
       setOffline(false);
-      if (version && was !== "idle" && data.status.state === "idle") loadOverview().catch(() => {}); // new numbers
+      if (version && was !== "idle" && data.status.state === "idle") {
+        loadOverview().catch(() => {}); // new numbers
+        if (location.hash === "#activity") loadActivity().catch(() => {}); // and what it's just done
+      }
       version = data.version;
     } catch (e) {
       if (controller.signal.aborted || e.status === 401) break;

@@ -33,7 +33,7 @@ checks on all of it in one go, and tells you only what needs your attention (wat
 """
 
 from athena.tasks.examples import EXAMPLES
-from athena.tasks.scheduler import NEVER_UNASKED, NOTHING, Event, Review, Scheduler, steps, suggested
+from athena.tasks.scheduler import NEVER_UNASKED, NOTHING, Event, Review, Scheduler, suggested
 from athena.tasks.schedules import SCHEDULES, Schedule, ScheduleError
 from athena.tasks.store import Task, TaskStore
 
@@ -49,6 +49,5 @@ __all__ = [
     "Scheduler",
     "Task",
     "TaskStore",
-    "steps",
     "suggested",
 ]

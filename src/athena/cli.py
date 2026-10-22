@@ -47,6 +47,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 async def _chat(args: argparse.Namespace) -> int:
     from athena.app import build_services
+    from athena.timeline import ToolEvent
     from athena.tools import flags
 
     cfg = load_config(args.config)
@@ -68,9 +69,9 @@ async def _chat(args: argparse.Namespace) -> int:
         )
         return answer.strip().lower() in {"y", "yes"}
 
-    async def on_tool(tool: str, tool_args: dict[str, Any], output: str, outcome: str) -> None:
-        preview = output.replace("\n", " ")
-        print(f"  · {tool}({json.dumps(tool_args, ensure_ascii=False)[:120]}) -> {preview[:160]}")
+    async def on_tool(event: ToolEvent) -> None:
+        preview = event.output.replace("\n", " ")
+        print(f"  · {event.tool}({json.dumps(event.args, ensure_ascii=False)[:120]}) -> {preview[:160]}")
 
     try:
         while True:

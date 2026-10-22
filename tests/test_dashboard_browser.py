@@ -18,7 +18,7 @@ try:
 except ImportError:  # pragma: no cover - it's a dev dependency
     async_playwright = None
 
-TABS = ["status", "tasks", "memory", "skills", "board", "tools"]
+TABS = ["status", "activity", "tasks", "memory", "skills", "board", "tools"]
 LOOKS = [(360, 800, "light"), (1280, 900, "dark")]  # a small phone, and a desktop in dark mode
 
 
@@ -75,6 +75,25 @@ def seed(services):
     tasks.watches.add("anything in my inbox that needs a reply", None, by="you")
     tasks.watches.add("when the parcel comes", time.time() + 86400 * 5, by="athena")
     tasks.check_result = {"at": time.time() - 600, "outcome": "nothing new", "said": "", "steps": brief.last_steps}
+    seed_activity(services, brief.last_steps)
+
+
+def seed_activity(services, steps):
+    """What Athena's done: a briefing, three quiet checks, a message where you allowed one thing and declined
+    another, and an alert."""
+    timeline = services.timeline
+    timeline.add("task", "Morning briefing", "told you", said="Dentist at 2.", seconds=42, steps=steps)
+    for _ in range(3):
+        timeline.add("check", "Checked what you're watching", "nothing new", seconds=8)
+    email = '{"to": "sam@example.com"}'
+    asked = [
+        {"tool": "send_email", "given": email, "outcome": "ran", "said": "Sent.", "approval": "you",
+         "flagged": "an email address (“sam@example.com”)"},
+        {"tool": "publish", "given": "{}", "outcome": "declined", "said": "The user declined.", "approval": "you"},
+    ]  # fmt: skip
+    timeline.add("message", "Email Sam the notes " + "and more " * 30, "answered", said="Sent one.", channel="Telegram",
+                 seconds=6.5, steps=asked)  # fmt: skip
+    timeline.add("alert", "The model server isn't working", "problem", said="it didn't answer")
 
 
 @pytest.mark.parametrize(("width", "height", "scheme"), LOOKS)
@@ -158,7 +177,63 @@ async def test_a_runs_steps_stay_open_when_the_tab_is_drawn_again(athena, browse
 
 def test_the_seeded_steps_are_what_a_run_records():
     """seed() writes steps by hand: they have the fields steps() gives them."""
-    from athena.tasks import steps
+    from athena.timeline import steps
 
     taken, _ = steps()
     assert taken == [] and completion("x")["choices"][0]["message"]["content"] == "x"
+
+
+async def test_the_activity_tab(athena, browser):  # noqa: F811
+    seed(athena)
+    page, base, errors = await signed_in(browser, athena, 360, 800)
+    await page.goto(f"{base}/#activity")
+    await page.wait_for_selector("#tab-activity .entry")
+    top = "#tab-activity .activity:not(.nested) > .entry"
+    kinds = await page.eval_on_selector_all(top, "(entries) => entries.map((e) => e.dataset.kind)")
+    assert kinds == ["alert", "message", "check", "task", "athena"]  # newest first
+    # The three quiet checks are one line, which opens to each.
+    assert "Checked what you're watching 3 times" in await page.locator(top).nth(2).inner_text()
+    await page.click("text=Checked what you're watching 3 times")
+    assert await page.locator(".activity.nested > .entry").count() == 3
+
+    # Your message: what was said, each step, who allowed it, and what the privacy check found.
+    message = page.locator(".entry[data-kind=message]")
+    assert (
+        "Answered · Telegram · 6.5 s · 2 steps · asked you 2 times" in await message.locator(".entry-sub").inner_text()
+    )
+    assert await message.locator(".entry-dot").get_attribute("data-tone") == "approval"  # something was declined
+    await message.locator("summary").first.click()
+    assert await page.is_visible("text=Sent one.") and await page.is_visible(".step-approval >> text=you allowed")
+    await message.locator(".step summary").first.click()
+    assert await page.is_visible("text=The privacy check found an email address (“sam@example.com”).")
+
+    # Only the tasks and checks, then all of them again.
+    await page.click(".filters >> text=Tasks")
+    await page.wait_for_selector(".entry[data-kind=task]")
+    kinds = await page.eval_on_selector_all(top, "(entries) => entries.map((e) => e.dataset.kind)")
+    assert kinds == ["check", "task"]
+    await page.click(".filters >> text=All")
+    await page.wait_for_selector(".entry[data-kind=message]")
+
+    # The Status tab links here, from what was done last.
+    await page.goto(f"{base}/#status")
+    await athena.agent.respond("111", "Hello", channel="Telegram")
+    await page.click("text=Everything it's done ›")
+    await page.wait_for_selector(".entry-title >> text=Hello")
+    assert errors == []
+
+
+async def test_earlier_activity_comes_a_page_at_a_time(athena, browser):  # noqa: F811
+    from athena.timeline import PAGE
+
+    for i in range(PAGE + 5):
+        athena.timeline.add("task", f"Run {i}", "told you")
+    page, base, errors = await signed_in(browser, athena)
+    await page.goto(f"{base}/#activity")
+    await page.wait_for_selector("#tab-activity .entry")
+    assert await page.locator("#tab-activity .entry").count() == PAGE
+    await page.click("text=Show earlier")
+    await page.wait_for_selector(".entry-title >> text=Run 0")
+    assert await page.locator("#tab-activity .entry").count() == PAGE + 6  # and when Athena started
+    assert not await page.is_visible("text=Show earlier")
+    assert errors == []

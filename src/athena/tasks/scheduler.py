@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -23,12 +22,13 @@ from athena.status import describe_error
 from athena.tasks.schedules import Schedule
 from athena.tasks.store import Task, TaskStore
 from athena.tasks.tools import task_tools
+from athena.timeline import CHECK, TASK, Timeline, steps
 from athena.tools import Tool
 from athena.watching import WatchStore
 from athena.watching import describe as describe_watch
 
 if TYPE_CHECKING:
-    from athena.agent import Agent, ToolEventFn
+    from athena.agent import Agent
     from athena.channel import Channel
     from athena.config import TasksConfig
     from athena.llm import LLMReply
@@ -45,7 +45,6 @@ REVIEW_MINUTES, REVIEW_ROUNDS = 10, 4  # looking back at how a skill went: the m
 HEARTBEAT_MINUTES = 10  # the most a check on what's watched works for, not counting time it waits for you
 MIN_HEARTBEAT = 10.0  # minutes: checks are at least this far apart, whatever heartbeat_minutes says
 MAX_REVIEWS = 5  # waiting to be done; the oldest is dropped for a new one past this
-MAX_STEPS, STEP_CHARS = 40, 400  # a run's tool calls kept for the dashboard, and how much of each's in and out
 EVENT_GAP = 60.0  # seconds: an event coming in again sooner doesn't run a task again
 
 
@@ -72,23 +71,6 @@ class Review:
     skills: list[str]
     transcript: list[dict[str, Any]] = field(repr=False)  # what it did, from AgentResult.transcript
     what: str  # what it used them for: "our chat", or "your task “Briefing”"
-
-
-def steps() -> tuple[list[dict[str, str]], ToolEventFn]:
-    """What a run did, for the dashboard: a list it fills, and the Agent.respond on_tool that fills it with each
-    tool call, what it was given and gave back (cut short), and whether it ran, failed or was declined."""
-    taken: list[dict[str, str]] = []
-
-    async def on_tool(tool: str, args: dict[str, Any], output: str, outcome: str) -> None:
-        if len(taken) < MAX_STEPS:
-            given = json.dumps(args, ensure_ascii=False) if args else ""
-            taken.append({"tool": tool, "given": _cut(given), "outcome": outcome, "said": _cut(output)})
-
-    return taken, on_tool
-
-
-def _cut(text: str) -> str:
-    return text if len(text) <= STEP_CHARS else text[: STEP_CHARS - 1] + "…"
 
 
 def suggested(notes: dict[str, list[str]]) -> str:
@@ -118,6 +100,7 @@ class Scheduler:
         poll_seconds: float = 15.0,
         watches: WatchStore | None = None,
         clock: Clock | None = None,
+        timeline: Timeline | None = None,
     ):
         self.cfg = cfg
         self.clock = clock or Clock()  # the time: the real one, or a test's
@@ -137,10 +120,12 @@ class Scheduler:
         self._now_please: set[int] = set()  # run these as soon as Athena isn't answering you
         self._events: dict[int, Event] = {}  # the event each task that's due to run on one is for
         self.watches = watches  # what Athena keeps an eye on for you (watching.py)
+        self.timeline = timeline  # where each run and check is noted, for the dashboard (timeline.py)
         self.last_check = self.clock.time()  # the heartbeat's: the first is heartbeat_minutes after starting
         self.check_result: dict[str, Any] | None = None  # how the last check went, for the dashboard
         self.checking = False
         self._check_now = False  # you asked for a check, on the dashboard
+        self._took = 0.0  # how long the last run or check took, for the timeline
         self._wake = asyncio.Event()
         self._loop: asyncio.Task[None] | None = None
         self._run: asyncio.Task[Any] | None = None
@@ -291,7 +276,8 @@ class Scheduler:
             source=f"your task “{task.title}”",
         )
         log.info("Running task %d (%s)", task.id, task.title)
-        taken, on_tool = steps()
+        taken, on_tool = steps(allowed=set(task.allowed_tools) - NEVER_UNASKED)
+        started = self.clock.time()
         self._run = asyncio.create_task(
             self.agent.respond(
                 f"task:{task.id}",
@@ -315,6 +301,7 @@ class Scheduler:
         task = self.store.get(task.id) or task  # changed meanwhile, say paused from the dashboard
         task.last_steps = taken  # saved with how it went, below
         now = self.clock.now(self.tz)
+        self._took = self.clock.time() - started
         if self._run.cancelled():
             await self._finished(task, schedule, now, "stopped", "")
             if schedule.kind == "once":
@@ -388,6 +375,7 @@ class Scheduler:
             task.status = "done"
         self._events.pop(task.id, None)
         self.store.save(task)
+        self._to_timeline(TASK, task.title, outcome, said, task.last_steps)
         log.info("Task %d (%s): %s", task.id, task.title, outcome)
         self.on_ran()
 
@@ -396,6 +384,8 @@ class Scheduler:
         log.warning("Task %d (%s) failed: %s", task.id, task.title, why)
         task.failures += 1
         task.last_outcome = f"failed: {why}"
+        tries = f" (try {task.failures} of {len(RETRIES) + 1})"
+        self._to_timeline(TASK, task.title, task.last_outcome + tries, "", task.last_steps)
         if task.failures <= len(RETRIES):
             task.next_run = self.clock.time() + RETRIES[task.failures - 1]
             self.store.save(task)
@@ -409,6 +399,15 @@ class Scheduler:
             task.status = "paused"  # a one-off: run it again when whatever was wrong is fixed
         self._events.pop(task.id, None)
         self.store.save(task)
+
+    def _to_timeline(self, kind: str, title: str, outcome: str, said: str, taken: list[dict[str, str]]) -> None:
+        """Put a run or check on the timeline, with how long it took (``_took``)."""
+        if self.timeline is None:
+            return
+        try:
+            self.timeline.add(kind, title, outcome, said=said, seconds=self._took, steps=taken)
+        except Exception:  # it mustn't stop the tasks
+            log.exception("Couldn't note a %s on the timeline", kind)
 
     async def _tell(self, text: str, keep: tuple[str, str] | None = None) -> None:
         """Message you. ``keep``: (a line for your side, what was said), to keep in your chat too."""
@@ -472,6 +471,7 @@ class Scheduler:
             f"They aren't watching, so don't ask them anything. Your earlier checks are above."
         )
         allowed = set(self.cfg.heartbeat_tools) - NEVER_UNASKED
+        started = self.clock.time()
 
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
             if tool in allowed:
@@ -491,7 +491,7 @@ class Scheduler:
         )
         log.info("Checking on %d watched thing%s", len(watching), "" if len(watching) == 1 else "s")
         self.checking = True
-        taken, on_tool = steps()
+        taken, on_tool = steps(allowed=allowed)
         self._run = asyncio.create_task(
             self.agent.respond(
                 "heartbeat",
@@ -530,6 +530,8 @@ class Scheduler:
                 else:
                     said = ""
         self.check_result = {"at": self.last_check, "outcome": outcome, "said": said, "steps": taken}
+        self._took = self.clock.time() - started
+        self._to_timeline(CHECK, "Checked what you're watching", outcome, said, taken)
         log.info("The heartbeat: %s", outcome)
         self.on_ran()
 
