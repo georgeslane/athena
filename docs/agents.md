@@ -18,24 +18,24 @@ An agent's DAG is a file of Python in the style of [Apache Airflow](https://airf
 from athena import DAG, Task
 
 with DAG(
-    schedule="0 9 * * 1-5",          # cron, in your time zone; or None
-    triggers=["watch:job-emails"],   # what else starts it: events, and what's watched
-    hidden_tools=["news_*"],         # tools it finds when it needs them, rather than in every prompt
-    allow=["fetch"],                 # tools that ask first which every task may use without asking
+    schedule="0 9 * * 1-5",  # cron, in your time zone; or None
+    triggers=["watch:job-emails"],  # what else starts it: events, and what's watched
+    hidden_tools=["news_*"],  # tools it finds when it needs them, rather than in every prompt
+    allow=["fetch"],  # tools that ask first which every task may use without asking
 ):
     find = Task(
-        task_id="find_jobs",         # the name it's assigned to, if it's not given
+        task_id="find_jobs",  # the name it's assigned to, if it's not given
         prompt="Find new data jobs that fit my CV, and trigger apply once for each good one.",
-        allow=["browser_*"],         # tools this task may use without asking
+        allow=["browser_*"],  # tools this task may use without asking
     )
     apply = Task(
         task_id="apply",
         prompt="Apply to this job: {input}",
-        triggered=True,              # once each time a task before it triggers it
-        alert=True,                  # what it says goes to the agent's chat, and to you
+        triggered=True,  # once each time a task before it triggers it
+        alert=True,  # what it says goes to the agent's chat, and to you
     )
     report = Task(prompt="Say what was applied for, with links.")
-    find >> apply >> report          # [a, b] >> c and a << b work too
+    find >> apply >> report  # [a, b] >> c and a << b work too
 ```
 
 The file holds imports, one `with DAG(...)` block, tasks assigned to names, and `>>` or `<<` between them. Every argument is written out as it is: a string, a list of strings, `True`, `False` or `None`. Anything else, such as a loop, a call or an f-string, is refused, with the line it's on. There are at most 30 tasks.
