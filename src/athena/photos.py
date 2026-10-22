@@ -95,6 +95,10 @@ class PhotoStore:
             return None
         return Photo(data, mime_of(data) or "image/jpeg")
 
+    def delete(self, name: str) -> None:
+        if "/" not in name and not name.startswith("."):
+            (self.folder / name).unlink(missing_ok=True)
+
     def clear(self) -> None:
         """Delete every photo."""
         if self.folder.is_dir():

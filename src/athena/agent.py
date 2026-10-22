@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from athena.compaction import KEEP_MESSAGES, MIN_MESSAGES, summarise
 from athena.config import AgentConfig
-from athena.history import ConversationStore
+from athena.history import ConversationStore, session_of
 from athena.llm import LLMClient, LLMReply, ToolCall
 from athena.memory import MemoryHit, MemoryService
 from athena.photos import Photo, label, with_photos
@@ -69,6 +69,8 @@ class Background:
     source: str = ""
     only_tools: frozenset[str] | None = None  # only these tools may run (they're all offered, for the cache)
     review: bool = False  # looking back at how a skill went (tasks.py), rather than doing something
+    # Whether to keep an answer in the conversation: not one that says there's nothing to tell you.
+    keep: Callable[[str], bool] | None = None
 
 
 @dataclass
@@ -387,7 +389,8 @@ class Agent:
 
         ``channel`` says where it came from, such as "Siri", for the usage statistics. ``background``
         is for a task Athena works on by itself: it doesn't hold up changes to the tools, which it
-        could for many minutes, and doesn't count as you chatting.
+        could for many minutes, and doesn't count as you chatting. Nor does it hold up your messages in
+        the same session, which it waits for: what it says is kept after them.
         """
         async with contextlib.AsyncExitStack() as stack:
             if background is None:
@@ -395,10 +398,14 @@ class Agent:
                 self.answering_you += 1
                 self.chatting.set()
                 stack.callback(self._answered_you)
-            await stack.enter_async_context(self._locks[chat_id])
+                await stack.enter_async_context(self._locks[chat_id])
             shown = text or (label(len(photos)) if photos else "")  # a photo without a caption
             task = self.status.begin(background.label if background else shown)
-            record = QueryRecord(session=self.history.session.id, channel=channel or self.status.channel)
+            session = session_of(chat_id)
+            record = QueryRecord(
+                session=session if session is not None else self.history.session.id,
+                channel=channel or self.status.channel,
+            )
             # Your messages go on the timeline here; what Athena does by itself, where it's done (tasks/).
             noting = background is None and self.timeline is not None
             taken, collect = steps()
@@ -511,10 +518,12 @@ class Agent:
             *self.history.load(chat_id),
             {"role": "user", "content": with_photos(f"{self.build_context(memories, note)}\n\n{text}", photos or [])},
         ]
-        result = await self._work(messages, task, confirm, on_tool, record, background, allowed)
+        result = await self._work(messages, task, confirm, on_tool, record, background, allowed, chat_id)
         if not result.text.strip():
             result.text = "Sorry, I didn't manage to produce an answer. Could you rephrase that?"
             record.error = "No answer"
+        elif background and background.keep and not background.keep(result.text):
+            pass  # nothing worth keeping
         else:
             self.history.append_exchange(
                 chat_id, text, result.text, tools=result.tools_used, photos=photos, channel=record.channel
@@ -531,6 +540,7 @@ class Agent:
         record: QueryRecord,
         background: Background | None,
         allowed: frozenset[str] = frozenset(),
+        chat_id: str | None = None,
     ) -> AgentResult:
         """Call the model, and the tools it asks for, until it answers. Adds to ``messages`` as it goes."""
         started = time.monotonic()
@@ -538,7 +548,7 @@ class Agent:
         result = AgentResult(text="")
         thinking = background.thinking if background else None
         only = background.only_tools if background else None
-        turn = Turn(alone=(background.source or background.label) if background else None)
+        turn = Turn(alone=(background.source or background.label) if background else None, chat=chat_id)
         end_turn = begin_turn(turn)
 
         def step(tools: Any) -> Awaitable[LLMReply]:

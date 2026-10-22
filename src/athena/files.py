@@ -4,8 +4,8 @@
   write_file   a file, from what the model writes: a .pdf is laid out from Markdown
   send_file    sends one to you with Athena's answer, as a file in Telegram
 
-Files you send Athena in Telegram go into the workspace's inbox/ folder (telegram_bot.py), and the message
-says where. Everything's within the workspace, which Athena opens without ever following a link
+Files you send Athena, in Telegram or on the dashboard, go into the workspace's inbox/ folder (receive), and the
+message says where. Everything's within the workspace, which Athena opens without ever following a link
 (workspace.py). Reading and making PDFs is done in the code's sandbox (pdfs.py), where a file made to
 trouble a PDF reader can't do harm, with [code]'s limits; without bubblewrap, PDFs can't be read or made,
 but other files can.
@@ -33,6 +33,27 @@ READ_CHARS = 5000  # of a file's text, at a time
 MAX_WRITE_CHARS = 500_000
 TEXT = {".md", ".markdown", ".txt", ".text", ".csv", ".tsv", ".json", ".html", ".xml", ".ics", ".log", ".py"}
 SENT = "files"  # what send_file notes for the turn: {"path", "caption"} as JSON, for the channel to send
+
+
+def why_not(cfg: Config, name: str, size: int, most_mb: int) -> str | None:
+    """Why Athena can't take a file you've sent it, of ``size`` bytes, at most ``most_mb`` where it came from; None if
+    it can."""
+    limit = min(cfg.workspace.max_read_mb, most_mb) * 1024 * 1024
+    suffix = PurePosixPath(name).suffix.lower()
+    if not cfg.workspace.enabled:
+        return "Files are switched off, so I can't read that: switch them on in the dashboard's Tools tab."
+    if suffix != ".pdf" and suffix not in TEXT:
+        return "I can read PDFs and text files, such as Markdown, CSV and JSON, but not that kind of file."
+    if size > limit:
+        return f"That's over {limit // 1024 // 1024} MB, more than I can take."
+    return None
+
+
+def receive(cfg: Config, name: str, data: bytes) -> str:
+    """Keep a file you've sent Athena in the workspace's inbox/, and how your message says where, for read_file.
+    ToolError if it can't be kept."""
+    kept = workspace.save_new(workspace.workspace_of(cfg), workspace.INBOX, name, data)
+    return f"[File: {kept}]"
 
 
 class FilesConfig(Section):

@@ -1,13 +1,15 @@
 """Conversations, and sessions, stored in SQLite.
 
-A session is one conversation with you: wherever you talk to Athena, in Telegram, on the dashboard, through
-Siri or in the terminal, it goes into the current session, so you can carry on in one what you started in
-another. The current session is the one used last, which the model server has read and cached. Starting a new
-one with /session leaves the others as they were, and sending a message in an old one, on the dashboard,
-makes it the current session again. Usage statistics are counted per session.
+A session is something Athena does for you, such as looking for jobs, and the conversation about it: wherever
+you talk to Athena, in Telegram, on the dashboard, through Siri or in the terminal, it goes into the current
+session, so you can carry on in one what you started in another. The current session is the one used last, which
+the model server has read and cached. Starting a new one with /session leaves the others as they were, and
+sending a message in an old one, on the dashboard, makes it the current session again. Each session can have a
+name, can be kept from notifying you, and can be deleted. Usage statistics are counted per session.
 
-Tasks, and the checks on what's watched, each have a chat of their own (chat ids such as "task:3" and
-"heartbeat"), so what they did last time doesn't fill your conversation. A session's chat is "session:<id>".
+Each task belongs to a session, and runs in its conversation, as a message from you would (tasks/). The checks on
+what's watched have a chat of their own ("heartbeat"), so what they did last time doesn't fill your
+conversation. A session's chat is "session:<id>".
 
 Only your text and the assistant's final reply are kept (not intermediate tool calls), which keeps prompts
 short. Messages are only deleted when you tell Athena to forget everything, or when /retry answers the last
@@ -27,6 +29,7 @@ kept for the chat and shown at the start of what the model sees, and the window 
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections.abc import Callable, Collection
@@ -41,6 +44,9 @@ from athena.photos import IN_CONTEXT, Photo, PhotoStore, with_photos
 SESSION = "session:"  # a session's chat id starts with this
 BACKGROUND = ("task:", "heartbeat", "warm-up")  # chats that were never yours, before sessions had chats of their own
 TITLE_CHARS = 80
+NAME_CHARS = 80
+_SESSION = "id, started, last_used, allowed_tools, name, muted"  # a Session's columns, in its order
+_TASK_RAN = re.compile(r"^\(Your task “(.+?)”\)")  # the start of a task's run, on your side (task_said)
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,8 @@ class Session:
     started: float  # Unix time
     last_used: float  # the most recent is the current session
     allowed_tools: tuple[str, ...] = ()  # tools that may run without asking you in this session
+    name: str = ""  # what you've called it, if you have
+    muted: bool = False  # it doesn't notify your devices
 
     @property
     def chat_id(self) -> str:
@@ -62,8 +70,11 @@ class SessionSummary:
     id: int
     started: float
     last_used: float
-    title: str  # your first message in it
+    title: str  # its name, or your first message in it
     messages: int
+    name: str = ""
+    muted: bool = False
+    last_message: int = 0  # the newest message's id, so the page can tell what's new
 
 
 @dataclass(frozen=True)
@@ -76,6 +87,7 @@ class Message:
     created_at: str  # ISO, in UTC
     channel: str = ""  # where it came from, such as "Telegram"; "Athena" for what it told you by itself
     tools: list[str] = field(default_factory=list)  # the tools used for a reply
+    photos: list[str] = field(default_factory=list)  # a message's photos, by name in the PhotoStore
 
 
 @dataclass(frozen=True)
@@ -148,7 +160,9 @@ class ConversationStore:
                     started REAL NOT NULL,
                     first_message INTEGER NOT NULL,
                     last_used REAL,
-                    allowed_tools TEXT NOT NULL DEFAULT '[]'
+                    allowed_tools TEXT NOT NULL DEFAULT '[]',
+                    name TEXT NOT NULL DEFAULT '',
+                    muted INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -156,6 +170,9 @@ class ConversationStore:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN channel TEXT")
             if "last_used" not in {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}:
                 self._give_sessions_chats()
+            if "name" not in {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN muted INTEGER NOT NULL DEFAULT 0")
         self.session = self._current_session() or self.new_session()
 
     def _give_sessions_chats(self) -> None:
@@ -207,12 +224,13 @@ class ConversationStore:
     # -- sessions ------------------------------------------------------------------------------
 
     def _session(self, row: tuple[Any, ...]) -> Session:
-        return Session(row[0], row[1], row[2] if row[2] is not None else row[1], tuple(json.loads(row[3])))
+        id_, started, used, allowed, name, muted = row
+        return Session(
+            id_, started, used if used is not None else started, tuple(json.loads(allowed)), name, bool(muted)
+        )
 
     def _current_session(self) -> Session | None:
-        row = self._conn.execute(
-            "SELECT id, started, last_used, allowed_tools FROM sessions ORDER BY last_used DESC, id DESC LIMIT 1"
-        ).fetchone()
+        row = self._conn.execute(f"SELECT {_SESSION} FROM sessions ORDER BY last_used DESC, id DESC LIMIT 1").fetchone()
         return self._session(row) if row else None
 
     @property
@@ -225,17 +243,21 @@ class ConversationStore:
         row = self._conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'messages'").fetchone()
         return row[0] if row else 0
 
-    def new_session(self) -> Session:
-        """Start a new conversation, and make it the current session."""
+    def new_session(self, name: str = "", *, current: bool = True) -> Session:
+        """Start a new conversation, and make it the current session, unless not ``current``: then it's listed
+        just after the current one, as for a task's."""
         now = time.time()
         with self._lock, self._conn:
+            used = now if current else min(now, self.session.last_used) - 0.001
             cur = self._conn.execute(
-                "INSERT INTO sessions (started, first_message, last_used) VALUES (?, ?, ?)",
-                (now, self._last_message_id(), now),
+                "INSERT INTO sessions (started, first_message, last_used, name) VALUES (?, ?, ?, ?)",
+                (now, self._last_message_id(), used, _name(name)),
             )
-            self.session = Session(int(cur.lastrowid), now, now)  # type: ignore[arg-type]
+            made = Session(int(cur.lastrowid), now, used, name=_name(name))  # type: ignore[arg-type]
+            if current:
+                self.session = made
         self._changed()
-        return self.session
+        return made
 
     def use_session(self, session_id: int) -> Session:
         """Make a session the current one again. KeyError if there's no such session."""
@@ -250,35 +272,133 @@ class ConversationStore:
 
     def get_session(self, session_id: int) -> Session | None:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT id, started, last_used, allowed_tools FROM sessions WHERE id = ?", (session_id,)
-            ).fetchone()
+            row = self._conn.execute(f"SELECT {_SESSION} FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return self._session(row) if row else None
 
-    def set_allowed_tools(self, session_id: int, tools: Collection[str]) -> Session:
-        """The tools that may run without asking you in a session. KeyError if there's no such session."""
+    def _set(self, session_id: int, column: str, value: Any) -> Session:
         with self._lock, self._conn:
-            if not self._conn.execute(
-                "UPDATE sessions SET allowed_tools = ? WHERE id = ?", (json.dumps(sorted(set(tools))), session_id)
-            ).rowcount:
+            if not self._conn.execute(f"UPDATE sessions SET {column} = ? WHERE id = ?", (value, session_id)).rowcount:
                 raise KeyError(session_id)
             if session_id == self.session.id:
                 self.session = self._current_session()  # type: ignore[assignment]
         self._changed()
         return self.get_session(session_id)  # type: ignore[return-value]
 
-    def sessions(self, limit: int = 100) -> list[SessionSummary]:
-        """Sessions, the one used last first: those with something said in them, and the current one."""
+    def set_allowed_tools(self, session_id: int, tools: Collection[str]) -> Session:
+        """The tools that may run without asking you in a session. KeyError if there's no such session."""
+        return self._set(session_id, "allowed_tools", json.dumps(sorted(set(tools))))
+
+    def rename(self, session_id: int, name: str) -> Session:
+        """Call a session something, or nothing (""), when it's called after your first message in it. KeyError if
+        there's no such session."""
+        return self._set(session_id, "name", _name(name))
+
+    def set_muted(self, session_id: int, muted: bool) -> Session:
+        """Whether a session keeps from notifying your devices. KeyError if there's no such session."""
+        return self._set(session_id, "muted", int(muted))
+
+    def sessions(self, limit: int = 100, also: Collection[int] = ()) -> list[SessionSummary]:
+        """Sessions, the one used last first: those with something said in them or a name, the current one, and
+        those in ``also``, such as those with tasks."""
+        also = sorted({int(i) for i in also})
         with self._lock:
             rows = self._conn.execute(
-                "SELECT s.id, s.started, COALESCE(s.last_used, s.started), "
+                "SELECT s.id, s.started, COALESCE(s.last_used, s.started), s.name, s.muted, "
                 "(SELECT content FROM messages WHERE chat_id = 'session:' || s.id AND role = 'user' ORDER BY id "
-                "LIMIT 1), (SELECT COUNT(*) FROM messages WHERE chat_id = 'session:' || s.id) AS said "
-                "FROM sessions AS s WHERE s.id = ? OR said > 0 "
+                "LIMIT 1), (SELECT COUNT(*) FROM messages WHERE chat_id = 'session:' || s.id) AS said, "
+                "(SELECT MAX(id) FROM messages WHERE chat_id = 'session:' || s.id) "
+                "FROM sessions AS s WHERE s.id = ? OR said > 0 OR s.name != '' "
+                f"OR s.id IN ({','.join('?' * len(also))}) "
                 "ORDER BY COALESCE(s.last_used, s.started) DESC, s.id DESC LIMIT ?",
-                (self.session.id, limit),
+                (self.session.id, *also, limit),
             ).fetchall()
-        return [SessionSummary(i, started, used, _title(first or ""), n) for i, started, used, first, n in rows]
+        return [
+            SessionSummary(i, started, used, name or _title(first or ""), n, name, bool(muted), last or 0)
+            for i, started, used, name, muted, first, n, last in rows
+        ]
+
+    def title(self, session_id: int) -> str:
+        """What a session's called: its name, or your first message in it."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT s.name, (SELECT content FROM messages WHERE chat_id = 'session:' || s.id AND role = 'user' "
+                "ORDER BY id LIMIT 1) FROM sessions AS s WHERE s.id = ?",
+                (session_id,),
+            ).fetchone()
+        return (row[0] or _title(row[1] or "")) if row else ""
+
+    def last_message(self) -> tuple[int, str, int] | None:
+        """The newest message in any session: (its id, its role, its session)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, role, chat_id FROM messages WHERE chat_id LIKE 'session:%' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return (row[0], row[1], session_of(row[2]) or 0) if row else None
+
+    def delete_session(self, session_id: int) -> list[Exchange]:
+        """Delete a session, and everything said in it, with its photos unless another message has them. Returns
+        its exchanges, to take out of memory too. If it was the current session, the one used before it is now,
+        or a new one. KeyError if there's no such session."""
+        chat_id = f"{SESSION}{session_id}"
+        with self._lock, self._conn:
+            if not self._conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone():
+                raise KeyError(session_id)
+            rows = self._conn.execute(
+                "SELECT id, role, content, created_at, photos FROM messages WHERE chat_id = ? ORDER BY id", (chat_id,)
+            ).fetchall()
+            self._conn.execute("PRAGMA secure_delete = ON")  # overwrite what's deleted, rather than just unlink it
+            self._conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+            self._conn.execute("DELETE FROM chat_state WHERE chat_id = ?", (chat_id,))
+            self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            photos = {name for row in rows for name in json.loads(row[4] or "[]")}
+            still = {
+                name
+                for (names,) in self._conn.execute("SELECT photos FROM messages WHERE photos IS NOT NULL")
+                for name in json.loads(names)
+            }
+            current = self._current_session() if session_id == self.session.id else self.session
+        for name in photos - still:
+            self.photos.delete(name)
+        exchanges = [
+            Exchange(answer[0], chat_id, question[2], answer[2], answer[3])
+            for question, answer in zip(rows, rows[1:], strict=False)
+            if question[1] == "user" and answer[1] == "assistant"
+        ]
+        if current is None:
+            self.new_session()
+        else:
+            self.session = current
+            self._changed()
+        return exchanges
+
+    def adopt(self, chat_id: str, name: str, *, prefix: str = "", drop: str = "") -> Session:
+        """Make a chat of Athena's own, such as a task's from before tasks ran in sessions, a session: listed just
+        after the current one, with what was said in it and what the model sees of it. ``prefix`` goes before each
+        of the messages on your side, and exchanges whose answer has ``drop`` in it are left out."""
+        session = self.new_session(name, current=False)
+        with self._lock, self._conn:
+            if drop:
+                answers = [
+                    row[0]
+                    for row in self._conn.execute(
+                        "SELECT id FROM messages WHERE chat_id = ? AND role = 'assistant' AND instr(upper(content), ?)",
+                        (chat_id, drop.upper()),
+                    )
+                ]
+                for answer in answers:
+                    self._conn.execute(
+                        "DELETE FROM messages WHERE id = ? OR id = (SELECT MAX(id) FROM messages WHERE chat_id = ? "
+                        "AND id < ? AND role = 'user')",
+                        (answer, chat_id, answer),
+                    )
+            self._conn.execute(
+                "UPDATE messages SET content = CASE WHEN role = 'user' THEN ? || content ELSE content END, "
+                "chat_id = ?, channel = CASE WHEN role = 'user' THEN 'Task' END WHERE chat_id = ?",
+                (prefix, session.chat_id, chat_id),
+            )
+            self._conn.execute("UPDATE chat_state SET chat_id = ? WHERE chat_id = ?", (session.chat_id, chat_id))
+        self._changed()
+        return session
 
     def sessions_started(self) -> int:
         with self._lock:
@@ -289,14 +409,14 @@ class ConversationStore:
         whether there are earlier ones. Everything said in it, not just what the model sees now."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, role, content, created_at, channel, tools FROM messages WHERE chat_id = ? AND id < ? "
-                "ORDER BY id DESC LIMIT ?",
+                "SELECT id, role, content, created_at, channel, tools, photos FROM messages "
+                "WHERE chat_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
                 (f"{SESSION}{session_id}", before if before is not None else 2**62, limit + 1),
             ).fetchall()
         more = len(rows) > limit
         return [
-            Message(i, role, text, at, channel or "", json.loads(tools) if tools else [])
-            for i, role, text, at, channel, tools in reversed(rows[:limit])
+            Message(i, role, text, at, channel or "", json.loads(tools) if tools else [], json.loads(photos or "[]"))
+            for i, role, text, at, channel, tools, photos in reversed(rows[:limit])
         ], more
 
     # -- what the model sees -------------------------------------------------------------------
@@ -484,7 +604,18 @@ def summary_block(summary: str) -> str:
     return f"<summary>\nWhat we said earlier in this conversation, summarised:\n{summary}\n</summary>"
 
 
+def task_said(title: str) -> str:
+    """How a task's run starts, on your side of its session's conversation."""
+    return f"(Your task “{title}”)"
+
+
+def _name(name: str) -> str:
+    return " ".join(name.split())[:NAME_CHARS]
+
+
 def _title(text: str) -> str:
+    if ran := _TASK_RAN.match(text):  # a session that started with a task's run is called after the task
+        return ran.group(1)
     text = " ".join(text.split())
     return text if len(text) <= TITLE_CHARS else text[: TITLE_CHARS - 1].rstrip() + "…"
 

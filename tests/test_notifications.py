@@ -49,7 +49,7 @@ async def test_an_answer_to_a_message_sent_on_the_dashboard(chat, phone):  # noq
         await answered(http)
         await until(lambda: phone.received)
         assert phone.received == [
-            ("normal", {"title": "Athena", "body": "Hello there.", "url": "#chat/1", "tag": "reply-1"})
+            ("normal", {"title": "Athena · Hello", "body": "Hello there.", "url": "#chat/1", "tag": "reply-1"})
         ]
 
         # Not while you're looking at the page: it shows the answer itself.
@@ -99,3 +99,40 @@ async def test_only_that_theres_something_new_if_youd_rather(chat, phone):  # no
     chat.push.show_text = False
     await chat.notify("Your locker is number 42.")
     assert phone.received[0][1]["body"] == "Something new. Open Athena to see it."
+    chat.history.rename(1, "Locker hunting")
+    await chat.notify("It's number 42.", session=1)
+    assert phone.received[1][1]["title"] == "Athena"  # not where it was said, either
+
+
+async def test_every_session_notifies_you_unless_you_mute_it(chat, phone):  # noqa: F811
+    async with client(chat) as http:
+        await http.post("/api/chat/1/name", json={"name": "Job hunting"})
+        muted = await http.post("/api/chat/1/mute", json={"muted": True})
+        assert muted.json()["muted"] is True and (await http.get("/api/chat")).json()["sessions"][0]["muted"]
+        assert (await http.post("/api/chat/1/mute", json={"muted": "yes"})).status_code == 400
+        await http.post("/api/chat/1", json={"text": "Hello"})
+        await answered(http)
+        assert await chat.notify("📋 **Find jobs**\n\nTwo new ones.", session=1) is False
+        await asyncio.sleep(0.1)
+        assert phone.received == []  # neither an answer nor what a task found there
+
+        await http.post("/api/chat/1/mute", json={"muted": False})
+        assert await chat.notify("📋 **Find jobs**\n\nTwo new ones.", session=1) is True
+        assert phone.received[-1][1] == {
+            "title": "Athena · Job hunting",
+            "body": "📋 Find jobs Two new ones.",
+            "url": "#chat/1",
+            "tag": "reply-1",
+        }
+
+        # What a task asks for your OK for always reaches you, from its session.
+        await http.post("/api/chat/1/mute", json={"muted": True})
+        asking = asyncio.create_task(
+            chat.reach.ask("send_note", {}, None, why="For your task “Find jobs”", timeout=5, session=1)
+        )
+        await until(lambda: len(phone.received) == 2)
+        assert phone.received[1][1]["url"] == "#chat/1"
+        [request] = (await http.get("/api/chat")).json()["approvals"]
+        assert request["session"] == 1
+        await http.post(f"/api/approvals/{request['id']}", json={"allow": False})
+        assert await asyncio.wait_for(asking, 2) is False

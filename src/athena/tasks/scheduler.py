@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from athena.agent import AgentResult, Background
 from athena.clock import Clock
 from athena.files import SENT
+from athena.history import Busy, Session, task_said
 from athena.skills import READ_SKILL, REVIEW, SAVE_SKILL
 from athena.status import Task as StatusTask
 from athena.status import describe_error
@@ -127,6 +128,31 @@ class Scheduler:
         self._wake = asyncio.Event()
         self._loop: asyncio.Task[None] | None = None
         self._run: asyncio.Task[Any] | None = None
+        self._give_sessions()
+
+    def _give_sessions(self) -> None:
+        """Tasks from before each ran in a session get one of their own, named after them, with what they said
+        before, which the model saw of them, in it: all but their runs that found nothing."""
+        for task in self.store.all():
+            if task.session_id is None:
+                task.session_id = self._history.adopt(
+                    f"task:{task.id}", task.title, prefix=f"{task_said(task.title)} ", drop=NOTHING
+                ).id
+                self.store.save(task)
+                log.info("Task %d (%s) now runs in session %d", task.id, task.title, task.session_id)
+
+    @property
+    def _history(self) -> Any:
+        return self.agent.history
+
+    def _session(self, task: Task) -> Session:
+        """The session a task runs in: a new one, named after it, if its own has gone."""
+        session = self._history.get_session(task.session_id) if task.session_id is not None else None
+        if session is None:
+            session = self._history.new_session(task.title, current=False)
+            task.session_id = session.id
+            self.store.save(task)
+        return session
 
     # -- you, and whether you're chatting --
 
@@ -250,8 +276,9 @@ class Scheduler:
         return step
 
     async def run(self, task: Task) -> None:
-        """Run ``task`` now, tell you what it found, and work out when it's next due."""
+        """Run ``task`` now, in its session, tell you what it found, and work out when it's next due."""
         schedule = Schedule.kept(task.schedule, self.tz)
+        session = self._session(task)
         self.running = task
         step = self._stepper(lambda: self._free(task), self.cfg.max_minutes, f"Task {task.id}")
 
@@ -260,7 +287,12 @@ class Scheduler:
             if channel is None:
                 return False
             return await channel.ask(
-                tool, args, summary, why=f"For your task “{task.title}”", timeout=self.cfg.confirm_minutes * 60
+                tool,
+                args,
+                summary,
+                why=f"For your task “{task.title}”",
+                timeout=self.cfg.confirm_minutes * 60,
+                session=session.id,
             )
 
         background = Background(
@@ -269,14 +301,15 @@ class Scheduler:
             thinking=self.cfg.thinking,
             max_rounds=self.cfg.max_tool_rounds,
             source=f"your task “{task.title}”",
+            keep=lambda said: NOTHING not in said.upper(),  # a run that found nothing isn't kept in the session
         )
-        log.info("Running task %d (%s)", task.id, task.title)
+        log.info("Running task %d (%s) in session %d", task.id, task.title, session.id)
         taken, on_tool = steps()
         started = self.clock.time()
         self._run = asyncio.create_task(
             self.agent.respond(
-                f"task:{task.id}",
-                task.instructions,
+                session.chat_id,
+                f"{task_said(task.title)} {task.instructions}",
                 confirm=confirm,
                 allowed=task.allowed_tools,
                 on_tool=on_tool,
@@ -322,7 +355,14 @@ class Scheduler:
                 await self._tell(f"📋 **{task.title}**: nothing new to tell you.{review}")
             await self._finished(task, schedule, now, "nothing new", text if result.saved else "")
             return
-        await self._tell(f"📋 **{task.title}**\n\n{text}{review}", keep=(f"(Your task “{task.title}” ran.)", text))
+        # It's said in the session, which becomes the current one, so what you say next carries on from it: unless
+        # you're talking to Athena right now.
+        if self.agent.answering_you == 0:
+            with contextlib.suppress(Busy, KeyError):
+                self._history.use_session(session.id)
+        where = self._history.title(session.id)
+        heading = f"📋 **{task.title}**" + (f" · {where}" if where and where != task.title else "")
+        await self._tell(f"{heading}\n\n{text}{review}", session=session.id)
         await self._send_files(result.notes.get(SENT, []))
         await self._finished(task, schedule, now, "told you", text)
 
@@ -330,16 +370,18 @@ class Scheduler:
         user = self.agent.cfg.user_name
         before = (
             f" It's run {task.runs} time{'' if task.runs == 1 else 's'} before, last on "
-            f"{datetime.fromtimestamp(task.last_run, self.tz):%a %-d %b at %H:%M}: your earlier runs are above."
+            f"{datetime.fromtimestamp(task.last_run, self.tz):%a %-d %b at %H:%M}: what it found that was worth "
+            "saying is above."
             if task.runs and task.last_run
             else ""
         )
         return (
-            f"This is a task you're doing by yourself, not a message from {user}: “{task.title}”, "
-            f"{schedule.describe()}.{before} {user} isn't watching, so don't ask them anything: decide for "
-            "yourself, and use your tools. When you've finished, reply with what they should know, short "
-            f"and specific, with sources where they help: they'll get it as a message. If there's nothing "
-            f"new worth telling them, reply with just: {NOTHING}"
+            f"This is your task “{task.title}”, {schedule.describe()}, not a message from {user}: you're doing it "
+            f"by yourself, in this conversation, with everything in it to go on.{before} {user} isn't watching, "
+            "so don't ask them anything: decide for yourself, and use your tools. When you've finished, reply with "
+            "what they should know, short and specific, with sources where they help: it goes into this "
+            f"conversation, where they can ask you about it. If there's nothing new worth telling them, reply with "
+            f"just: {NOTHING}"
         ) + self._about(event, schedule)
 
     def _about(self, event: Event | None, schedule: Schedule) -> str:
@@ -405,17 +447,18 @@ class Scheduler:
         except Exception:  # it mustn't stop the tasks
             log.exception("Couldn't note a %s on the timeline", kind)
 
-    async def _tell(self, text: str, keep: tuple[str, str] | None = None) -> None:
-        """Message you. ``keep``: (a line for your side, what was said), to keep in your chat too."""
+    async def _tell(self, text: str, keep: tuple[str, str] | None = None, session: int | None = None) -> None:
+        """Message you: about ``session``, if it's what a task said there. ``keep``: (a line for your side, what was
+        said), to keep in your conversation, the current session, too."""
         channel = self.channel()
         if channel is None:
             log.warning("Nowhere to send a task's message of %d characters", len(text))  # not what it says
             return
         try:
-            await channel.tell(text)
+            await (channel.tell(text, session=session) if session is not None else channel.tell(text))
         except Exception as exc:
             log.warning("Couldn't send a task's message: %s", exc)
-        if keep:  # in your conversation too, the current session, so you can ask about it
+        if keep:  # so you can ask about it
             yours, said = keep
             history = self.agent.history
             history.append_exchange(history.current_chat, yours, said, channel="Athena")
@@ -587,23 +630,52 @@ class Scheduler:
 
     # -- what you, and Athena, can do to them --
 
-    def add(self, title: str, instructions: str, schedule: str, allowed_tools: list[str], created_by: str) -> Task:
+    def add(
+        self,
+        title: str,
+        instructions: str,
+        schedule: str,
+        allowed_tools: list[str],
+        created_by: str,
+        session: int | None = None,
+    ) -> Task:
+        """A new task, in ``session``, the current one if it's not given. ValueError if something won't do."""
         title, instructions, allowed = self._check(title, instructions, allowed_tools)
+        session = self._check_session(session)
         parsed = Schedule.parse(schedule, self.tz, self.clock.now(self.tz))
         first = parsed.first(self.clock.now(self.tz))
         due = first.timestamp() if first else None
-        task = self.store.add(title, instructions, parsed.text, allowed, created_by, due)
-        log.info("Task %d (%s) added by %s: %s", task.id, task.title, created_by, parsed.describe())
+        task = self.store.add(title, instructions, parsed.text, allowed, created_by, due, session)
+        log.info(
+            "Task %d (%s) added by %s, in session %d: %s", task.id, task.title, created_by, session, parsed.describe()
+        )
         self.wake()
         return task
 
-    def change(self, task_id: int, title: str, instructions: str, schedule: str, allowed_tools: list[str]) -> Task:
-        """Change a task, unless it's running. A new schedule counts from now, and a one-off that's done is
-        scheduled again by one."""
+    def _check_session(self, session: int | None) -> int:
+        if session is None:
+            return self._history.session.id
+        if isinstance(session, bool) or not isinstance(session, int) or self._history.get_session(session) is None:
+            raise ValueError(f"There's no session #{session}.")
+        return session
+
+    def change(
+        self,
+        task_id: int,
+        title: str,
+        instructions: str,
+        schedule: str,
+        allowed_tools: list[str],
+        session: int | None = None,
+    ) -> Task:
+        """Change a task, unless it's running, and move it to ``session`` if that's given. A new schedule counts
+        from now, and a one-off that's done is scheduled again by one."""
         task = self._get(task_id)
         if self.running and self.running.id == task.id:
             raise ValueError(f"“{task.title}” is running: change it once it's finished, or stop it first.")
         task.title, task.instructions, task.allowed_tools = self._check(title, instructions, allowed_tools)
+        if session is not None:
+            task.session_id = self._check_session(session)
         same = " ".join(schedule.lower().split()) == task.schedule  # as kept: a one-off's time may have passed
         now = self.clock.now(self.tz)
         parsed = Schedule.kept(task.schedule, self.tz) if same else Schedule.parse(schedule, self.tz, now)
@@ -695,6 +767,9 @@ class Scheduler:
         self.wake()
         return task
 
+    def in_session(self, session_id: int) -> list[Task]:
+        return [task for task in self.store.all() if task.session_id == session_id]
+
     def delete(self, task_id: int) -> None:
         if self.running and self.running.id == task_id:
             self.stop_running()
@@ -747,6 +822,7 @@ class Scheduler:
             "last_result": task.last_result,
             "last_steps": task.last_steps,
             "runs": task.runs,
+            "session": task.session_id,
         }
 
     # -- the model's tools --

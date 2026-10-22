@@ -257,3 +257,39 @@ def test_taking_back_the_last_exchange_to_answer_it_again(tmp_path):
     store.reset("chat")
     assert store.take_last("chat") is None
     assert [e.question for e in store.exchanges_after(0)] == ["first", "elsewhere"]
+
+
+def test_deleting_a_session_deletes_what_was_said_in_it_and_only_its_own_photos(tmp_path):
+    from athena.photos import Photo, red_square
+
+    store = ConversationStore(tmp_path / "h.db")
+    first = store.session
+    shared, own = red_square(), Photo(b"\xff\xd8\xff" + b"own", "image/jpeg")
+    store.append_exchange(first.chat_id, "[2 photos] Look", "Red.", photos=[shared, own])
+    second = store.new_session("Elsewhere")
+    store.append_exchange(second.chat_id, "[Photo] Again", "Still red.", photos=[shared])
+    store.use_session(first.id)
+
+    [exchange] = store.delete_session(first.id)
+    assert (exchange.question, exchange.answer) == ("[2 photos] Look", "Red.")
+    assert store.session.id == second.id  # the one used before it is current now
+    assert store.photos.load(shared.name) and store.photos.load(own.name) is None
+    assert store.get_session(first.id) is None and store.load(first.chat_id) == []
+    with pytest.raises(KeyError):
+        store.delete_session(first.id)
+    store.delete_session(second.id)
+    assert store.session.id not in (first.id, second.id)  # there's always a current session
+    assert store.sessions_started() == 1
+
+
+def test_sessions_can_be_named_and_muted_and_a_named_one_is_listed(tmp_path):
+    store = ConversationStore(tmp_path / "h.db")
+    store.rename(1, "  Maths   research ")
+    store.set_muted(1, True)
+    assert (store.session.name, store.session.muted) == ("Maths research", True)
+    later = store.new_session("Business", current=False)
+    assert store.session.id == 1 and [s.id for s in store.sessions()] == [1, later.id]
+    assert [s.title for s in store.sessions()] == ["Maths research", "Business"]
+    store.append_exchange(f"session:{later.id}", "(Your task “Plan”) Plan it.", "Planned.")
+    store.rename(later.id, "")
+    assert store.title(later.id) == "Plan"  # after the task it started with

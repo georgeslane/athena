@@ -2,11 +2,12 @@
 
 Athena can work on things by itself, then message you what it found: a briefing every weekday at 7:30, research while you get on with your day, or a weekly look for MCP servers that would help. Ask it in Telegram, such as "every Sunday, look for MCP servers I'd find useful", or add one on the dashboard's Tasks tab, which has examples to start from.
 
+- **Each task belongs to a session.** A session is something Athena does for you, such as finding you a job, with the conversation about it (see [the dashboard](dashboard.md#chat)). A task runs in its session as a message from you would, with everything said there to go on: your CV, the jobs it's found before, what you've said you like. What it finds goes into that session, which becomes your current one, unless you're talking to Athena right now, so you can carry on about it wherever you are. A task Athena schedules goes in the session you asked for it in, and one you add on the dashboard goes in the session you choose, or a new one.
 - **You come first.** A task doesn't start while you're chatting, or within `quiet_minutes` (5) of your last message. Once it's running, a message from you stops what it's doing at once, so the model's yours, and it carries on once you've finished.
-- **What it tells you:** its findings, as a message in Telegram, which goes into your chat too, so you can reply "tell me more about the second one". If there's nothing new, it stays quiet. The dashboard shows what each task said last time, and each tool it used: what it was given, what came back, and whether it failed or you declined it.
+- **What it tells you:** its findings, in its session, as a message in Telegram, and as a notification on your devices, unless you've muted the session. Reply "tell me more about the second one". If there's nothing new, it stays quiet, and that run isn't kept in the session. The dashboard shows what each task said last time, and each tool it used: what it was given, what came back, and whether it failed or you declined it.
 - **Longer work:** a task gets more steps than a reply (`max_tool_rounds`, 25), up to `max_minutes` (30) of work, and thinks before answering.
 - **If it fails**, such as when the Mac's asleep, it tries again after 10 minutes, then 30, then tells you and waits for its next run.
-- **Changing one:** on the Tasks tab, change its title, instructions, schedule and the tools it may use without asking. A new schedule counts from then, and gives a one-off that's done another run. A task can't be changed while it's running.
+- **Changing one:** on the Tasks tab, or from its session on the Chat tab, change its title, instructions, session, schedule and the tools it may use without asking. Deleting a session deletes its tasks. A new schedule counts from then, and gives a one-off that's done another run. A task can't be changed while it's running.
 
 ## When
 
@@ -24,7 +25,7 @@ Athena can work on things by itself, then message you what it found: a briefing 
 ## What it may do
 
 - A task Athena suggests needs your OK: scheduling one asks first, showing what it'll do, when, and the tools it may use without asking. Tasks you add on the dashboard are yours already.
-- A tool that asks first still asks you for a task, in Telegram, saying which task wants it, unless you've allowed that task to use it. Unanswered after `confirm_minutes` (60), it's denied.
+- A tool that asks first still asks you for a task, in Telegram and in its session on the dashboard, saying which task wants it, unless you've allowed that task to use it. What you've allowed in the session doesn't count: a task has its own. Unanswered after `confirm_minutes` (60), it's denied.
 - Scheduling another task always asks, so a task can't start others by itself.
 
 Allowing a task to fetch or search without asking lets it send what's in its instructions and what it's read to those sites unseen, so allow only what it needs.

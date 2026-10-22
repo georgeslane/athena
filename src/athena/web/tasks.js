@@ -1,4 +1,4 @@
-// The Tasks tab: what Athena does by itself.
+// The Tasks tab: what Athena does by itself, each task in a session, whose conversation it carries on.
 
 import { ask, call, clock, h, icon, isoDay, plural, state, toast } from "./core.js";
 import { stepList } from "./steps.js";
@@ -18,14 +18,23 @@ const WHEN = [
 ];
 
 export async function loadTasks() {
+  await fetchTasks();
+  renderTasks();
+}
+
+// The tasks, for this tab and the Chat tab's: {off} if they're switched off.
+export async function fetchTasks() {
   try {
     state.tasks = await call("GET", "/api/tasks");
   } catch (e) {
     if (e.status !== 409) throw e;
     state.tasks = { off: e.message };
   }
-  renderTasks();
+  return state.tasks;
 }
+
+// What a session's called, for a task's.
+export const sessionName = (session) => (session && session.title) || `Session ${session ? session.id : ""}`.trim();
 
 function renderTasks() {
   const t = state.tasks;
@@ -39,13 +48,31 @@ function renderTasks() {
     "p.note",
     {},
     icon("info"),
-    h("span", { text: `Athena works on these once you've been quiet for ${plural(t.quiet_minutes, "minute")}, and messages you what it finds.` })
+    h("span", { text: `Each runs in a session, with everything said there to go on, once you've been quiet for ${plural(t.quiet_minutes, "minute")}. What it finds goes into the session, where you can ask about it, and to you.` })
   );
   // What you've opened stays open when the tab's drawn again, as it is every few seconds while something runs.
   const opened = new Set([...panel.querySelectorAll("details[data-keep][open]")].map((d) => d.dataset.keep));
+  // By session, in the order they were used.
+  const groups = t.sessions.map((session) => [session, t.tasks.filter((task) => task.session === session.id)]);
+  const placed = new Set(t.sessions.map((session) => session.id));
+  const unplaced = t.tasks.filter((task) => !placed.has(task.session));
   const list = t.tasks.length
-    ? h("div.task-list", {}, t.tasks.map(taskCard))
-    : h("p.empty", { text: "No tasks yet. Add one, or ask Athena: “every weekday at 7:30, brief me”." });
+    ? h(
+        "div.task-groups",
+        {},
+        groups
+          .filter(([, tasks]) => tasks.length)
+          .map(([session, tasks]) =>
+            h(
+              "section.task-group",
+              {},
+              h("h3.task-group-head", {}, h("span", { text: sessionName(session) }), h("a.button.quiet.small", { href: `#chat/${session.id}`, text: "Open chat" })),
+              h("div.task-list", {}, tasks.map(taskCard))
+            )
+          ),
+        unplaced.length ? h("section.task-group", {}, h("div.task-list", {}, unplaced.map(taskCard))) : null
+      )
+    : h("p.empty", { text: "No tasks yet. Add one, or ask Athena in a session: “every weekday at 7:30, find me new job postings”." });
   panel.replaceChildren(
     h(
       "div.stack",
@@ -271,7 +298,7 @@ async function taskAction(event, task, action) {
 }
 
 async function deleteTask(task) {
-  const ok = await ask({ title: `Delete “${task.title}”?`, body: [h("p", { text: "Athena won't do it any more. Anything it said is still in your chat." })], confirm: "Delete", danger: true });
+  const ok = await ask({ title: `Delete “${task.title}”?`, body: [h("p", { text: "Athena won't do it any more. What it said is still in its session." })], confirm: "Delete", danger: true });
   if (!ok) return;
   try {
     state.tasks = await call("DELETE", `/api/tasks/${task.id}`);
@@ -281,8 +308,9 @@ async function deleteTask(task) {
   }
 }
 
-// A task, new or to change. ``example``: one of Athena's to start a new one from.
-function taskForm({ task, example } = {}) {
+// A task, new or to change. ``example``: one of Athena's to start a new one from; ``session``: the one a new task
+// runs in, the current one if it's not given; ``onSaved``: what to do once it's saved, besides showing it here.
+export function taskForm({ task, example, session, onSaved } = {}) {
   const t = state.tasks;
   const from = task || example || {};
   const title = h("input", { type: "text", maxLength: 120, required: true, value: from.title || "" });
@@ -294,6 +322,23 @@ function taskForm({ task, example } = {}) {
     {},
     WHEN.map(([label, value]) => h("button.button.small.quiet", { type: "button", text: label, title: value, onclick: () => ((schedule.value = value), schedule.focus()) }))
   );
+  // Which session it runs in: one of yours, or a new one, named as you say.
+  const NEW = "new";
+  const where = h(
+    "select",
+    { "aria-label": "Session" },
+    t.sessions.map((s) => h("option", { value: String(s.id), text: sessionName(s) })),
+    h("option", { value: NEW, text: "A new session…" })
+  );
+  where.value = String((task && task.session) || session || t.current);
+  if (!where.value) where.value = String(t.current);
+  const newName = h("input", { type: "text", maxLength: 80, placeholder: "Job hunting", "aria-label": "The new session's name" });
+  const showNew = () => {
+    newName.hidden = where.value !== NEW;
+    if (!newName.hidden && !newName.value) newName.value = title.value.trim();
+  };
+  where.addEventListener("change", showNew);
+  showNew();
   const allowed = new Set(from.allowed_tools || []);
   const tools = t.tools.map((name) => h("label", {}, h("input", { type: "checkbox", value: name, checked: allowed.has(name) }), h("span", { text: name })));
   const error = h("p.form-error", { role: "alert" });
@@ -312,10 +357,12 @@ function taskForm({ task, example } = {}) {
             instructions: instructions.value,
             schedule: schedule.value,
             tools: tools.map((label) => label.querySelector("input")).filter((box) => box.checked).map((box) => box.value),
+            session: where.value === NEW ? newName.value : Number(where.value),
           });
           dialog.close();
           renderTasks();
           toast(`${task ? "Saved" : "Added"} “${title.value.trim()}”.`);
+          if (onSaved) onSaved();
         } catch (e) {
           error.textContent = e.message;
           save.disabled = false;
@@ -329,10 +376,11 @@ function taskForm({ task, example } = {}) {
           "div.task-examples",
           {},
           h("span.hint", { text: "Start from:" }),
-          t.examples.map((ex) => h("button.button.small", { type: "button", text: ex.title, onclick: () => taskForm({ example: ex }) }))
+          t.examples.map((ex) => h("button.button.small", { type: "button", text: ex.title, onclick: () => taskForm({ example: ex, session, onSaved }) }))
         ),
     h("label.field", {}, h("span.field-label", { text: "Title" }), title),
     h("label.field", {}, h("span.field-label", { text: "What to do" }), h("span.field-help", { text: "What Athena should do, and what to tell you." }), instructions),
+    h("div.field", {}, h("span.field-label", { text: "Session" }), h("span.field-help", { text: "It works with what's been said there, and says what it found there." }), where, newName),
     h("div.field", {}, h("span.field-label", { text: "When" }), h("span.field-help", { text: "Once, or regularly as cron: minute, hour, day, month, weekday." }), schedule, suggestions),
     tools.length
       ? h("fieldset.field", {}, h("legend.field-label", { text: "May use without asking" }), h("span.field-help", { text: "Anything not ticked asks you first, in Telegram." }), h("div.choice", {}, tools))

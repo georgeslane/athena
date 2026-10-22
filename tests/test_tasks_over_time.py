@@ -45,10 +45,10 @@ class Telegram:
         self.clock = clock
         self.said: list[tuple[datetime, str]] = []
 
-    async def tell(self, text):
+    async def tell(self, text, *, session=None):
         self.said.append((self.clock.now(LONDON), text))
 
-    async def ask(self, tool, args, summary, *, why, timeout):
+    async def ask(self, tool, args, summary, *, why, timeout, session=None):
         return False
 
     def when(self, starting: str) -> list[str]:

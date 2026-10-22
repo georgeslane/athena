@@ -206,10 +206,15 @@ class Services:
         self._projects = asyncio.create_task(self._watch_projects(), name="claude-projects")
         self._security = asyncio.create_task(self.security.forever(), name="security-updates")
 
-    async def notify(self, text: str) -> bool:
+    async def notify(self, text: str, *, session: int | None = None) -> bool:
         """Tell you something you didn't ask about, such as what a task found: in Telegram, and on your devices
-        unless you're looking at the dashboard. False if it couldn't reach you."""
-        told = await self.notify_devices(self.config.agent.assistant_name, text, url="#chat", tag="athena")
+        unless you're looking at the dashboard, or it's what was said in a ``session`` that's muted. False if it
+        couldn't reach you."""
+        name = self.config.agent.assistant_name
+        if session is None:
+            told = await self.notify_devices(name, text, url="#chat", tag="athena")
+        else:
+            told = await self._notify_about(session, text)
         if self.channel is None:
             if not told:  # not what it says: it can be personal
                 log.warning("Nowhere to send a message of %d characters", len(text))
@@ -239,10 +244,19 @@ class Services:
         self._notifying.add(task)
         task.add_done_callback(self._notifying.discard)
 
+    async def _notify_about(self, session_id: int, text: str) -> bool:
+        """Notify your devices of what was said in a session, unless it's muted, titled with where it was said."""
+        session = self.history.get_session(session_id)
+        if session is None or session.muted:
+            return False
+        name, where = self.config.agent.assistant_name, self.history.title(session_id)
+        # Where it was said is part of what was said: left out with the rest, if you'd rather.
+        title = f"{name} · {where}" if where and self.push and self.push.show_text else name
+        return await self.notify_devices(title, text, url=f"#chat/{session_id}", tag=f"reply-{session_id}")
+
     def _answered_on_the_dashboard(self, reply: Any, result: Any) -> None:
         """Your devices hear of an answer to a message sent on the dashboard, in case you've gone."""
-        name, session = self.config.agent.assistant_name, reply.session
-        self._later(self.notify_devices(name, result.text, url=f"#chat/{session}", tag=f"reply-{session}"))
+        self._later(self._notify_about(reply.session, result.text))
 
     def _asking(self, approval: Approval) -> None:
         """Your devices hear when Athena's waiting for your OK."""
@@ -252,7 +266,8 @@ class Services:
         if approval.summary:
             said += f" {approval.summary}"
         title = f"{self.config.agent.assistant_name} needs your OK"
-        self._later(self.notify_devices(title, said, url="#chat", tag=f"ask-{approval.id}", urgent=True))
+        url = f"#chat/{approval.session}" if approval.session is not None else "#chat"
+        self._later(self.notify_devices(title, said, url=url, tag=f"ask-{approval.id}", urgent=True))
 
     async def _alert(self, text: str) -> bool:
         return await self.notify(text)
@@ -412,6 +427,30 @@ class Services:
         session = self.history.use_session(session_id)
         self.rewarm.set()  # the model server reads it now, rather than when you send the next message
         return session
+
+    async def delete_session(self, session_id: int) -> Session:
+        """Delete a session: what was said in it, here and in memory, and its tasks. Returns the current session,
+        which is another if it was this one. Busy if Athena's answering you in it; KeyError if there's no such
+        session."""
+        replying = self.chat.replying
+        answering = replying.session if replying else self.history.session.id if self.agent.answering_you else None
+        if answering == session_id:
+            raise Busy("I'm answering you in that session. Wait until I've finished, or stop me, first.")
+        if self.history.get_session(session_id) is None:
+            raise KeyError(session_id)
+        if self.tasks:
+            for task in self.tasks.in_session(session_id):
+                self.tasks.delete(task.id)  # stopping it first, if it's running
+        if self._indexer and not self._indexer.done():
+            await asyncio.wait({self._indexer})  # so nothing said in it is added to memory just after
+        was_current = session_id == self.history.session.id
+        for exchange in self.history.delete_session(session_id):
+            self.memory.forget_conversation(exchange)
+        self.chat.failed.pop(session_id, None)
+        if was_current:
+            self.rewarm.set()
+        log.info("Deleted session %d", session_id)
+        return self.history.session
 
     def _not_answering(self) -> None:
         if self.chat.busy:

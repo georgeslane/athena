@@ -171,7 +171,9 @@ def tasks(services: Services) -> tuple[str, list[dict[str, Any]]]:
             when = datetime.fromtimestamp(t["next_run"], scheduler.tz)
             nxt = f" · next {when:%a %-d %b %H:%M}"
         last = f" · last: {t['last_outcome']}" if t["last_outcome"] else ""
-        lines.append(f"{mark} #{t['id']} {t['title']}: {t['when']}{nxt}{last}")
+        where = services.history.title(t["session"]) if t["session"] is not None else ""
+        within = f" (in “{where}”)" if where and where != t["title"] else ""
+        lines.append(f"{mark} #{t['id']} {t['title']}{within}: {t['when']}{nxt}{last}")
     return "\n".join(lines), listed
 
 

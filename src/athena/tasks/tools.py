@@ -6,8 +6,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from athena.history import session_of
 from athena.tasks.schedules import SCHEDULES, Schedule
-from athena.tools import Tool, ToolError
+from athena.tools import Tool, ToolError, current_turn
 from athena.watching import watch_tool
 
 if TYPE_CHECKING:
@@ -15,7 +16,12 @@ if TYPE_CHECKING:
 
 
 def task_tools(scheduler: Scheduler) -> list[Tool]:
-    """schedule_task, list_tasks and change_task, and watch if anything can be watched."""
+    """schedule_task, list_tasks and change_task, and watch if anything can be watched. A task Athena schedules
+    runs in the session it was asked for in, or the current one."""
+
+    def here() -> int | None:
+        chat = current_turn().chat
+        return session_of(chat) if chat else None
 
     async def check(args: dict[str, Any]) -> str:
         try:
@@ -27,7 +33,10 @@ def task_tools(scheduler: Scheduler) -> list[Tool]:
         if not title or not instructions:
             raise ToolError("A task needs a title and instructions.")
         unasked = f" It may use {', '.join(allowed)} without asking you." if allowed else ""
-        return f"A task, “{title}”, {schedule.describe()}:\n{instructions}\n{unasked}".rstrip()
+        session = here()
+        where = scheduler.agent.history.title(session if session is not None else scheduler.agent.history.session.id)
+        within = f", in “{where}”" if where else ", in this conversation" if session else ", in the current session"
+        return f"A task, “{title}”, {schedule.describe()}{within}:\n{instructions}\n{unasked}".rstrip()
 
     async def schedule_task(args: dict[str, Any]) -> str:
         try:
@@ -37,6 +46,7 @@ def task_tools(scheduler: Scheduler) -> list[Tool]:
                 str(args.get("schedule") or ""),
                 list(args.get("tools") or []),
                 created_by="athena",
+                session=here(),
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
@@ -52,7 +62,9 @@ def task_tools(scheduler: Scheduler) -> list[Tool]:
             when = datetime.fromtimestamp(d["next_run"], scheduler.tz) if d["next_run"] else None
             nxt = f", next {when:%a %-d %b %H:%M}" if when else ""
             last = f"; last run: {task.last_outcome}" if task.last_outcome else ""
-            lines.append(f"#{task.id} {task.title} ({d['status']}): {d['when']}{nxt}{last}")
+            where = scheduler.agent.history.title(task.session_id) if task.session_id is not None else ""
+            within = f", in “{where}”" if where else ""
+            lines.append(f"#{task.id} {task.title} ({d['status']}{within}): {d['when']}{nxt}{last}")
         return "\n".join(lines)
 
     async def change_task(args: dict[str, Any]) -> str:
@@ -78,7 +90,8 @@ def task_tools(scheduler: Scheduler) -> list[Tool]:
             name="schedule_task",
             description=(
                 "Set yourself a task to do by yourself, now in the background or on a schedule, and message "
-                "the user what you find: research, a regular briefing, checking on something. Asks the user "
+                "the user what you find: research, a regular briefing, checking on something. It runs in this "
+                "conversation, with everything in it to go on, and what it finds goes here. Asks the user "
                 "first. `tools` are ones that normally ask first which the task may use without asking."
             ),
             parameters={

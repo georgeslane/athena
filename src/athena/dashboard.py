@@ -13,10 +13,15 @@ The page talks to Athena with JSON:
   POST   /api/session           start a new session
   GET    /api/chat              your sessions, newest first, whether Athena's answering you, and what's waiting for
                                 your OK; POST starts a new conversation
-  GET    /api/chat/<id>         a session's messages: the last page, or ?before=<message id>
-  POST   /api/chat/<id>         {"text", "allow": [tools]}: send a message or a command in a session, which makes it
-                                the current one; /api/chat/stop stops the answer
+  GET    /api/chat/<id>         a session's messages: the last page, or ?before=<message id>, and its tasks
+  POST   /api/chat/<id>         {"text", "allow": [tools], "attachments": [{"name", "data": base64}]}: send a message
+                                or a command in a session, which makes it the current one; /api/chat/stop stops the
+                                answer
+  DELETE /api/chat/<id>         delete a session, what was said in it, and its tasks
   POST   /api/chat/<id>/tools   {"allowed": [tools]}: the tools that may run without asking in a session
+  POST   /api/chat/<id>/name    {"name"}: what a session's called, or "" for after your first message in it
+  POST   /api/chat/<id>/mute    {"muted": bool}: whether a session notifies your devices
+  GET    /api/photos/<name>     a photo sent in a message
   POST   /api/approvals/<id>    {"allow": true | false}: answer a request for your OK, here or in Telegram
   POST   /api/presence          {"looking": bool}: whether you're looking at the page, so devices aren't notified
   GET    /api/push              the key a device needs for notifications; POST {"subscription"} turns them on
@@ -32,8 +37,9 @@ The page talks to Athena with JSON:
   POST   /api/tools/on-demand   {"tools": [names]}: the tools the model finds when it needs them, not in every prompt
   POST   /api/reconnect         read config.toml again and reconnect every MCP server
   GET    /api/tasks             what Athena does by itself, and what a new task can use
-  POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools"}
-  POST   /api/tasks/<id>        change one: {"title", "instructions", "schedule", "tools"}, or
+  POST   /api/tasks             add one: {"title", "instructions", "schedule", "tools", "session"}, where "session" is
+                                a session's id, or a name for a new one
+  POST   /api/tasks/<id>        change one: {"title", "instructions", "schedule", "tools", "session"}, or
                                 {"action": "run" | "pause" | "resume" | "stop"}
   POST   /api/watches           watch for something: {"what", "until": "YYYY-MM-DD" or null for no end}
   POST   /api/watches/<id>      change it, the same way; /api/watches/check checks on everything now
@@ -141,6 +147,9 @@ SIGN_IN_WINDOW = 600.0
 MODEL_CHECK_SECONDS = 60.0
 USED_DAYS = 30  # how far back the Tools tab counts each tool's use
 LOOKING_SECONDS = 40.0  # after the page last said you're looking at it, how long you're taken still to be
+SENDING = re.compile(r"/api/chat/\d+")  # a message in the chat, which can come with photos and files
+MAX_SENDING_BYTES = 40_000_000  # what they're sent as, base64, comes to: about 30 MB of them
+SENDING_SECONDS = 300.0  # to send them, on a slow connection
 
 
 # The API, as (method, path, handler): the first that matches a request answers it. A method of None
@@ -157,7 +166,11 @@ ROUTES = (
     ("POST", r"/api/chat/stop", "_stop_chat"),
     ("GET", r"/api/chat/(?P<session>\d+)", "_get_chat_session"),
     ("POST", r"/api/chat/(?P<session>\d+)", "_send"),
+    ("DELETE", r"/api/chat/(?P<session>\d+)", "_delete_session"),
     ("POST", r"/api/chat/(?P<session>\d+)/tools", "_allow_in_session"),
+    ("POST", r"/api/chat/(?P<session>\d+)/name", "_rename_session"),
+    ("POST", r"/api/chat/(?P<session>\d+)/mute", "_mute_session"),
+    ("GET", r"/api/photos/(?P<name>[0-9a-f]{32}\.[a-z]+)", "_get_photo"),
     ("POST", r"/api/approvals/(?P<which>[0-9a-f]+)", "_approve"),
     ("POST", r"/api/presence", "_presence"),
     ("GET", r"/api/push", "_get_push"),
@@ -272,6 +285,12 @@ class DashboardServer(Server):
         log.warning("Made a password for the dashboard. It's DASHBOARD_TOKEN in %s", self.s.config.env_path)
 
     # -- requests ---------------------------------------------------------------------------------
+
+    def body_limit(self, method: str, path: str, headers: dict[str, str]) -> tuple[int, float]:
+        """A message in the chat can come with photos and files, once you've signed in."""
+        if method == "POST" and SENDING.fullmatch(path) and self._signed_in(Request(method, path, {}, headers, b"")):
+            return MAX_SENDING_BYTES, SENDING_SECONDS
+        return super().body_limit(method, path, headers)
 
     async def handle(self, request: Request) -> Response:
         try:
@@ -495,10 +514,13 @@ class DashboardServer(Server):
             raise HTTPError(404, "There's no such session.") from None
 
     async def _send(self, request: Request, method: str, session: str) -> Response:
-        """{"text", "allow": [tools allowed without asking for this message]}: a command says what it did."""
+        """{"text", "allow": [tools allowed without asking for this message], "attachments": [photos and files]}: a
+        command says what it did."""
         body = _body(request)
         try:
-            said = await self.s.chat.send(int(session), body.get("text"), body.get("allow") or [])
+            said = await self.s.chat.send(
+                int(session), body.get("text"), body.get("allow") or [], body.get("attachments") or []
+            )
         except Busy as exc:
             raise HTTPError(409, str(exc)) from None
         except KeyError:
@@ -506,6 +528,37 @@ class DashboardServer(Server):
         except ValueError as exc:
             raise HTTPError(400, str(exc)) from None
         return _json({**self.s.chat.state(), "said": said})
+
+    async def _delete_session(self, request: Request, method: str, session: str) -> Response:
+        try:
+            await self.s.chat.delete(int(session))
+        except Busy as exc:
+            raise HTTPError(409, str(exc)) from None
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+        return _json(self.s.chat.state())
+
+    def _rename_session(self, request: Request, method: str, session: str) -> Response:
+        return self._change_session(session, lambda: self.s.chat.rename(int(session), _body(request).get("name")))
+
+    def _mute_session(self, request: Request, method: str, session: str) -> Response:
+        return self._change_session(session, lambda: self.s.chat.mute(int(session), _body(request).get("muted")))
+
+    def _change_session(self, session: str, change: Any) -> Response:
+        try:
+            change()
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        return _json(self.s.chat.session(int(session)))
+
+    def _get_photo(self, request: Request, method: str, name: str) -> Response:
+        photo = self.s.history.photos.load(name)
+        if photo is None:
+            raise HTTPError(404, "That photo isn't kept any more.")
+        # Named by what's in it, so it never changes: kept by your browser only, not anything in between.
+        return Response(photo.data, photo.mime, headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     def _allow_in_session(self, request: Request, method: str, session: str) -> Response:
         """{"allowed": [tools]}: what may run without asking in a session."""
@@ -558,7 +611,8 @@ class DashboardServer(Server):
             if not task and method == "GET":
                 return _json(self.tasks())
             if not task and method == "POST":
-                scheduler.add(*_task_fields(_body(request)), created_by="you")
+                body = _body(request)
+                scheduler.add(*_task_fields(body), created_by="you", session=self._task_session(body))
                 return _json(self.tasks())
             if not task.isdigit():
                 raise HTTPError(404, "There's no task like that.")
@@ -569,7 +623,7 @@ class DashboardServer(Server):
                 body = _body(request)
                 action = body.get("action")
                 if action is None:
-                    scheduler.change(int(task), *_task_fields(body))
+                    scheduler.change(int(task), *_task_fields(body), session=self._task_session(body))
                 elif action == "stop":
                     scheduler.stop_running()
                 elif action in ("run", "pause", "resume"):
@@ -580,6 +634,18 @@ class DashboardServer(Server):
         except ValueError as exc:
             raise HTTPError(400, str(exc)) from None
         raise HTTPError(405, "There's nothing like that here.")
+
+    def _task_session(self, body: dict[str, Any]) -> int | None:
+        """The session a task's to run in: {"session": its id, or a name for a new one}; None for the current one."""
+        session = body.get("session")
+        if isinstance(session, str):
+            fields = _task_fields(body)  # a new session for a task that won't do would be left empty
+            if not session.strip() or not fields[0].strip() or not fields[1].strip():
+                raise ValueError("A task needs a title and instructions, and a new session a name.")
+            return self.s.history.new_session(session, current=False).id
+        if session is not None and (isinstance(session, bool) or not isinstance(session, int)):
+            raise ValueError('Say which session it runs in: {"session": its id}, or a name for a new one.')
+        return session
 
     def _scheduler(self) -> Scheduler:
         if self.s.tasks is None:
@@ -868,9 +934,9 @@ class DashboardServer(Server):
         }
 
     def _last_message(self) -> dict[str, Any] | None:
-        """The newest message in your conversation, so the page can say when Athena's written."""
-        last, _ = self.s.history.messages(self.s.history.session.id, limit=1)
-        return {"id": last[0].id, "role": last[0].role} if last else None
+        """The newest message in any session, so the page can say when Athena's written."""
+        last = self.s.history.last_message()
+        return {"id": last[0], "role": last[1], "session": last[2]} if last else None
 
     def overview(self) -> dict[str, Any]:
         cfg, history = self.s.config, self.s.history
@@ -916,8 +982,15 @@ class DashboardServer(Server):
         scheduler = self.s.tasks
         assert scheduler is not None
         asks = sorted(t.name for t in self.s.tools.all() if t.needs_confirmation and t.name not in NEVER_UNASKED)
+        history, tasks = self.s.history, scheduler.store.all()
         return {
-            "tasks": [scheduler.describe(t) for t in scheduler.store.all()],
+            "tasks": [scheduler.describe(t) for t in tasks],
+            # Where they can run: your sessions, the one used last first, and those they're in.
+            "sessions": [
+                {"id": s.id, "title": s.title}
+                for s in history.sessions(also={t.session_id for t in tasks if t.session_id is not None})
+            ],
+            "current": history.session.id,
             "tools": asks,  # tools that ask first, which a task may be allowed to use without asking
             "examples": EXAMPLES,
             "quiet_minutes": scheduler.cfg.quiet_minutes,

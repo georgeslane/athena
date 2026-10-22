@@ -33,11 +33,11 @@ from telegram.ext import (
     filters,
 )
 
-from athena import commands, workspace
+from athena import commands, files, workspace
 from athena.app import Services
 from athena.commands import COMMANDS
 from athena.config import THINKING, ConfigError
-from athena.files import SENT, TEXT
+from athena.files import SENT
 from athena.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
 from athena.photos import MAX_BYTES, MAX_PER_MESSAGE, Photo, label, mime_of
 from athena.siri import VOICE_NOTE, SiriServer
@@ -260,9 +260,11 @@ class TelegramBot:
         summary: str | None = None,
         why: str = "",
         timeout: float | None = None,
+        session: int | None = None,
     ) -> bool:
         timeout = timeout or self.cfg.confirm_timeout_seconds
-        session = None if why else self.s.history.session.id  # your message's, or a task's
+        if session is None and not why:
+            session = self.s.history.session.id  # your message's: a task's says its own
         approval = self.s.approvals.open(tool, args, summary, timeout=timeout, why=why, session=session)
         key = approval.id
         # Show every argument: approving content you can't see isn't approval. Link previews
@@ -312,13 +314,24 @@ class TelegramBot:
 
     # -- reaching you when you haven't just asked something (channel.py) ----------------------
 
-    async def tell(self, text: str) -> None:
+    async def tell(self, text: str, *, session: int | None = None) -> None:
         assert self._bot is not None
         await self._send(self._bot, self.cfg.allowed_user_ids[0], text)
 
-    async def ask(self, tool: str, args: dict[str, Any], summary: str | None, *, why: str, timeout: float) -> bool:
+    async def ask(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        summary: str | None,
+        *,
+        why: str,
+        timeout: float,
+        session: int | None = None,
+    ) -> bool:
         assert self._bot is not None
-        return await self._confirm(self._bot, self.cfg.allowed_user_ids[0], tool, args, summary, why, timeout)
+        return await self._confirm(
+            self._bot, self.cfg.allowed_user_ids[0], tool, args, summary, why, timeout, session=session
+        )
 
     # -- handlers -----------------------------------------------------------------------------
 
@@ -356,26 +369,16 @@ class TelegramBot:
         assert update.effective_chat and update.message and update.message.document
         msg, chat_id, doc = update.message, update.effective_chat.id, update.message.document
         name = workspace.safe_name(doc.file_name or "file")
-        suffix = PurePosixPath(name).suffix.lower()
-        limit = min(self.s.config.workspace.max_read_mb, DOWNLOAD_MB) * 1024 * 1024
-        if not self.s.config.workspace.enabled:
-            problem = "Files are switched off, so I can't read that: switch them on in the dashboard's Tools tab."
-        elif suffix != ".pdf" and suffix not in TEXT:
-            problem = "I can read PDFs and text files, such as Markdown, CSV and JSON, but not that kind of file."
-        elif (doc.file_size or 0) > limit:
-            problem = f"That's over {limit // 1024 // 1024} MB, more than I can take."
-        else:
-            problem = None
-        if problem:
+        if problem := files.why_not(self.s.config, name, doc.file_size or 0, DOWNLOAD_MB):
             await self._send(ctx.bot, chat_id, problem)
             return
         data = bytes(await (await ctx.bot.get_file(doc.file_id)).download_as_bytearray())
         try:
-            kept = workspace.save_new(self._workspace, workspace.INBOX, name, data)
+            kept = files.receive(self.s.config, name, data)
         except ToolError as exc:
             await self._send(ctx.bot, chat_id, f"I couldn't keep that file: {exc}")
             return
-        text = f"[File: {kept}] {(msg.caption or '').strip()}".strip()  # read_file reads it
+        text = f"{kept} {(msg.caption or '').strip()}".strip()  # read_file reads it
         await self._deliver(ctx.bot, chat_id, await self._reply(ctx.bot, chat_id, text))
 
     async def _album_done(self, bot: Bot, group: str) -> None:
