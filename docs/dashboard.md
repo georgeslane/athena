@@ -21,7 +21,7 @@ sudo tailscale serve --bg --https=443 localhost:8092
 
 Then open `https://<the Pi's tailnet name>/`, such as `https://pi.tail1234.ts.net/`, and sign in with the password from `athena setup`. It's `DASHBOARD_TOKEN` in `~/.athena/.env`. If HTTPS isn't on for your tailnet yet, the command gives a link to turn it on.
 
-You stay signed in for 90 days. To change the password, run `athena setup` and choose the dashboard, then restart Athena. That signs every device out.
+You stay signed in for 90 days. To change the password, run `athena setup` and choose the dashboard: when you're done, it offers to restart Athena, which reads the password when it starts. That signs every device out. After 10 wrong passwords in 10 minutes, it waits a few minutes before taking another, or until Athena restarts.
 
 ## The status board
 
