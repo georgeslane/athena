@@ -48,6 +48,10 @@ const ICONS = {
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5",
   close: "M6 6l12 12M18 6L6 18",
   chevron_down: "M6 9l6 6 6-6",
+  crown: "M4 18h16M5 18L4 8l5 4 3-7 3 7 5-4-1 10",
+  bolt: "M13 3L5 14h6l-1 7 8-11h-6z",
+  copy: "M9 9h10v10H9zM5 15V5h10",
+  download: "M12 4v11M7 10l5 5 5-5M5 20h14",
 };
 
 export function icon(name, cls) {
@@ -62,6 +66,7 @@ export function icon(name, cls) {
 }
 
 export const number = (n) => Number(n || 0).toLocaleString("en-GB");
+export const bytes = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} bytes`);
 
 // A tool's name, which a narrow screen can break after an underscore rather than mid-word.
 export const breakable = (name) => name.split(/(?<=_)/).flatMap((part, i) => (i ? [h("wbr"), part] : [part]));
@@ -194,4 +199,14 @@ export function toast(message, error = false) {
 
 
 // Dates, as the tabs show them.
+// A file you've chosen, as base64, to send as JSON: {"name", "data"}.
+export function base64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(",") + 1));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 export const day = (date) => (date ? clock(Date.parse(date) / 1000, { day: "numeric", month: "short", year: "numeric" }) : "");

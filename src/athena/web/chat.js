@@ -1,10 +1,11 @@
 // An agent's chat, on the Agents tab (agents.js): talk to it, and see what its DAG's tasks with alert on, and the
-// summary of each run, said. Sending to an agent makes it the main one. One message at a time: while Athena's
-// answering you, wherever you asked, nothing more can be sent. A message sent while its DAG runs is answered once
-// the task that's running has finished. Requests for your OK, from here or anywhere, can be answered here.
-// Messages can come with photos and files, and commands work as in Telegram.
+// summary of each run, said. The master agent's is the one Telegram, Siri and the terminal talk to, and the other
+// agents' news is told there too. One message at a time: while Athena's answering you, wherever you asked, nothing
+// more can be sent. A message sent while its DAG runs is answered once the task that's running has finished.
+// Requests for your OK, from here or anywhere, can be answered here. Messages can come with photos and files, and
+// commands work as in Telegram.
 
-import { call, clock, h, icon, isoDay, now, plural, state, toast } from "./core.js";
+import { base64, call, clock, h, icon, isoDay, now, plural, state, toast } from "./core.js";
 import { markdown } from "./md.js";
 import { canTurnOn, turnOnHere } from "./notifications.js";
 
@@ -12,7 +13,7 @@ const MAX_CHARS = 4000; // as chat.py takes
 const MAX_SIDE = 2048; // a photo's longest side, as it's sent: larger ones are made smaller first
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // as chat.py takes
 const RUN_SAID = /^\(DAG run #(\d+): (.+)\)$/; // what a run said in the chat, on your side (dags/runner.py)
-const TASK_RAN = /^\(Your task “(.+?)”\)\s*([\s\S]*)$/; // a task's run, from before DAGs
+const RELAYED = /^\(From your agent “(.+)”, its DAG run #(\d+): (.+)\)$/; // another agent's news, to the master
 const PHOTOS = /^\[(?:Photo|\d+ photos)\]\s*/; // how a message notes its photos (photos.label)
 const FILE = /^\[File: ([^\]]+)\]\s*/; // how a message notes a file sent with it (files.receive)
 
@@ -31,7 +32,7 @@ const chat_ = {
 const agents = () => state.agents;
 const data = () => state.agents.data;
 const shown = () => state.agents.id;
-const isMain = (id) => data() && id === data().current;
+const isMaster = (id) => data() && id === data().master;
 const touch = () => window.matchMedia("(hover: none)").matches;
 
 // An agent's messages and settings, the newest page and what was loaded before it: false if there's no such agent.
@@ -165,7 +166,7 @@ function renderLog(id) {
   if (replying && !kept(known, replying)) items.push(h("li.msg.mine.pending", {}, ...yours(replying.text, replying.photos), h("span.msg-meta", { text: "Sent" })));
   const elsewhere = d.elsewhere && d.elsewhere.session === id ? d.elsewhere : null;
   if (elsewhere) items.push(h("li.msg-notice", {}, h("span", { text: `Answering your message from ${elsewhere.channel || "elsewhere"}${elsewhere.text ? `: “${elsewhere.text}”` : ""}` })));
-  for (const a of d.approvals.filter((a) => a.session === id || (a.session === null && isMain(id)))) items.push(approvalCard(a));
+  for (const a of d.approvals.filter((a) => a.session === id || (a.session === null && isMaster(id)))) items.push(approvalCard(a));
   if (replying || elsewhere) items.push(h("li.msg.theirs.typing", { "aria-label": "Athena is answering" }, h("span.dots", {}, h("i"), h("i"), h("i")), h("span.typing-step", { text: d.step && d.step !== "Thinking" ? d.step : "Thinking" })));
   if (!items.length) {
     items.push(
@@ -173,7 +174,11 @@ function renderLog(id) {
         "li.chat-empty",
         {},
         h("p", { text: "Nothing said here yet." }),
-        h("p.hint", { text: "Tell this agent what you're after, give it guidance, and a DAG to run by itself. Type / for commands." })
+        h("p.hint", {
+          text: isMaster(id)
+            ? "This is the master agent: Telegram, Siri and the terminal talk to it, and it hears your other agents' news, so ask it anything about them. Type / for commands."
+            : "Tell this agent what you're after, give it guidance, and a DAG to run by itself. Type / for commands.",
+        })
       )
     );
   }
@@ -195,13 +200,13 @@ function message(m, id) {
     const what = run[2] === "summary" ? `Run #${run[1]}: how it went` : `Run #${run[1]}: ${run[2].replace(/^task /, "")}`;
     return h("li.msg-task", {}, h("a.msg-task-link", { href: `#agents/${id}/runs` }, icon("clock"), h("span", { text: what }), h("span.msg-meta", { text: time })));
   }
-  const ran = m.role === "user" && m.channel === "Task" && m.text.match(TASK_RAN);
-  if (ran) {
-    return h(
-      "li.msg-task",
-      {},
-      h("details", {}, h("summary", {}, icon("clock"), h("span", { text: `Your task “${ran[1]}” ran` }), h("span.msg-meta", { text: time })), h("p", { text: ran[2] }))
-    );
+  const relayed = m.role === "user" && m.channel === "Task" && m.text.match(RELAYED);
+  if (relayed) {
+    // Another agent's news, as the master agent's told: to that agent's runs, if it's still there.
+    const from = data().sessions.find((s) => s.title === relayed[1]);
+    const what = `${relayed[1]} · run #${relayed[2]}${relayed[3] === "summary" ? "" : `: ${relayed[3].replace(/^task /, "")}`}`;
+    const label = [icon("clock"), h("span", { text: what }), h("span.msg-meta", { text: time })];
+    return h("li.msg-task", {}, from ? h("a.msg-task-link", { href: `#agents/${from.id}/runs` }, ...label) : h("span.msg-task-link", {}, ...label));
   }
   const mine = m.role === "user";
   const meta = [time];
@@ -290,8 +295,7 @@ function renderComposer(id) {
   const stopping = Boolean(d.replying);
   let notice = "";
   if (d.elsewhere) notice = `${state.overview ? state.overview.assistant.name : "Athena"}'s answering your message from ${d.elsewhere.channel || "elsewhere"}. You can send once it's finished.`;
-  else if (d.busy && !isMain(id)) notice = "Athena's answering in your main agent. You can write to this one once it's finished.";
-  else if (!isMain(id)) notice = "Sending a message makes this the main agent, which Telegram, Siri and the terminal talk to.";
+  else if (d.busy && !(d.replying && d.replying.session === id)) notice = "Athena's answering you in another agent. You can write here once it's finished.";
   e().notice.textContent = notice;
   e().notice.hidden = !notice;
   const once = [...agents().once];
@@ -353,7 +357,6 @@ async function send(event, text) {
       agents().once.clear();
       chat_.attachments = [];
     }
-    if (/^\/(new|session|reset)\b/.test(text) && said.current !== id) location.hash = `#agents/${said.current}`; // the new one
     chat_.scrollDown = true;
     await loadPage(id);
     agents().render();
@@ -502,15 +505,6 @@ async function asPhoto(file) {
   bitmap.close();
   const url = canvas.toDataURL("image/jpeg", 0.85);
   return { name: `${file.name.replace(/\.[^.]*$/, "") || "photo"}.jpg`, kind: "photo", data: url.slice(url.indexOf(",") + 1), preview: url };
-}
-
-function base64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(",") + 1));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
 }
 
 function pasted(event) {

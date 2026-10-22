@@ -8,7 +8,6 @@ import { renderOverview, renderStatus } from "./status.js";
 import { loadTools } from "./tools.js";
 import { loadMemory } from "./memory.js";
 import { loadSkills } from "./skills.js";
-import { loadWatching } from "./watching.js";
 import { followAgents, loadAgents } from "./agents.js";
 import { setUpNotifications } from "./notifications.js";
 
@@ -50,7 +49,6 @@ export async function signOut() {
 async function start() {
   document.getElementById("sign-in-form").addEventListener("submit", signIn);
   window.addEventListener("hashchange", showTab);
-  setUpMenu();
   followViewport();
   document.addEventListener("visibilitychange", () => !document.hidden && appShown() && refresh());
   for (const [target, event] of [[document, "visibilitychange"], [window, "focus"], [window, "blur"]]) {
@@ -83,13 +81,12 @@ function refresh() {
   loadOverview().catch(() => {});
   if (location.hash === "#tools") loadTools().catch(() => {});
   if (location.hash === "#memory") loadMemory().catch(() => {});
-  if (location.hash === "#watching") loadWatching().catch(() => {});
   if (location.hash.startsWith("#agents")) loadAgents().catch(() => {});
   if (location.hash === "#skills") loadSkills().catch(() => {});
   if (!state.watching) watchStatus();
 }
 
-const TABS = ["status", "agents", "watching", "memory", "skills", "tools"];
+const TABS = ["status", "agents", "memory", "skills", "tools"];
 
 function showTab() {
   if (location.hash.startsWith("#chat")) {
@@ -104,63 +101,17 @@ function showTab() {
     else link.removeAttribute("aria-current");
   }
   for (const panel of document.querySelectorAll(".panel")) panel.hidden = panel.dataset.panel !== tab;
-  document.getElementById("brand-where").textContent = document.querySelector(`.tab[data-tab="${tab}"]`).title;
-  menu_.close();
   if (tab === "agents") {
     loadAgents().catch((e) => toast(e.message, true));
     if (was && was.dataset.tab === "agents") return; // another agent, view or the list of them: stay where you are
   }
   if (tab === "tools") loadTools().catch((e) => toast(e.message, true));
   if (tab === "memory") loadMemory().catch((e) => toast(e.message, true));
-  if (tab === "watching") loadWatching().catch((e) => toast(e.message, true));
   if (tab === "skills") loadSkills().catch((e) => toast(e.message, true));
   window.scrollTo(0, 0);
 }
 
-// -- the menu, on a phone -----------------------------------------------------------------------------------
-
-const menu_ = { close: () => {} };
-
-// On a phone the tabs are a menu, which the shield in the corner opens and closes. Elsewhere it's a link to the
-// Status tab.
-function setUpMenu() {
-  const top = document.querySelector(".top");
-  const brand = document.getElementById("brand");
-  const backdrop = document.getElementById("menu-backdrop");
-  const phone = window.matchMedia("(max-width: 719px)");
-  const open = (yes) => {
-    top.dataset.menu = yes ? "open" : "";
-    backdrop.hidden = !yes;
-    if (phone.matches) brand.setAttribute("aria-expanded", String(yes));
-    else brand.removeAttribute("aria-expanded");
-    brand.setAttribute("aria-label", phone.matches ? "Sections" : "Status");
-    if (yes) (document.querySelector(".tab[aria-current]") || document.querySelector(".tab")).focus();
-  };
-  brand.addEventListener("click", (event) => {
-    if (!phone.matches) return;
-    event.preventDefault();
-    open(top.dataset.menu !== "open");
-  });
-  backdrop.addEventListener("click", () => open(false));
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && top.dataset.menu === "open") {
-      open(false);
-      brand.focus();
-    }
-  });
-  document.getElementById("tabs").addEventListener("click", () => open(false));
-  phone.addEventListener("change", () => open(false));
-  menu_.close = () => open(false);
-  open(false);
-  // The shield says how many things are waiting for you, as the tabs in the menu do.
-  const count = () => {
-    const n = [...document.querySelectorAll(".tab .tab-count")].reduce((sum, el) => sum + (parseInt(el.textContent, 10) || 0), 0);
-    const badge = document.getElementById("brand-count");
-    badge.hidden = !n;
-    badge.textContent = n > 9 ? "9+" : String(n);
-  };
-  new MutationObserver(count).observe(document.getElementById("tabs"), { childList: true, subtree: true, characterData: true });
-}
+// -- the page's size ---------------------------------------------------------------------------------------
 
 // An agent fills the screen, less the header, and less the keyboard while it's up on a phone.
 function followViewport() {
@@ -216,10 +167,7 @@ async function watchStatus() {
       const was = state.status && state.status.status.state;
       setStatus(data);
       setOffline(false);
-      if (version && was !== "idle" && data.status.state === "idle") {
-        loadOverview().catch(() => {}); // new numbers
-        if (location.hash === "#watching") loadWatching().catch(() => {}); // and what a check found
-      }
+      if (version && was !== "idle" && data.status.state === "idle") loadOverview().catch(() => {}); // new numbers
       version = data.version;
     } catch (e) {
       if (controller.signal.aborted || e.status === 401) break;

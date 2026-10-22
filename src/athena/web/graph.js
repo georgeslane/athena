@@ -4,21 +4,37 @@
 // Each task goes in a layer one below the lowest of those it comes after (the longest path to it), and the tasks in
 // each layer are ordered by where those they're joined to are (the barycentre, sweeping down then up a few times),
 // so few edges cross. A DAG has at most 30 tasks, so this takes no time at all.
+//
+// A task that runs for each item of a list is drawn as a stack, and the edge from the list says "each"; one that
+// runs only if a yes or no said so has an edge that says "yes" or "no". A task group is a box round its tasks, where
+// that doesn't take in others, and a tag on each of them where it would. Tasks that run for each item of what
+// started the run come after a node that stands for it. Only the edges to what a task comes after directly are
+// drawn: not one to a task it comes after through another, such as the list a group's later tasks run for.
 
 import { h, icon } from "./core.js";
 
-const NODE_W = 172;
-const NODE_H = 54;
-const GAP_X = 26;
-const GAP_Y = 44;
+let NODE_W = 176; // narrower on a phone (graph())
+const NODE_H = 56;
+let GAP_X = 28;
+const GAP_Y = 48;
+const PAD = 8; // round a group's tasks
 const SWEEPS = 4;
 const SVG = "http://www.w3.org/2000/svg";
+const TRIGGER = "trigger"; // for_each=trigger, as the server says it
 let drawn = 0; // each drawing's arrowhead has an id of its own
 
-// tasks: [{id, prompt, upstream, triggered, alert}], in the order the server gives (each after its upstream).
-// end: [{id, about}]. run: {task id: {state, count, failed}} for a run's view. selected: a task's id.
+// tasks: [{id, prompt, upstream, returns, for_each, run_if, run_when, group, alert, outlets}], in the order the
+// server gives (each after its upstream). end: [{id, about}]. run: {task id: {state, count, states}} for a run's
+// view. selected: a task's id.
 export function graph({ tasks, end, run = null, selected = null, onSelect = null }) {
-  const { positions, width, height, endY } = layout(tasks);
+  [NODE_W, GAP_X] = window.matchMedia("(max-width: 479px)").matches ? [136, 14] : [176, 28];
+  const started = tasks.some((t) => t.for_each === TRIGGER);
+  const drawnTasks = direct(
+    started
+      ? [{ id: TRIGGER, synthetic: true, upstream: [] }, ...tasks.map((t) => (t.for_each === TRIGGER ? { ...t, upstream: [TRIGGER, ...t.upstream] } : t))]
+      : tasks
+  );
+  const { positions, width, height, endY } = layout(drawnTasks);
   const ends = Boolean(end && end.length);
   const box = h("div.graph", { style: { width: `${width}px`, height: `${ends ? endY : height}px` } });
   const svg = document.createElementNS(SVG, "svg");
@@ -35,24 +51,41 @@ export function graph({ tasks, end, run = null, selected = null, onSelect = null
   marker.append(tip);
   defs.append(marker);
   svg.append(defs);
-  const sinks = tasks.filter((t) => !tasks.some((other) => other.upstream.includes(t.id)));
-  for (const task of tasks) {
+  const { boxes, tagged } = groups(tasks, positions);
+  box.append(...boxes);
+  const labels = [];
+  for (const task of drawnTasks) {
     for (const up of task.upstream) {
       const skipped = run && ["skipped", "upstream_failed"].includes((run[task.id] || {}).state);
-      svg.append(edge(positions.get(up), positions.get(task.id), skipped, arrow));
+      const kind = up === task.run_if ? (task.run_when ? "yes" : "no") : up === task.for_each ? "each" : "";
+      const [path, middle] = edge(positions.get(up), positions.get(task.id), skipped || kind === "no" || kind === "yes", arrow);
+      svg.append(path);
+      if (kind) labels.push(h(`span.graph-edge-label.${kind}`, { text: kind, style: { left: `${middle.x}px`, top: `${middle.y}px` } }));
     }
   }
   if (ends) {
+    const sinks = drawnTasks.filter((t) => !drawnTasks.some((other) => other.upstream.includes(t.id)));
     const target = { x: width / 2 - NODE_W / 2, y: endY };
-    for (const sink of sinks) svg.append(edge(positions.get(sink.id), target, false, arrow));
+    for (const sink of sinks) svg.append(edge(positions.get(sink.id), target, false, arrow)[0]);
   }
-  box.append(svg);
-  for (const task of tasks) {
+  box.append(svg, ...labels);
+  for (const task of drawnTasks) {
     const p = positions.get(task.id);
-    box.append(node(task, p, run && run[task.id], selected === task.id, onSelect));
+    box.append(task.synthetic ? startNode(p) : node(task, p, run && run[task.id], selected === task.id, onSelect, tagged.has(task.id)));
   }
   // The tasks every DAG ends with, in a row below, as wide as there's room for: the arrows above end at it.
   return h("div.graph-scroll", {}, box, ends ? endRow(end, run, selected, onSelect) : null);
+}
+
+// The tasks, each with only what it comes after directly: not a task it comes after through another of those.
+function direct(tasks) {
+  const before = new Map(); // id -> every task it comes after, however far back
+  for (const task of tasks) {
+    const all = new Set(task.upstream);
+    for (const up of task.upstream) for (const earlier of before.get(up) || []) all.add(earlier);
+    before.set(task.id, all);
+  }
+  return tasks.map((task) => ({ ...task, upstream: task.upstream.filter((up) => !task.upstream.some((other) => other !== up && before.get(other).has(up))) }));
 }
 
 // Where each task goes: {positions: id -> {x, y}, width, height, endY}.
@@ -87,13 +120,13 @@ export function layout(tasks) {
     }
   }
   const widest = Math.max(1, ...layers.map((layer) => layer.length));
-  const width = Math.max(widest * NODE_W + (widest - 1) * GAP_X, NODE_W * 1.6);
+  const width = Math.max(widest * NODE_W + (widest - 1) * GAP_X + 2 * PAD, NODE_W * 1.6);
   const positions = new Map();
   layers.forEach((layer, l) => {
     const span = layer.length * NODE_W + (layer.length - 1) * GAP_X;
-    layer.forEach((id, i) => positions.set(id, { x: (width - span) / 2 + i * (NODE_W + GAP_X), y: l * (NODE_H + GAP_Y) }));
+    layer.forEach((id, i) => positions.set(id, { x: (width - span) / 2 + i * (NODE_W + GAP_X), y: PAD * 2 + l * (NODE_H + GAP_Y) }));
   });
-  const height = layers.length ? layers.length * NODE_H + (layers.length - 1) * GAP_Y : 0;
+  const height = layers.length ? PAD * 2 + layers.length * NODE_H + (layers.length - 1) * GAP_Y + PAD : 0;
   return { positions, width, height, endY: height + GAP_Y };
 }
 
@@ -107,23 +140,61 @@ function edge(from, to, faint, arrow) {
   path.setAttribute("d", `M${x1} ${y1} C${x1} ${y1 + bend}, ${x2} ${y2 - bend}, ${x2} ${y2}`);
   path.setAttribute("marker-end", `url(#${arrow})`);
   if (faint) path.setAttribute("class", "faint");
-  return path;
+  return [path, { x: (x1 + x2) / 2, y: (y1 + y2) / 2 }];
 }
 
-function node(task, p, went, selected, onSelect) {
+// Each task group, as a box round its tasks, if one wouldn't take in another task; otherwise its tasks are tagged.
+// Returns {boxes, tagged: the ids of the tasks tagged}.
+function groups(tasks, positions) {
+  const named = new Map();
+  for (const t of tasks) if (t.group) (named.get(t.group) || named.set(t.group, []).get(t.group)).push(t);
+  const boxes = [];
+  const tagged = new Set();
+  for (const [name, members] of named) {
+    const at = members.map((t) => positions.get(t.id));
+    const left = Math.min(...at.map((p) => p.x)) - PAD;
+    const top = Math.min(...at.map((p) => p.y)) - PAD * 2;
+    const right = Math.max(...at.map((p) => p.x + NODE_W)) + PAD;
+    const bottom = Math.max(...at.map((p) => p.y + NODE_H)) + PAD;
+    const inside = tasks.some((t) => t.group !== name && positions.has(t.id) && (({ x, y }) => x < right && x + NODE_W > left && y < bottom && y + NODE_H > top)(positions.get(t.id)));
+    if (inside) {
+      for (const t of members) tagged.add(t.id);
+      continue;
+    }
+    boxes.push(h("div.graph-group", { style: { left: `${left}px`, top: `${top}px`, width: `${right - left}px`, height: `${bottom - top}px` } }, h("span.graph-group-label", { text: name })));
+  }
+  return { boxes, tagged };
+}
+
+function startNode(p) {
+  return h(
+    "div.graph-node.graph-start",
+    { style: { left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, height: `${NODE_H}px` }, title: "The items that came with what started the run: for_each=trigger" },
+    h("span.graph-node-head", {}, icon("bolt"), h("code", { text: "trigger" })),
+    h("span.graph-node-text", { text: "What started the run" })
+  );
+}
+
+function node(task, p, went, selected, onSelect, tagged) {
   const marks = [];
-  if (task.triggered) marks.push(h("span.graph-mark", { title: "Runs once for each time a task before it triggers it" }, went && went.count ? `×${went.count}` : "×n"));
+  if (tagged) marks.push(h("span.graph-mark", { title: `In the task group ${task.group}`, text: task.group }));
+  if (task.for_each) marks.push(h("span.graph-mark", { title: "Runs once for each item" }, went && went.count ? `×${went.count}` : "×n"));
+  if (task.returns === "list") marks.push(h("span.graph-mark", { title: "Returns a list", text: "list" }));
+  if (task.returns === "bool") marks.push(h("span.graph-mark", { title: "Returns yes or no", text: "y/n" }));
   if (task.alert) marks.push(h("span.graph-mark", { title: "Tells you what it found" }, icon("bell")));
+  if (task.outlets && task.outlets.length) marks.push(h("span.graph-mark", { title: `Starts ${task.outlets.join(", ")} with what it finds` }, icon("send")));
   const state = went ? went.state : "";
+  const how = went && went.states ? ` (${went.states})` : "";
   return h(
     onSelect ? "button.graph-node" : "div.graph-node",
     {
       type: onSelect ? "button" : null,
       style: { left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, height: `${NODE_H}px` },
       "data-state": state || null,
+      "data-each": task.for_each ? "" : null,
       "aria-pressed": onSelect ? String(selected) : null,
-      "aria-label": `${task.id}${state ? `: ${state.replace("_", " ")}` : ""}`,
-      title: task.prompt,
+      "aria-label": `${task.id}${state ? `: ${state.replace("_", " ")}${how}` : ""}`,
+      title: `${task.prompt}${how ? `\n${how.slice(2, -1)}` : ""}`,
       onclick: onSelect ? () => onSelect(task.id) : null,
     },
     h("span.graph-node-head", {}, h("code", { text: task.id }), ...marks),

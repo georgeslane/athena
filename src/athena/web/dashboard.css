@@ -260,46 +260,18 @@ button, input, select, textarea { font: inherit; color: inherit; }
 @media (min-width: 1152px) { .app > .banner { margin-left: auto; margin-right: auto; } }
 .banner.info { background: color-mix(in srgb, var(--working) 10%, var(--surface)); border-color: color-mix(in srgb, var(--working) 35%, var(--surface)); }
 
-/* Phones: the tabs are a menu, which the shield in the corner opens. It says which tab you're on, and the number
-   of things waiting for you. */
-.brand-where, .brand-chevron, .brand-count { display: none; }
+/* Phones: the tabs are a row of their own, below the shield, each its icon above its name. */
 @media (max-width: 719px) {
-  .top-inner { position: relative; padding-top: 8px; padding-bottom: 7px; }
-  .brand { padding: 2px 8px 2px 0; border-radius: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-  .top .wordmark { display: none; }
-  .brand-where { display: block; font-size: 18px; font-weight: 650; }
-  .brand-chevron { display: block; width: 18px; height: 18px; margin-left: -4px; fill: none; stroke: var(--muted); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s; }
-  .top[data-menu="open"] .brand-chevron { transform: rotate(180deg); }
-  .brand-count:not([hidden]) { display: inline-block; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--approval); color: var(--on-accent); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
-  .top[data-menu="open"] .brand-count { visibility: hidden; }
-  .tabs {
-    display: none;
-    position: absolute;
-    top: calc(100% + 2px);
-    left: max(var(--gutter), env(safe-area-inset-left));
-    z-index: 30;
-    width: min(300px, calc(100vw - 2 * var(--gutter)));
-    max-height: calc(100dvh - 90px);
-    overflow-y: auto;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 6px;
-    border-radius: 16px;
-    background: var(--surface);
-    box-shadow: 0 14px 40px rgb(40 25 10 / 22%), var(--shadow);
-  }
-  .top[data-menu="open"] .tabs { display: flex; }
-  .tab { gap: 12px; padding: 11px 12px; font-size: 16px; }
-  .tab svg { width: 20px; height: 20px; }
-  .tab .tab-count { margin-left: auto; }
-  .tab[aria-current="page"] { background: var(--surface-2); box-shadow: none; color: var(--accent); }
+  .top-inner { flex-wrap: wrap; row-gap: 8px; padding-top: 8px; padding-bottom: 8px; }
   .top .pill { margin-left: auto; }
-  .menu-backdrop:not([hidden]) { position: fixed; inset: 0; z-index: 9; background: rgb(20 12 4 / 22%); }
+  .tabs { order: 3; flex: 1 0 100%; margin: 0; padding: 3px; }
+  .tab { flex: 1 1 0; min-width: 0; flex-direction: column; justify-content: center; gap: 3px; padding: 6px 2px 5px; font-size: 11.5px; }
+  .tab > span:not(.tab-count) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab svg { width: 20px; height: 20px; }
+  .tab .tab-count { position: absolute; top: 1px; left: calc(50% + 7px); }
 }
-@media (min-width: 720px) { .menu-backdrop { display: none; } }
 /* Tablets: the tabs as icons, with each one's name when you point at it. */
-@media (min-width: 720px) and (max-width: 1099px) {
+@media (min-width: 720px) and (max-width: 879px) {
   .tab > span:not(.tab-count) { display: none; }
   .tab { padding: 7px 11px; }
   .tab .tab-count { position: absolute; top: -4px; right: -4px; }
@@ -618,6 +590,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   box-shadow: 0 20px 60px rgb(0 0 0 / 35%);
 }
 .dialog::backdrop { background: rgb(14 11 8 / 55%); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+.dialog:has(.reference-dialog) { width: min(calc(100vw - 2 * var(--gutter)), 780px); }
 .dialog h2 { font-size: 19px; margin-bottom: 10px; }
 .dialog p { margin-bottom: 12px; font-size: 14.5px; }
 .dialog ul { margin: 0 0 12px; padding-left: 20px; font-size: 14.5px; }
@@ -709,13 +682,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .task-when { font-size: 13px; color: var(--muted); margin: 0; }
 .task-instructions { font-size: 14px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .task-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.task-last summary { font-size: 13px; color: var(--muted); cursor: pointer; }
 .task > *, .task-last > *, .steps > *, .step-list > *, .step details > * { min-width: 0; } /* a long step mustn't widen the card */
-.check-last { margin-bottom: 4px; }
-.check-last .step summary, .check-last .step-io pre, .check-last .task-said { background: var(--surface-2); }
-.until { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-.until input[type="date"] { width: auto; min-height: 40px; }
-.until input:disabled { opacity: 0.5; }
 
 /* Activity: what Athena did, by day, newest first, each opening to its steps. */
 .now-more { display: inline-block; margin-top: 8px; font-size: 13px; font-weight: 600; color: var(--accent); text-decoration: none; }
@@ -873,6 +840,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .session[data-unread="true"] .session-title { font-weight: 750; }
 .session-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--muted); }
 .session-meta .current { color: var(--idle); font-weight: 650; }
+/* The master agent, always first: Telegram, Siri and the terminal talk to it. */
+.session[data-master] { margin-bottom: 6px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.master-mark { display: inline-flex; flex: none; }
+.master-mark svg { width: 15px; height: 15px; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
 
 .chat-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
 .chat-heading { flex: 1; min-width: 0; }
@@ -1022,14 +993,40 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 
 /* An agent's DAG (dag.js): when it runs, what's proposed, its file and how it works. */
 .dag-view, .runs-view { display: grid; gap: 14px; align-content: start; min-width: 0; }
-.dag-view > *, .runs-view > *, .dag-layout > *, .run-detail > * { min-width: 0; } /* long lines scroll in their own box */
+.dag-view > *, .runs-view > *, .run-detail > * { min-width: 0; } /* long lines scroll in their own box */
 .dag-when { font-weight: 600; }
 .dag-last { font-size: 13.5px; }
-.dag-layout { display: grid; gap: 14px; align-items: start; }
-@media (min-width: 1180px) {
-  .dag-layout { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); }
-  .dag-graph { position: sticky; top: 0; }
+/* What starts it: each trigger, where it comes from and the address to send it to; and what its outlets start. */
+.dag-triggers { display: grid; gap: 8px; margin: 12px 0 0; padding: 12px 0 0; list-style: none; border-top: 1px solid var(--border); }
+.dag-trigger { display: flex; align-items: flex-start; gap: 10px; min-width: 0; font-size: 14px; }
+.dag-trigger > svg { flex: none; width: 16px; height: 16px; margin-top: 2px; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.dag-trigger.outlet > svg { stroke: var(--muted); }
+.dag-trigger-body { display: grid; gap: 4px; min-width: 0; }
+.dag-trigger code { overflow-wrap: anywhere; }
+.hook { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.hook-method { flex: none; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
+.hook-url { min-width: 0; padding: 2px 7px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; }
+.hook .copy svg { width: 15px; height: 15px; }
+.how-to-call { margin-top: 10px; font-size: 14px; }
+.how-to-call summary { color: var(--muted); cursor: pointer; }
+.dag-editor .card-head .actions { margin-left: auto; }
+.reference-dialog { display: grid; gap: 6px; max-width: 720px; }
+.reference-dialog p { font-size: 14px; }
+dl.reference { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 6px 0; font-size: 14px; }
+dl.reference dt { padding-top: 1px; }
+dl.reference dd { margin: 0; color: var(--muted); }
+@media (max-width: 559px) {
+  dl.reference { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  dl.reference dd { margin-bottom: 8px; }
 }
+/* The files that come with an agent's guidance. */
+.files-card.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.file-list { display: grid; gap: 4px; margin: 10px 0 0; padding: 0; list-style: none; }
+.file-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border-radius: 10px; background: var(--surface-2); font-size: 14px; }
+.file-row > svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 2; }
+.file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-remove { margin-left: auto; }
+.run-items { margin: 6px 0 0; padding-left: 22px; font-size: 13.5px; overflow-wrap: anywhere; }
 .code { display: flex; min-height: 300px; max-height: 62vh; margin-top: 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); overflow: hidden; }
 .code:focus-within { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); border-color: var(--accent); }
 .code-lines { flex: none; margin: 0; padding: 10px 8px 10px 10px; overflow: hidden; color: var(--faint); font: 13px/1.55 var(--font-mono); text-align: right; user-select: none; border-right: 1px solid var(--border); background: var(--surface-2); }
@@ -1081,6 +1078,17 @@ button.graph-node:hover { border-color: var(--divider); }
 .graph-chip { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); font: 12px var(--font); white-space: nowrap; }
 button.graph-chip { cursor: pointer; }
 .graph-chip[aria-pressed="true"] { outline: 2px solid var(--accent); }
+/* A task that runs for each item is a stack of them; a group is a box round its tasks; an edge says why it's
+   taken; and what started the run, for tasks that run for each of its items, is a node of its own. */
+.graph-node[data-each] { overflow: visible; box-shadow: 4px 4px 0 -1px var(--surface), 4px 4px 0 0 var(--border), 8px 8px 0 -1px var(--surface), 8px 8px 0 0 var(--border); }
+.graph-node[data-each] > * { overflow: hidden; }
+.graph-start { border-style: dashed; background: var(--surface-2); box-shadow: none; }
+.graph-start svg { width: 13px; height: 13px; fill: none; stroke: var(--accent); stroke-width: 2; }
+.graph-group { position: absolute; border: 1px dashed var(--divider); border-radius: 16px; background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.graph-group-label { position: absolute; top: -9px; left: 12px; padding: 0 6px; background: var(--surface); color: var(--muted); font: 600 11px var(--font-mono); }
+.graph-edge-label { position: absolute; transform: translate(-50%, -50%); padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 650; line-height: 17px; pointer-events: none; }
+.graph-edge-label.yes { color: var(--idle); border-color: color-mix(in srgb, var(--idle) 45%, var(--border)); }
+.graph-edge-label.no { color: var(--failed); border-color: color-mix(in srgb, var(--failed) 40%, var(--border)); }
 
 /* An agent's runs (runs.js). */
 @media (min-width: 1180px) {
@@ -1111,9 +1119,6 @@ button.graph-chip { cursor: pointer; }
 .run-task summary code { font-weight: 700; }
 
 /* The Watching tab. */
-.watch-key { flex: none; padding: 1px 7px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; }
-.watch-starts { display: flex; align-items: center; gap: 6px; color: var(--working); font-size: 13.5px; }
-.watch-starts svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
 
 @media (max-width: 719px) {
   .agents[data-agent-view]:not([data-agent-view="chat"]) .agent-view { padding: 10px; }

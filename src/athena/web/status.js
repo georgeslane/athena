@@ -129,7 +129,7 @@ export function renderOverview() {
       ["session", "total"].map((period) =>
         h("button", {
           type: "button",
-          text: period === "session" ? "The main agent" : "All time",
+          text: period === "session" ? "The master agent" : "All time",
           "aria-pressed": String(state.show === period),
           onclick: () => {
             state.show = period;
@@ -149,7 +149,7 @@ function usageCard(period, data) {
   const max = state.overview.model.context_window;
   const session = period === "session";
   let aside = plural(data.sessions || 0, "agent");
-  if (session) aside = `Agent ${data.id} · since ${when(data.started)}`;
+  if (session) aside = `Telegram, Siri and the terminal · since ${when(data.started)}`;
   else if (data.first) aside = `Since ${clock(data.first, { day: "numeric", month: "short", year: "numeric" })} · ${aside}`;
   return h(
     "section.card",
@@ -157,9 +157,8 @@ function usageCard(period, data) {
     h(
       "div.card-head",
       {},
-      h("h2", { text: session ? "The main agent" : "All time" }),
-      h("span.aside", { text: aside }),
-      session && h("div.actions", {}, h("button.button.small", { type: "button", text: "New agent", onclick: newSession }))
+      h("h2", { text: session ? "The master agent" : "All time" }),
+      h("span.aside", { text: aside })
     ),
     h(
       "div.metrics",
@@ -203,7 +202,7 @@ function contextMeter(context, max) {
     h("div.bar", { class: share > 0.9 ? "full" : share > 0.7 ? "warn" : "" }, h("span", { style: { width: `${width}%` } })),
     h("p.hint", {
       text: tokens
-        ? "What Athena reads with your next message: its instructions, its tools and the main agent's conversation." +
+        ? "What Athena reads with your next message to the master agent: its instructions, its tools and your conversation." +
           (max || state.overview.model.reachable !== true ? "" : " The model server didn't say its limit: set llm.context_window to show it.")
         : "It's measured after Athena's next reply.",
     })
@@ -330,18 +329,6 @@ async function setThinking(event, mode) {
   }
 }
 
-async function newSession(event) {
-  const button = event.target;
-  button.disabled = true;
-  try {
-    state.overview = await call("POST", "/api/session", {});
-    renderOverview();
-    toast(`Started agent ${state.overview.session.id}, as the main one. Name it, and give it a DAG, on the Agents tab.`);
-  } catch (e) {
-    toast(e.message, true);
-    button.disabled = false;
-  }
-}
 
 async function forgetEverything() {
   const m = state.overview.memory;

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Athena</title>
-  <meta name="description" content="Athena's dashboard: its agents and what they do, what it's watching, its memory, skills and tools.">
+  <meta name="description" content="Athena's dashboard: its agents and what they do, its memory, skills and tools.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f5eee2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0e0b08" media="(prefers-color-scheme: dark)">
@@ -42,22 +42,17 @@
   <div id="app" class="app" hidden>
     <header class="top">
       <div class="top-inner">
-        <a class="brand" id="brand" href="#status" aria-label="Status" aria-controls="tabs">
+        <a class="brand" id="brand" href="#status" aria-label="Status">
           <div class="shield shield-small" data-state="idle" aria-hidden="true">
             <img src="athena.svg" alt="" width="40" height="40">
             <span class="eye left"></span><span class="eye right"></span><span class="ring"></span>
           </div>
           <span class="wordmark" data-name>Athena</span>
-          <!-- On a phone, the shield opens the menu of tabs: these say where you are, and that it does. -->
-          <span class="brand-where" id="brand-where">Status</span>
-          <svg class="brand-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-          <span class="brand-count" id="brand-count" hidden></span>
         </a>
         <span class="pill" id="top-pill" data-state="idle"><span class="dot"></span><span class="pill-label">Idle</span></span>
         <nav class="tabs" id="tabs" aria-label="Sections">
           <a class="tab" href="#status" data-tab="status" title="Status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Status</span></a>
           <a class="tab" href="#agents" data-tab="agents" title="Agents"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h5v5H5zM14 3h5v5h-5zM9.5 16h5v5h-5zM7.5 8v3.5h9V8M12 11.5V16"/></svg><span>Agents</span></a>
-          <a class="tab" href="#watching" data-tab="watching" title="Watching"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg><span>Watching</span></a>
           <a class="tab" href="#memory" data-tab="memory" title="Memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.8-4.8"/></svg><span>Memory</span></a>
           <a class="tab" href="#skills" data-tab="skills" title="Skills"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4 4.5v13c4 0 6.5.5 8 2 1.5-1.5 4-2 8-2v-13c-4 0-6.5.5-8 2zM12 6.5v13"/></svg><span>Skills</span></a>
           <a class="tab" href="#tools" data-tab="tools" title="Tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg><span>Tools</span></a>
@@ -66,12 +61,10 @@
       <div class="meander" aria-hidden="true"></div>
     </header>
 
-    <div class="menu-backdrop" id="menu-backdrop" hidden></div>
     <div class="banner" id="offline" role="status" hidden>Can't reach Athena. Trying again…</div>
 
     <section id="tab-status" class="panel" data-panel="status" aria-label="Status"></section>
     <section id="tab-agents" class="panel chat-panel" data-panel="agents" aria-label="Agents" hidden></section>
-    <section id="tab-watching" class="panel" data-panel="watching" aria-label="Watching" hidden></section>
     <section id="tab-memory" class="panel" data-panel="memory" aria-label="Memory" hidden></section>
     <section id="tab-skills" class="panel" data-panel="skills" aria-label="Skills" hidden></section>
     <section id="tab-tools" class="panel" data-panel="tools" aria-label="Tools" hidden></section>

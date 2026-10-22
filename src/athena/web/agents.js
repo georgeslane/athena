@@ -1,12 +1,13 @@
 // The Agents tab. Each agent is something Athena keeps an eye on and does for you, such as finding you jobs: a
-// conversation, which Telegram, Siri and the terminal share, and a DAG of tasks it runs by itself. The main agent
-// is the one with the latest news, from you or from Athena. Each agent has views: Chat, its DAG (dag.js), the
-// History of its runs (runs.js), the Context its last run kept for the next, and its Guidance.
+// conversation, and a DAG of tasks it runs by itself. The master agent is always first: Telegram, Siri and the
+// terminal talk to it, it hears the others' news, and its DAG keeps an eye on things for them to start from. Each
+// agent has views: Chat, its DAG (dag.js), the History of its runs (runs.js), the Context its last run kept for the
+// next, and its Guidance, with files.
 //
-// The address says what's shown: #agents for the main agent, #agents/<id> for one's chat, #agents/<id>/<view> for
-// another view, #agents/<id>/runs/<run> for a run, and #agents/all for the list, which a phone shows on its own.
+// The address says what's shown: #agents for the master agent, #agents/<id> for one's chat, #agents/<id>/<view>
+// for another view, #agents/<id>/runs/<run> for a run, and #agents/all for the list, which a phone shows on its own.
 
-import { ask, call, clock, h, icon, isoDay, now, plural, state, toast } from "./core.js";
+import { ask, base64, bytes, call, clock, h, icon, isoDay, now, plural, state, toast } from "./core.js";
 import { chatView, chooseTools, loadPage, renderChat } from "./chat.js";
 import { dagView } from "./dag.js";
 import { runsView } from "./runs.js";
@@ -38,7 +39,7 @@ const agents_ = (state.agents = {
 });
 
 const summary = (id) => (agents_.data ? agents_.data.sessions.find((s) => s.id === id) : null);
-const isMain = (id) => agents_.data && id === agents_.data.current;
+const isMaster = (id) => agents_.data && id === agents_.data.master;
 
 // -- loading -------------------------------------------------------------------------------------------------
 
@@ -53,12 +54,11 @@ export async function loadAgents() {
       agents_.again = false;
       agents_.data = await call("GET", "/api/agents");
       if (agents_.id === null && !agents_.list) {
-        // #agents is the main agent, shown at its own address, so it stays on screen if another becomes the main one.
-        agents_.id = agents_.data.current;
+        agents_.id = agents_.data.master; // #agents is the master agent, shown at its own address
         history.replaceState(null, "", address(agents_.id, agents_.view));
       }
       if (agents_.id !== null && !(await loadPage(agents_.id))) {
-        agents_.id = agents_.data.current; // it's gone, as after deleting it
+        agents_.id = agents_.data.master; // it's gone, as after deleting it
         history.replaceState(null, "", address(agents_.id, "chat"));
         agents_.view = "chat";
         await loadPage(agents_.id);
@@ -159,10 +159,10 @@ function render() {
 }
 
 function renderList(id) {
-  const asking = new Set(agents_.data.approvals.map((a) => a.session ?? agents_.data.current));
+  const asking = new Set(agents_.data.approvals.map((a) => a.session ?? agents_.data.master));
   const items = agents_.data.sessions.map((s) => {
     const meta = [];
-    if (isMain(s.id)) meta.push(h("span.current", { text: "Main" }));
+    if (s.master) meta.push(h("span.current", { text: "Telegram" }));
     meta.push(when(s.last_used));
     if (s.dag) meta.push(s.dag.running ? h("span.running", { text: "Running" }) : s.dag.paused ? "Paused" : s.dag.when);
     return h(
@@ -170,10 +170,11 @@ function renderList(id) {
       {},
       h(
         "a.session",
-        { href: address(s.id), "aria-current": s.id === id ? "true" : null, "data-unread": String(unread(s) && !(s.id === id && agents_.view === "chat")) },
+        { href: address(s.id), "aria-current": s.id === id ? "true" : null, "data-master": s.master ? "" : null, "data-unread": String(unread(s) && !(s.id === id && agents_.view === "chat")) },
         h(
           "span.session-line",
           {},
+          s.master ? h("span.master-mark", { title: "The master agent" }, icon("crown")) : null,
           h("span.session-title", { text: s.title || "New agent" }),
           asking.has(s.id) ? h("span.session-flag.asking", { text: "Needs your OK" }) : null,
           s.proposals ? h("span.session-flag.asking", { text: plural(s.proposals, "proposal"), title: "Changes its runs proposed, for you to approve" }) : null,
@@ -193,7 +194,7 @@ function renderHead(id) {
   const s = summary(id);
   const page = agents_.pages.get(id) || { muted: false, name: "" };
   e.title.textContent = (s && s.title) || page.name || "New agent";
-  const parts = [isMain(id) ? "Main agent" : `Last active ${when(s ? s.last_used : 0)}`];
+  const parts = [isMaster(id) ? "Master agent: Telegram, Siri and the terminal talk to it" : `Last active ${when(s ? s.last_used : 0)}`];
   if (s && s.dag) parts.push(s.dag.running ? "its DAG is running" : s.dag.paused ? "its DAG is paused" : `runs ${s.dag.when}`);
   else parts.push("no DAG yet");
   e.sub.textContent = parts.join(" · ");
@@ -255,6 +256,8 @@ const TEXTS = {
     placeholder: "You find me data engineering jobs in London or remote. I'd rather not work in finance. Keep messages short.",
   },
 };
+const FILE_TYPES = ".pdf,.md,.markdown,.txt,.text,.csv,.tsv,.json,.html,.xml,.ics,.log,.py"; // what read_file reads
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // as the server takes
 
 function textView(box, id, view, fresh) {
   const page = agents_.pages.get(id) || {};
@@ -304,13 +307,85 @@ function textView(box, id, view, fresh) {
       area,
       h("div.tool-actions", {}, undo, save)
     );
-    box.replaceChildren(form);
+    box.replaceChildren(view === "guidance" ? h("div.stack", {}, form, filesCard(id)) : form);
     changed();
   }
   const area = box.querySelector("textarea");
   if (!agents_.drafts.has(draftKey) && area.value !== saved && document.activeElement !== area) area.value = saved;
   const status = box.querySelector(".text-status");
   if (view === "context") status.textContent = page.context_at ? `Kept ${when(page.context_at)}` : TEXTS.context.empty;
+}
+
+// The files that come with its guidance, such as your CV: its chat and each run of its DAG are told they're there,
+// and read them with read_file when they'd help.
+function filesCard(id) {
+  const list = h("ul.file-list", { "aria-label": "Its files" });
+  const hint = h("p.hint", { text: "Your CV, notes, or anything else it should know: PDFs and text files. Its chat and each run of its DAG are told they're here, and read them when they'd help." });
+  const input = h("input", { type: "file", multiple: true, hidden: true, accept: FILE_TYPES, onchange: (event) => upload([...event.target.files]).finally(() => (event.target.value = "")) });
+  const add = h("button.button.small", { type: "button", onclick: () => input.click() }, icon("clip"), "Add files");
+  const card = h(
+    "section.card.files-card",
+    {
+      ondragover: (event) => {
+        event.preventDefault();
+        card.classList.add("dropping");
+      },
+      ondragleave: () => card.classList.remove("dropping"),
+      ondrop: (event) => {
+        event.preventDefault();
+        card.classList.remove("dropping");
+        upload([...((event.dataTransfer && event.dataTransfer.files) || [])]);
+      },
+    },
+    h("div.card-head", {}, h("h2", { text: "Files" }), h("div.actions", {}, add)),
+    hint,
+    list,
+    input
+  );
+  const show = (data) => {
+    if (!data.on) {
+      hint.textContent = "Files are switched off: switch them on in the Tools tab to give an agent files.";
+      add.disabled = true;
+    }
+    list.replaceChildren(
+      ...data.files.map((f) =>
+        h(
+          "li.file-row",
+          {},
+          icon("file"),
+          h("a.file-name", { href: `/api/agents/${id}/files/${encodeURIComponent(f.name)}`, download: f.name, title: `Download ${f.name}`, text: f.name }),
+          h("span.hint", { text: bytes(f.size) }),
+          h("button.button.quiet.small.file-remove", { type: "button", "aria-label": `Delete ${f.name}`, title: "Delete it", onclick: (event) => remove(event, f.name) }, icon("close"))
+        )
+      )
+    );
+    list.hidden = !data.files.length;
+  };
+  const upload = async (files) => {
+    if (!files.length) return;
+    const tooBig = files.find((f) => f.size > MAX_FILE_BYTES);
+    if (tooBig) return toast(`${tooBig.name} is over 20 MB, more than Athena can take.`, true);
+    add.disabled = true;
+    try {
+      const sent = await Promise.all(files.map(async (f) => ({ name: f.name, data: await base64(f) })));
+      show({ on: true, ...(await call("POST", `/api/agents/${id}/files`, { files: sent })) });
+      toast(files.length === 1 ? `Added ${files[0].name}.` : `Added ${plural(files.length, "file")}.`);
+    } catch (err) {
+      toast(err.status === 413 ? "That's more than Athena can take at once: add fewer, or smaller, files." : err.message, true);
+    } finally {
+      add.disabled = false;
+    }
+  };
+  const remove = async (event, name) => {
+    event.currentTarget.disabled = true;
+    try {
+      show({ on: true, ...(await call("DELETE", `/api/agents/${id}/files/${encodeURIComponent(name)}`)) });
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+  call("GET", `/api/agents/${id}/files`).then(show, (err) => toast(err.message, true));
+  return card;
 }
 
 // -- what you do -----------------------------------------------------------------------------------------------
@@ -320,7 +395,7 @@ async function newAgent() {
   const ok = await ask({
     title: "A new agent",
     body: [
-      h("p", { text: "Something you'd like Athena to keep an eye on, or do for you. Give it guidance, and a DAG to run by itself, once it's made." }),
+      h("p", { text: "Something you'd like Athena to do for you. Give it guidance, and a DAG to run by itself, once it's made. To start from what the master agent finds, give its DAG the same trigger as an outlet of the master's." }),
       h("label.field", {}, h("span.field-label", { text: "Name" }), name),
     ],
     confirm: "Make it",
@@ -377,11 +452,18 @@ async function aboutAgent() {
         }
       },
     },
-    h("h2", { text: "This agent" }),
-    h("label.field", {}, h("span.field-label", { text: "Name" }), h("span.field-help", { text: "What it does for you. Without a name, it's called after your first message." }), name),
+    h("h2", { text: isMaster(id) ? "The master agent" : "This agent" }),
+    h("label.field", {}, h("span.field-label", { text: "Name" }), h("span.field-help", { text: isMaster(id) ? "What you call it. It's always here: Telegram, Siri and the terminal talk to it." : "What it does for you. Without a name, it's called after your first message." }), name),
     h("label.field", {}, h("span.field-label", { text: "Model" }), h("span.field-help", { text: "Which of the model server's models it uses, for its chat and its DAG." }), model),
     error,
-    h("div.tool-actions", {}, h("button.button.danger", { type: "button", text: "Delete agent", onclick: () => deleteAgent(id) }), h("span.grow"), h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }), save)
+    h(
+      "div.tool-actions",
+      {},
+      isMaster(id) ? null : h("button.button.danger", { type: "button", text: "Delete agent", onclick: () => deleteAgent(id) }),
+      h("span.grow"),
+      h("button.button", { type: "button", text: "Cancel", onclick: () => dialog.close() }),
+      save
+    )
   );
   dialog.onclose = null;
   dialog.replaceChildren(form);
@@ -403,7 +485,7 @@ async function deleteAgent(id) {
   const ok = await ask({
     title: `Delete “${(s && s.title) || "this agent"}”?`,
     body: [
-      h("p", { text: "Everything said to it is deleted, here and from Athena's memory, and so are its DAG and the history of its runs. This can't be undone." }),
+      h("p", { text: "Everything said to it is deleted, here and from Athena's memory, and so are its DAG, the history of its runs and its files. This can't be undone." }),
     ],
     confirm: "Delete",
     danger: true,
@@ -413,7 +495,7 @@ async function deleteAgent(id) {
     agents_.data = await call("DELETE", `/api/agents/${id}`);
     agents_.pages.delete(id);
     toast("Deleted.");
-    location.hash = address(agents_.data.current);
+    location.hash = address(agents_.data.master);
   } catch (err) {
     toast(err.message, true);
   }
