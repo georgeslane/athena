@@ -13,7 +13,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 
-from openai import APIConnectionError, AsyncOpenAI
+from openai import APIConnectionError, AsyncOpenAI, AuthenticationError
 
 from athena.config import EmbeddingsConfig, MemoryConfig
 from athena.memory import Embedder
@@ -273,6 +273,11 @@ async def describe_embeddings_error(exc: Exception, cfg: EmbeddingsConfig) -> st
         return found
     if isinstance(exc, APIConnectionError):
         return f"couldn't reach the embeddings server ({cfg.base_url})"
+    if isinstance(exc, AuthenticationError):
+        return (
+            f"the embeddings server ({cfg.base_url}) refused its API key. Leave [embeddings] base_url empty "
+            "to use the model's server and key, or set its own api_key"
+        )
     return f"{type(exc).__name__}: {text}"
 
 

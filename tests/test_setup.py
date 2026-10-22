@@ -115,6 +115,23 @@ def test_changing_one_part_later(home, monkeypatch):
     assert menu and "George · Athena · Europe/London" in menu[0]
 
 
+def test_a_secret_pasted_with_a_stray_character_is_asked_for_again(home, monkeypatch):
+    """Such as the █ of a terminal's cursor, copied with a password. Memory on the model's own server is left
+    empty, so it uses the model's key."""
+    monkeypatch.setattr(setup_wizard.sys, "platform", "darwin")
+    client, _ = servers()
+    w, *_ = wizard(["George", "", "Europe/London", "http://mac:8000/v1", "", "", "n"], ["sk-mac", "", ""], client)
+    w.start()
+    chosen = "open-sesame-123456"
+    answers = ["3", "http://mac:8000/v1/", "", "5", "y", ""]  # memory, on the model's server; a new password
+    w, said, answers, secrets = wizard(answers, [chosen + "\u2588", chosen], client)
+    w.start()
+    assert answers == [] and secrets == []
+    assert any("That has a '\u2588' in it" in line for line in said)
+    assert f"DASHBOARD_TOKEN={chosen}\n" in (home / ".env").read_text()
+    assert tomllib.loads((home / "config.toml").read_text())["embeddings"]["base_url"] == ""
+
+
 def test_a_model_server_that_cant_be_asked_still_lets_you_type_a_model(home, monkeypatch):
     monkeypatch.setattr(setup_wizard.sys, "platform", "darwin")
     client, _ = servers()

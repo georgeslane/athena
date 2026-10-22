@@ -29,7 +29,7 @@ import httpx
 from dotenv import load_dotenv
 
 from athena import service
-from athena.config import athena_home, find_config
+from athena.config import athena_home, find_config, unsendable
 from athena.config_files import EnvFile, write_private
 from athena.resources import CONFIG_EXAMPLE, ENV_EXAMPLE
 from athena.settings import Settings, SettingsError
@@ -77,8 +77,17 @@ class Wizard:
     def ask_secret(self, question: str, name: str) -> str | None:
         """A secret for .env, typed without showing it. None to keep what's there."""
         is_set = bool(os.environ.get(name))
-        answer = self.secret_raw(f"{question}{' [set: Enter keeps it]' if is_set else ''}: ").strip()
+        answer = self.typed_secret(f"{question}{' [set: Enter keeps it]' if is_set else ''}: ")
         return answer or (None if is_set else "")
+
+    def typed_secret(self, prompt: str) -> str:
+        """A secret, asked for again while it has a character that couldn't be sent."""
+        while True:
+            answer = self.secret_raw(prompt).strip()
+            bad = unsendable(answer)
+            if bad is None:
+                return answer
+            self.say(f"  That has a {bad!r} in it, which can't be: perhaps it was copied with it. Try again.")
 
     # -- what's in the files --
 
@@ -202,6 +211,8 @@ def _show_memory(w: Wizard) -> str:
 def _change_memory(w: Wizard) -> None:
     w.say("Memories are searched by meaning with an embeddings model, usually on the same server as the model.")
     url = w.ask("Its server's address (Enter for the model's)", w.get("embeddings.base_url")).rstrip("/")
+    if url == w.get("llm.base_url").rstrip("/"):
+        url = ""  # the model's, with its key, and still the model's if that moves
     base = url or w.get("llm.base_url")
     models = [m for m in _models(w, base, os.environ.get("LLM_API_KEY", ""), quiet=True) if "embed" in m.lower()]
     model = _choose(w, "Which embeddings model", models, w.get("embeddings.model"))
@@ -246,7 +257,7 @@ def _change_dashboard(w: Wizard) -> None:
     w.say("The dashboard is a web page for Athena's status, tasks, memory and tools, behind a password.")
     if os.environ.get("DASHBOARD_TOKEN") and not w.yes("It has a password. Choose a new one?", default=False):
         return
-    typed = w.secret_raw("A password of at least 12 characters (Enter to make one): ").strip()
+    typed = w.typed_secret("A password of at least 12 characters (Enter to make one): ")
     if typed and len(typed) < 12:
         w.say("  That's too short, so one's been made for you.")
         typed = ""

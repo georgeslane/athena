@@ -275,9 +275,11 @@ class _Config(_Section):
 
     @model_validator(mode="after")
     def _embeddings_from_the_model_server(self) -> _Config:
-        """With no base_url of their own, embeddings come from the model's server, with the model's key."""
+        """With no base_url of their own, embeddings come from the model's server. On that server, set here or
+        not, they use the model's key unless they have one of their own."""
         if not self.embeddings.base_url:
             self.embeddings.base_url = self.llm.base_url
+        if self.embeddings.base_url.rstrip("/") == self.llm.base_url.rstrip("/"):
             self.embeddings.api_key = self.embeddings.api_key or self.llm.api_key
         return self
 
@@ -306,6 +308,12 @@ Config = create_model(
     __module__=__name__,
     **{b.section: (b.Settings, Field(default_factory=b.Settings)) for b in BUILTINS},  # type: ignore[call-overload]
 )
+
+
+def unsendable(secret: str) -> str | None:
+    """The first character of a secret that can't go in a request's headers, as an API key or password does,
+    such as a space or a █ copied with it from a terminal. None if there isn't one."""
+    return next((c for c in secret if not "!" <= c <= "~"), None)
 
 
 def expand_env(value: Any) -> Any:
