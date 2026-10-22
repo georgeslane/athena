@@ -54,7 +54,8 @@ uv run python -m athena.server_envs
 | `src/athena/setup_wizard.py`, `service.py` | `athena setup`; the systemd service, updating, and moving from a checkout |
 | `src/athena/config.py`, `config_files.py` | Settings, read from `~/.athena`; editing `config.toml` and `.env`, keeping their comments |
 | `src/athena/app.py` | Builds and runs Athena's services |
-| `src/athena/agent.py`, `llm.py`, `compaction.py`, `history.py` | The agent loop, the model client, compacting and the conversation history |
+| `src/athena/agent.py`, `llm.py`, `compaction.py`, `history.py` | The agent loop, the model client, compacting, and sessions and their conversations |
+| `src/athena/chat.py`, `commands.py`, `approvals.py`, `channel.py`, `push.py` | Chatting on the dashboard, the commands every front end has, requests for your OK wherever they're answered, how Athena reaches you, and notifications |
 | `src/athena/tools.py`, `tool_search.py`, `privacy.py` | Tools, those found when needed, and keeping personal details out of what they send |
 | `src/athena/mcp_manager.py`, `server_envs.py`, `server_security.py`, `tool_approvals.py`, `sandbox.py` | MCP servers: connecting, their locked environments and security updates, the tools you've approved, and the sandbox |
 | `src/athena/builtin.py`, `integrations.py`, `catalog.py`, `recommended.py`, `settings.py` | Built-in tools, the recommended servers, and what the Tools tab can change |
@@ -65,7 +66,7 @@ uv run python -m athena.server_envs
 | `src/athena/cron.py`, `watching.py`, `triggers.py` | Cron schedules, what's watched, and events that start tasks |
 | `src/athena/skills.py`, `claude_projects.py`, `project_files.py`, `github_repo.py` | Skills, and projects handed to Claude |
 | `src/athena/telegram_bot.py`, `channel.py`, `photos.py`, `formatting.py`, `siri.py` | Telegram, and Siri's endpoint |
-| `src/athena/dashboard.py`, `web/` | The dashboard: its API, and the page itself, plain HTML, CSS and JavaScript modules with no build step |
+| `src/athena/dashboard.py`, `web/` | The dashboard: its API, and the page itself, plain HTML, CSS and JavaScript modules with no build step. `web/md.js` turns Markdown into the page's elements, never HTML, and `web/sw.js` shows notifications |
 | `src/athena/status.py`, `status_api.py`, `stats.py`, `alerts.py`, `timeline.py` | What Athena is doing, the status board's API, usage statistics, alerts, and what it did for the Activity tab |
 | `src/athena/doctor.py`, `evals.py`, `search_eval.py` | `athena doctor`, `athena eval` and the embeddings test |
 | `src/athena/resources/` | What comes with Athena: the example config and `.env`, the system prompt, the recommended servers' locks, the systemd units, the stopped alert and the Mac's scripts |

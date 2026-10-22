@@ -231,13 +231,13 @@ async def test_the_overview_counts_messages_tools_and_context(athena):
 
 
 async def test_a_new_session_and_forgetting_everything(athena):
-    await athena.agent.respond("chat", "My sister is called Anna")
+    await athena.agent.respond(athena.history.current_chat, "My sister is called Anna")
     await until(lambda: athena.memory.store.count().get("conversation"))
     await athena.memory.remember("George's sister is called Anna.")
     async with client(athena) as http:
         session = (await http.post("/api/session", json={})).json()["session"]
         assert (session["id"], session["queries"], session["context"]) == (2, 0, None)
-        assert athena.history.load("chat") == []
+        assert athena.history.load(athena.history.current_chat) == []  # a new conversation
 
         refused = await http.post("/api/forget", json={})
         assert refused.status_code == 400 and athena.memory.store.count() == {"fact": 1, "conversation": 1}
@@ -805,7 +805,7 @@ async def test_the_board_from_the_dashboard(athena, tmp_path):
         assert board["projects"][0]["status"] == "done"
         assert said == [f"✅ Claude has finished “Bank statements”: Tested. Merge it when you're happy.\n{project.url}"]
         # In your chat too, so you can ask Athena about it.
-        assert athena.history.load("111")[-1] == {"role": "assistant", "content": said[0]}
+        assert athena.history.load(athena.history.current_chat)[-1] == {"role": "assistant", "content": said[0]}
         assert (await http.get("/api/projects")).json()["projects"][0]["status"] == "done"
 
         # More work, from the board: you wrote it, so it's not asked about again.

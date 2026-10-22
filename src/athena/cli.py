@@ -46,16 +46,16 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 async def _chat(args: argparse.Namespace) -> int:
+    from athena import commands
     from athena.app import build_services
     from athena.timeline import ToolEvent
-    from athena.tools import flags
 
     cfg = load_config(args.config)
     services = build_services(cfg)
     services.status.channel = "the terminal"
     await services.start()
     name = cfg.agent.assistant_name
-    print(f"Chatting with {name} via {cfg.llm.model}. Commands: /session, /tools, /quit\n")
+    print(f"Chatting with {name} via {cfg.llm.model}, in session {services.history.session.id}. /help for commands.\n")
     for st in services.mcp.status():
         print(
             f"  MCP {st.name}: "
@@ -83,17 +83,19 @@ async def _chat(args: argparse.Namespace) -> int:
                 continue
             if line in {"/quit", "/exit"}:
                 break
-            if line in {"/session", "/reset"}:
-                session = services.new_session()
-                print(f"  (session {session.id}: the conversation so far is cleared from the model's context)")
+            if command := commands.parse(line):
+                said = await commands.run(services, *command, source="terminal")
+                print("  " + (said or "There's no such command here: /help lists them.").replace("\n", "\n  "))
                 continue
-            if line == "/tools":
-                for tool in services.tools.all():
-                    print(f"  - {tool.name} [{tool.source}]{flags(tool, services.tools)}")
-                continue
+            session = services.history.session  # your conversation, wherever you're having it
             try:
                 result = await services.agent.respond(
-                    args.chat_id, line, confirm=confirm, on_tool=on_tool, channel="Terminal"
+                    session.chat_id,
+                    line,
+                    confirm=confirm,
+                    allowed=session.allowed_tools,
+                    on_tool=on_tool,
+                    channel="Terminal",
                 )
             except Exception as exc:
                 print(f"  error: {type(exc).__name__}: {exc}")
@@ -417,8 +419,7 @@ def main(argv: list[str] | None = None) -> None:
     p_mac_install.add_argument("--server", action="append", default=[], help="another server the script lists")
     p_mac_install.add_argument("--scope", action="append", default=[], help="with --documents: what the Pi may see")
     p_mac_install.add_argument("--uninstall", action="store_true", help="remove everything it set up")
-    p_chat = sub.add_parser("chat", help="chat in the terminal (handy over SSH)")
-    p_chat.add_argument("--chat-id", default="cli", help="conversation id (default: cli)")
+    sub.add_parser("chat", help="chat in the terminal, in the current session (handy over SSH)")
     sub.add_parser("doctor", help="check the model, embeddings, MCP servers, Telegram and the dashboard")
     p_ingest = sub.add_parser("ingest", help="add text/markdown files or folders to long-term memory")
     p_ingest.add_argument("paths", nargs="+")

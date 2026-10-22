@@ -180,6 +180,7 @@ class StatusFeed:
         self._changes = 0
         self.snapshot = Snapshot()
         self._changed = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self.running = False
 
     @property
@@ -187,6 +188,7 @@ class StatusFeed:
         return f"{self._boot}-{self._changes}"
 
     def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self.running = True
         self._publish(dataclasses.replace(self.tracker.snapshot(), updated=self.tracker.clock()))
         self.tracker.listeners.append(self._publish)
@@ -203,8 +205,17 @@ class StatusFeed:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._changed.wait(), timeout)
 
+    def poke(self) -> None:
+        """Something else readers follow has changed, such as a new message in your conversation: move the version
+        on, so readers waiting hear. Safe from any thread."""
+        if self.running and self._loop is not None:
+            self._loop.call_soon_threadsafe(self._bump)
+
     def _publish(self, snapshot: Snapshot) -> None:
         self.snapshot = snapshot
+        self._bump()
+
+    def _bump(self) -> None:
         self._changes += 1
         changed, self._changed = self._changed, asyncio.Event()
         changed.set()

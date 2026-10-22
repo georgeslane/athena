@@ -22,7 +22,7 @@ A personal AI assistant that runs on your own hardware. A small Linux computer, 
 - **Tasks and watching**: briefings and research on a schedule or when an event comes in, and things it keeps an eye on for you. It never works while you're chatting.
 - **Skills**: how you like things done, which it reads before doing them, and improves with your approval.
 - **Projects for Claude**: coding projects it hands to Claude as pull requests, followed on a board.
-- **A dashboard** for its status, what it's done, tasks, memory, skills and tools, on your phone over Tailscale.
+- **A dashboard** to chat with it in any of your sessions, with notifications on your iPhone and Mac, and for its status, what it's done, tasks, memory, skills and tools, over Tailscale.
 - **Private by design**: secrets stay in one file, MCP servers and code run in sandboxes, and the service can't change its own code. See [Privacy and security](docs/privacy-and-security.md).
 
 ## Install

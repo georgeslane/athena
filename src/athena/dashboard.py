@@ -11,6 +11,17 @@ The page talks to Athena with JSON:
   GET    /api/overview          status, usage statistics, memory and connections
   GET    /api/status            what Athena is doing; ?wait=25&after=<version> waits for a change
   POST   /api/session           start a new session
+  GET    /api/chat              your sessions, newest first, whether Athena's answering you, and what's waiting for
+                                your OK; POST starts a new conversation
+  GET    /api/chat/<id>         a session's messages: the last page, or ?before=<message id>
+  POST   /api/chat/<id>         {"text", "allow": [tools]}: send a message or a command in a session, which makes it
+                                the current one; /api/chat/stop stops the answer
+  POST   /api/chat/<id>/tools   {"allowed": [tools]}: the tools that may run without asking in a session
+  POST   /api/approvals/<id>    {"allow": true | false}: answer a request for your OK, here or in Telegram
+  POST   /api/presence          {"looking": bool}: whether you're looking at the page, so devices aren't notified
+  GET    /api/push              the key a device needs for notifications; POST {"subscription"} turns them on
+                                for one, /api/push/off {"endpoint"} turns them off, /api/push/test sends one
+  GET    /api/activity          what Athena did, newest first: ?before=<id>, ?kinds=message,task
   POST   /api/thinking          {"mode": "on" | "short" | "off"}: how much the model thinks before answering
   POST   /api/forget            {"confirm": "forget"}: delete every memory
   GET    /api/tools             every tool, with its settings
@@ -70,10 +81,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from athena.approvals import Approval
 from athena.config import Config
 from athena.config_files import EnvFile
 from athena.documents import DocumentsError
+from athena.history import Busy
 from athena.memory import KINDS, relevance
+from athena.push import Push
 from athena.settings import Running, Settings, SettingsError, hand_written
 from athena.status import StatusFeed
 from athena.status_api import wait_seconds
@@ -98,12 +112,14 @@ ASSETS = Path(__file__).parent / "assets"
 FILES = {  # what the page is made of, by path
     "/": (WEB / "index.html", "text/html; charset=utf-8"),
     "/dashboard.css": (WEB / "dashboard.css", "text/css; charset=utf-8"),
-    # The script, as modules: dashboard.js starts it, core.js and steps.js have what the tabs share, and each tab
-    # has its own.
+    # The script, as modules: dashboard.js starts it, core.js, steps.js, md.js and notifications.js have what the
+    # tabs share, and each tab has its own.
     **{
         f"/{name}.js": (WEB / f"{name}.js", "text/javascript; charset=utf-8")
-        for name in ("dashboard", "core", "steps", "status", "activity", "tasks", "memory", "skills", "board", "tools")
+        for name in ("dashboard", "core", "steps", "md", "notifications")
+        + ("status", "chat", "activity", "tasks", "memory", "skills", "board", "tools")
     },
+    "/sw.js": (WEB / "sw.js", "text/javascript; charset=utf-8"),  # shows notifications (notifications.js)
     "/manifest.webmanifest": (WEB / "manifest.webmanifest", "application/manifest+json"),
     "/athena.svg": (ASSETS / "athena.svg", "image/svg+xml"),
     "/icon-180.png": (WEB / "icon-180.png", "image/png"),
@@ -124,6 +140,7 @@ SIGN_IN_TRIES = 10  # wrong passwords allowed in SIGN_IN_WINDOW, after which it 
 SIGN_IN_WINDOW = 600.0
 MODEL_CHECK_SECONDS = 60.0
 USED_DAYS = 30  # how far back the Tools tab counts each tool's use
+LOOKING_SECONDS = 40.0  # after the page last said you're looking at it, how long you're taken still to be
 
 
 # The API, as (method, path, handler): the first that matches a request answers it. A method of None
@@ -135,6 +152,18 @@ ROUTES = (
     ("POST", r"/api/thinking", "_set_thinking"),
     ("POST", r"/api/forget", "_forget"),
     ("GET", r"/api/activity", "_get_activity"),
+    ("GET", r"/api/chat", "_get_chat"),
+    ("POST", r"/api/chat", "_new_chat"),
+    ("POST", r"/api/chat/stop", "_stop_chat"),
+    ("GET", r"/api/chat/(?P<session>\d+)", "_get_chat_session"),
+    ("POST", r"/api/chat/(?P<session>\d+)", "_send"),
+    ("POST", r"/api/chat/(?P<session>\d+)/tools", "_allow_in_session"),
+    ("POST", r"/api/approvals/(?P<which>[0-9a-f]+)", "_approve"),
+    ("POST", r"/api/presence", "_presence"),
+    ("GET", r"/api/push", "_get_push"),
+    ("POST", r"/api/push", "_push_on"),
+    ("POST", r"/api/push/off", "_push_off"),
+    ("POST", r"/api/push/test", "_push_test"),
     ("GET", r"/api/tools", "_get_tools"),
     ("POST", r"/api/tools", "_add_server"),
     ("POST", r"/api/reconnect", "_reconnect"),
@@ -178,6 +207,7 @@ class DashboardServer(Server):
         self._model: dict[str, Any] = {"reachable": None, "context_window": None, "error": None, "checked": 0.0}
         self._model_check: asyncio.Task[None] | None = None
         self._running = False
+        self._looking_until = 0.0  # while you're looking at the page, your devices aren't notified
 
     # -- starting and stopping ------------------------------------------------------------------
 
@@ -201,11 +231,25 @@ class DashboardServer(Server):
             return False
         self._running = True
         self.feed.start()
+        # The page follows your conversation, the chat's replies and requests for your OK as it does the status.
+        self.s.history.listeners.append(self.feed.poke)
+        self.s.chat.listeners.append(self.feed.poke)
+        self.s.approvals.listeners.append(self._approvals_changed)
         self._check_model()  # so it's known when the page first asks
         log.info("Dashboard on http://%s:%d", self.cfg.host, self.port)
         return True
 
+    def _approvals_changed(self, approval: Approval) -> None:
+        self.feed.poke()
+
     async def stop(self) -> None:
+        for listeners, listener in (
+            (self.s.history.listeners, self.feed.poke),
+            (self.s.chat.listeners, self.feed.poke),
+            (self.s.approvals.listeners, self._approvals_changed),
+        ):
+            if listener in listeners:
+                listeners.remove(listener)
         self.feed.stop()
         for task in (self._applier, self._model_check):
             if task and not task.done():
@@ -283,11 +327,73 @@ class DashboardServer(Server):
         return _json(self.overview())
 
     async def _get_status(self, request: Request, method: str) -> Response:
+        if request.query.get("looking") == "1":  # the page is in front of you, as it waits for news
+            self._looking_until = time.time() + LOOKING_SECONDS  # it asks again within 25 seconds while it is
         await self.feed.wait(request.query.get("after"), wait_seconds(request))
         return _json(self.status())
 
+    @property
+    def looking(self) -> bool:
+        """Whether you're looking at the dashboard, on any device: then it shows what's new, and your devices aren't
+        notified of it."""
+        return time.time() < self._looking_until
+
+    def _presence(self, request: Request, method: str) -> Response:
+        """{"looking": false} when you switch away from the page, so your devices are notified again at once."""
+        looking = _body(request).get("looking")
+        if not isinstance(looking, bool):
+            raise HTTPError(400, 'Send {"looking": true} or {"looking": false}.')
+        self._looking_until = time.time() + LOOKING_SECONDS if looking else 0.0
+        return _json({"looking": looking})
+
+    def _the_push(self) -> Push:
+        if self.s.push is None:
+            raise HTTPError(409, "Notifications aren't set up.")
+        return self.s.push
+
+    def _get_push(self, request: Request, method: str) -> Response:
+        """The key a device needs to take Athena's notifications, and how many devices do."""
+        push = self._the_push()
+        return _json({"key": push.public_key, "devices": push.subscribed()})
+
+    def _push_on(self, request: Request, method: str) -> Response:
+        """{"subscription": as the browser gives it}: notify this device from now on."""
+        push = self._the_push()
+        origin = request.headers.get("origin", "")
+        subject = origin if origin.startswith("https://") else "mailto:athena@localhost"  # who's sending, for Apple
+        try:
+            push.subscribe(_body(request).get("subscription"), subject)
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        log.info("Dashboard: notifications on for a device")
+        return _json({"devices": push.subscribed()})
+
+    def _push_off(self, request: Request, method: str) -> Response:
+        """{"endpoint"}: stop notifying a device."""
+        push = self._the_push()
+        endpoint = _body(request).get("endpoint")
+        if not isinstance(endpoint, str):
+            raise HTTPError(400, 'Send {"endpoint": the subscription\'s endpoint}.')
+        push.unsubscribe(endpoint)
+        return _json({"devices": push.subscribed()})
+
+    async def _push_test(self, request: Request, method: str) -> Response:
+        """{"endpoint"}: send a device a notification now, to see that they work."""
+        push = self._the_push()
+        endpoint = _body(request).get("endpoint")
+        if not isinstance(endpoint, str) or not push.subscribed(endpoint):
+            raise HTTPError(400, "That device doesn't take notifications: turn them on first.")
+        name = self.s.config.agent.assistant_name
+        said = f"Notifications are on. You'll hear when {name} answers you, a task has news, or it needs your OK."
+        if not await push.send(name, said, url="#chat", tag="test", only=endpoint):
+            raise HTTPError(502, "The push service didn't take it. Turn notifications off and on again.")
+        return _json({"sent": True})
+
     def _new_session(self, request: Request, method: str) -> Response:
-        session = self.s.new_session()
+        try:
+            session = self.s.new_session()
+        except Busy as exc:
+            raise HTTPError(409, str(exc)) from None
         log.info("Dashboard: started session %d", session.id)
         return _json(self.overview())
 
@@ -364,6 +470,62 @@ class DashboardServer(Server):
         return _json(
             {"entries": [e.as_dict() for e in entries[:PAGE]], "more": len(entries) > PAGE, "keep_days": KEEP_DAYS}
         )
+
+    def _get_chat(self, request: Request, method: str) -> Response:
+        return _json(self.s.chat.state())
+
+    def _new_chat(self, request: Request, method: str) -> Response:
+        """A new conversation, as the current session."""
+        try:
+            session = self.s.chat.new_session()
+        except Busy as exc:
+            raise HTTPError(409, str(exc)) from None
+        return _json({**self.s.chat.state(), "session": session.id})
+
+    async def _stop_chat(self, request: Request, method: str) -> Response:
+        return _json({"stopped": await self.s.chat.stop()})
+
+    def _get_chat_session(self, request: Request, method: str, session: str) -> Response:
+        before = request.query.get("before")
+        if before is not None and not before.isdigit():
+            raise HTTPError(400, "Ask with ?before=<a message's id>.")
+        try:
+            return _json(self.s.chat.session(int(session), int(before) if before else None))
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+
+    async def _send(self, request: Request, method: str, session: str) -> Response:
+        """{"text", "allow": [tools allowed without asking for this message]}: a command says what it did."""
+        body = _body(request)
+        try:
+            said = await self.s.chat.send(int(session), body.get("text"), body.get("allow") or [])
+        except Busy as exc:
+            raise HTTPError(409, str(exc)) from None
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        return _json({**self.s.chat.state(), "said": said})
+
+    def _allow_in_session(self, request: Request, method: str, session: str) -> Response:
+        """{"allowed": [tools]}: what may run without asking in a session."""
+        try:
+            self.s.chat.allow_in_session(int(session), _body(request).get("allowed"))
+        except KeyError:
+            raise HTTPError(404, "There's no such session.") from None
+        except ValueError as exc:
+            raise HTTPError(400, str(exc)) from None
+        return _json(self.s.chat.session(int(session)))
+
+    def _approve(self, request: Request, method: str, which: str) -> Response:
+        """{"allow": true or false}: answer a request for your OK."""
+        allow = _body(request).get("allow")
+        if not isinstance(allow, bool):
+            raise HTTPError(400, 'Send {"allow": true} or {"allow": false}.')
+        if not self.s.approvals.answer(which, allow):
+            raise HTTPError(409, "That's been answered already, or it's expired.")
+        log.info("Dashboard: %s a tool", "allowed" if allow else "denied")
+        return _json(self.s.chat.state())
 
     def _get_memory(self, request: Request, method: str) -> Response:
         return _json(self.memory())
@@ -691,7 +853,24 @@ class DashboardServer(Server):
     # -- what the page shows --------------------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
-        return {"version": self.feed.version, "now": time.time(), "status": dataclasses.asdict(self.feed.snapshot)}
+        chat = self.s.chat
+        return {
+            "version": self.feed.version,
+            "now": time.time(),
+            "status": dataclasses.asdict(self.feed.snapshot),
+            # Enough for the page to know when to ask for more: the Chat tab's badge, and whether to fetch it again.
+            "chat": {
+                "current": self.s.history.session.id,
+                "busy": chat.busy,
+                "approvals": len(self.s.approvals.pending()),
+                "last": self._last_message(),
+            },
+        }
+
+    def _last_message(self) -> dict[str, Any] | None:
+        """The newest message in your conversation, so the page can say when Athena's written."""
+        last, _ = self.s.history.messages(self.s.history.session.id, limit=1)
+        return {"id": last[0].id, "role": last[0].role} if last else None
 
     def overview(self) -> dict[str, Any]:
         cfg, history = self.s.config, self.s.history

@@ -187,7 +187,7 @@ async def test_a_task_reports_what_it_found_in_your_chat(athena):
     assert a["channel"].said == ["📋 **Weather**\n\nRain at 4pm, so take an umbrella."]
     assert a["looked"] == [{}]
     # It's in your chat, so you can ask about it, and in the task's own, for its next run.
-    assert a["history"].load("111")[-2:] == [
+    assert a["history"].load(a["history"].current_chat)[-2:] == [
         {"role": "user", "content": "(Your task “Weather” ran.)"},
         {"role": "assistant", "content": "Rain at 4pm, so take an umbrella."},
     ]

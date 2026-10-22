@@ -1,7 +1,7 @@
 {
   "name": "Athena",
   "short_name": "Athena",
-  "description": "What Athena is doing, how it's used, and its tools.",
+  "description": "Chat with Athena, and see what it's doing and has done.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

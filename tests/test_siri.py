@@ -166,7 +166,7 @@ def siri_bot(config, respond, **siri):
 async def test_question_and_answer_are_posted_to_the_chat(config):
     seen = {}
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         seen.update(chat_id=chat_id, text=text, note=note, channel=channel)
         return AgentResult(text="**Sunny** and 21°C. See [the forecast](https://example.com/weather).")
 
@@ -180,13 +180,18 @@ async def test_question_and_answer_are_posted_to_the_chat(config):
     assert "<b>Sunny</b>" in answer.text
     assert answer.kwargs["reply_parameters"].message_id == question.message_id
     # Same conversation as typing in Telegram, with a note that the reply will be spoken.
-    assert seen == {"chat_id": str(ME), "text": "What's the weather <today>?", "note": VOICE_NOTE, "channel": "Siri"}
+    assert seen == {
+        "chat_id": "session:1",
+        "text": "What's the weather <today>?",
+        "note": VOICE_NOTE,
+        "channel": "Siri",
+    }
 
 
 async def test_answer_still_reaches_siri_when_telegram_is_down(config):
     from telegram.error import NetworkError
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         return AgentResult(text="Sunny.")
 
     class DownBot(FakeBot):
@@ -197,7 +202,7 @@ async def test_answer_still_reaches_siri_when_telegram_is_down(config):
 
 
 async def test_approvals_happen_in_telegram_while_siri_is_told(config):
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         task = bot.s.status.begin(text)
         with task.approval("fetch"):
             approved = await confirm("fetch", {"url": "https://example.com"})

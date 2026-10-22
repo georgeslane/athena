@@ -20,6 +20,8 @@ What it finds decides what happens:
 
 **Your data stays with you.**
 - The model runs on your own server. Telegram bot chats aren't end-to-end encrypted, though, so messages and photos pass through Telegram's servers.
+- [Notifications](dashboard.md#notifications), if you turn them on, pass through your device's push service, Apple's for an iPhone. Each is encrypted so that only your device can read it, and Athena only sends them to the push services browsers use. `notification_text = false` leaves what was said out of them altogether.
+- Talking to Athena on the dashboard stays on your tailnet: Tailscale Serve makes the dashboard reachable from your own devices only.
 - Only allowlisted Telegram users can use the bot. Messages from anyone else are ignored and logged.
 - Secrets are in `~/.athena/.env`, readable only by you. The dashboard can't change Athena's own secrets (the Telegram token, the model's key, the Siri token and its own password), or pass them to a server, and keys you enter are never sent back to the browser.
 
@@ -29,6 +31,7 @@ What it finds decides what happens:
 - A server's tools that are new or have changed since you approved them are held back until you approve them again.
 - What Athena remembers, and skills it writes or changes, while working by itself are suggestions until you approve them, so a web page can't plant a memory or rewrite a skill unseen.
 - Tasks can't do more than you could approve: one Athena suggests needs your OK, any tool that asks first still asks unless you've allowed that task to use it, and a task can't schedule others without asking.
+- On the dashboard you can allow a tool without asking for one message or a session, as you can a task. Scheduling tasks and pushing to GitHub always ask.
 
 **Everything runs in a box.**
 - systemd runs Athena hardened. It can write only to `~/.athena` and uv's and npm's caches. It can't change its own code, your home folder or `~/.ssh`, and can't use `sudo` or gain privileges.

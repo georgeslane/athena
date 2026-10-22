@@ -36,7 +36,7 @@ class ToolEvent:
     args: dict[str, Any]
     output: str  # what the model was told
     outcome: str  # RAN, FAILED or DECLINED (stats.py)
-    asked: bool = False  # it needed approval: yours, or the task's that may use it without asking
+    approval: str = ""  # if it asks first: "you" if you were asked, "allowed" if it may run without asking here
     flagged: str = ""  # what the privacy check found in what it would send (privacy.py)
 
 
@@ -44,10 +44,10 @@ def cut(text: str, limit: int = STEP_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def steps(allowed: Collection[str] = ()) -> tuple[list[dict[str, str]], Callable[[ToolEvent], Any]]:
+def steps() -> tuple[list[dict[str, str]], Callable[[ToolEvent], Any]]:
     """What a run does, as it does it: a list it fills, and the on_tool for Agent.respond that fills it with each
-    tool call, what it was given and gave back (cut short), what happened, and, if it needed approval, who gave it:
-    "you", or "allowed" for a tool in ``allowed``, which a task may use without asking."""
+    tool call, what it was given and gave back (cut short), what happened, and, if it asks first, whether you were
+    asked or it was allowed without asking."""
     taken: list[dict[str, str]] = []
 
     async def on_tool(event: ToolEvent) -> None:
@@ -55,8 +55,8 @@ def steps(allowed: Collection[str] = ()) -> tuple[list[dict[str, str]], Callable
             return
         given = json.dumps(event.args, ensure_ascii=False) if event.args else ""
         step = {"tool": event.tool, "given": cut(given), "outcome": event.outcome, "said": cut(event.output)}
-        if event.asked:
-            step["approval"] = "allowed" if event.tool in allowed else "you"
+        if event.approval:
+            step["approval"] = event.approval
         if event.flagged:
             step["flagged"] = event.flagged
         taken.append(step)

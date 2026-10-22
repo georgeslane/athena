@@ -94,6 +94,10 @@ show_task = true                       # include the start of your message (fals
 enabled = true
 host = "127.0.0.1"                     # Tailscale Serve passes requests from your devices to this
 port = 8092
+# Notifications on your iPhone and Mac show the start of each message. They're encrypted so that only
+# your device can read them, but they do pass through Apple's push service. false: only that there's
+# something new (see docs/dashboard.md).
+notification_text = true
 
 [news.feeds]
 # News feeds (RSS or Atom) the assistant can read without asking: only these are ever

@@ -7,13 +7,10 @@ import contextlib
 import html
 import json
 import logging
-import secrets
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import openai
 from telegram import (
     Bot,
     BotCommand,
@@ -36,25 +33,20 @@ from telegram.ext import (
     filters,
 )
 
-from athena import workspace
+from athena import commands, workspace
 from athena.app import Services
+from athena.commands import COMMANDS
 from athena.config import THINKING, ConfigError
 from athena.files import SENT, TEXT
 from athena.formatting import TELEGRAM_LIMIT, markdown_to_speech, markdown_to_telegram_html, split_message
-from athena.memory import Found
 from athena.photos import MAX_BYTES, MAX_PER_MESSAGE, Photo, label, mime_of
 from athena.siri import VOICE_NOTE, SiriServer
-from athena.status import State, describe_error
+from athena.status import State
 from athena.tool_approvals import ToolChange
-from athena.tools import ToolError, flags
+from athena.tools import ToolError
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
-THINKING_SAYS = {
-    "on": "I think things through before answering, for as long as it takes.",
-    "short": "I think briefly before answering, for up to {tokens} tokens.",
-    "off": "I answer straight away, without thinking first.",
-}
 
 
 @dataclass
@@ -93,28 +85,11 @@ MAX_SIDE = 2048  # of the copies Telegram keeps of a photo, the largest up to th
 DOWNLOAD_MB = 20  # the largest file a Telegram bot can download
 
 
-COMMANDS = [
-    ("session", "Start a new session: clears our conversation (memories are kept)"),
-    ("compact", "Summarise our conversation so far, keeping the last few messages, to make room"),
-    ("stop", "Stop the answer I'm working on"),
-    ("retry", "Answer your last message again"),
-    ("think", "Think before answering: /think on, short or off"),
-    ("tasks", "What I do by myself: run, pause or delete it"),
-    ("remember", "Save a fact: /remember <text>"),
-    ("recall", "Search memory: /recall <query>"),
-    ("forget", "Delete a memory: /forget <id>"),
-    ("tools", "List available tools and MCP servers"),
-    ("reload", "Reconnect to MCP servers"),
-    ("status", "Check the model, memory and tools"),
-]
-
-
 class TelegramBot:
     def __init__(self, services: Services):
         self.s = services
         self.cfg = services.config.telegram
         self.allowed = set(self.cfg.allowed_user_ids)
-        self._pending: dict[str, asyncio.Future[bool]] = {}
         self._siri: SiriServer | None = None
         self._warming: asyncio.Task[None] | None = None
         self._telling: set[asyncio.Task[None]] = set()
@@ -215,11 +190,11 @@ class TelegramBot:
             log.warning("Couldn't send a message about changed tools: %s", exc)
 
     async def _keep_warm(self) -> None:
-        """Keep the model server's prompt cache ready for your chat (llm.warm_up_minutes)."""
-        chat_id = str(self.cfg.allowed_user_ids[0]) if self.cfg.allowed_user_ids else "warm-up"
+        """Keep the model server's prompt cache ready for your conversation, the current session
+        (llm.warm_up_minutes)."""
         while True:
             try:
-                reply = await self.s.agent.warm_up(chat_id)
+                reply = await self.s.agent.warm_up(self.s.history.current_chat)
                 if reply and reply.elapsed > 5:
                     log.info(
                         "The model server had to read the prompt afresh (%s tokens, %.0fs)",
@@ -286,9 +261,10 @@ class TelegramBot:
         why: str = "",
         timeout: float | None = None,
     ) -> bool:
-        key = secrets.token_hex(6)
-        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._pending[key] = future
+        timeout = timeout or self.cfg.confirm_timeout_seconds
+        session = None if why else self.s.history.session.id  # your message's, or a task's
+        approval = self.s.approvals.open(tool, args, summary, timeout=timeout, why=why, session=session)
+        key = approval.id
         # Show every argument: approving content you can't see isn't approval. Link previews
         # stay off, or Telegram's servers would fetch a URL in the arguments before you decide.
         # The tool's own summary of what it will do, if it has one, goes first.
@@ -312,20 +288,19 @@ class TelegramBot:
                 ]
             ]
         )
-        msg = await bot.send_message(
-            chat_id, prompt, parse_mode=ParseMode.HTML, reply_markup=buttons, link_preview_options=NO_PREVIEW
-        )
         try:
-            approved = await asyncio.wait_for(future, timeout=timeout or self.cfg.confirm_timeout_seconds)
-            verdict = "Allowed" if approved else "Denied"
-        except TimeoutError:
-            approved, verdict = False, "No answer, so denied"
+            msg = await bot.send_message(
+                chat_id, prompt, parse_mode=ParseMode.HTML, reply_markup=buttons, link_preview_options=NO_PREVIEW
+            )
+        except BaseException:
+            self.s.approvals.answer(key, False)  # it can't be answered here: it mustn't wait on the dashboard
+            raise
+        try:
+            approved = await self.s.approvals.wait(approval)  # answered here, or on the dashboard
         except asyncio.CancelledError:  # /stop
             await self._settle(msg, f"Stopped: <b>{html.escape(tool)}</b>")
             raise
-        finally:
-            self._pending.pop(key, None)
-        await self._settle(msg, f"{verdict}: <b>{html.escape(tool)}</b>")
+        await self._settle(msg, f"{approval.verdict}: <b>{html.escape(tool)}</b>")
         return approved
 
     async def _settle(self, msg: Any, text: str) -> None:
@@ -336,10 +311,6 @@ class TelegramBot:
             pass
 
     # -- reaching you when you haven't just asked something (channel.py) ----------------------
-
-    @property
-    def chat_id(self) -> str:
-        return str(self.cfg.allowed_user_ids[0])  # a private chat with the bot has the user's ID
 
     async def tell(self, text: str) -> None:
         assert self._bot is not None
@@ -484,8 +455,17 @@ class TelegramBot:
         async def confirm(tool: str, args: dict[str, Any], summary: str | None = None) -> bool:
             return await self._confirm(bot, chat_id, tool, args, summary)
 
+        session = self.s.history.session  # what you say goes into the current session
         answering = asyncio.create_task(
-            self.s.agent.respond(str(chat_id), text, confirm=confirm, note=note, channel=channel, photos=photos)
+            self.s.agent.respond(
+                session.chat_id,
+                text,
+                confirm=confirm,
+                allowed=session.allowed_tools,
+                note=note,
+                channel=channel,
+                photos=photos,
+            )
         )
         self._answering.setdefault(chat_id, set()).add(answering)
         try:
@@ -502,19 +482,8 @@ class TelegramBot:
                 result.model_calls,
                 ", ".join(result.tools_used) or "none",
             )
-        except openai.APITimeoutError:
-            reply = f"The model took longer than {self.s.config.llm.timeout_seconds:.0f}s to answer, so I gave up."
-        except openai.APIConnectionError:
-            reply = (
-                f"I can't reach the model server at {self.s.config.llm.base_url}. Is the Mac awake and oMLX running?"
-            )
-        except openai.APIStatusError as exc:
-            reply = f"The model server returned an error ({exc.status_code}): {exc.message}"
-            if photos:
-                reply += "\nMaybe the model can't take photos: `athena doctor` checks."
         except Exception as exc:
-            log.exception("Agent failed")
-            reply = f"Something went wrong: {type(exc).__name__}: {exc}"
+            reply = commands.failure(self.s, exc, photos=bool(photos))
         finally:
             typing.cancel()
             self._answering[chat_id].discard(answering)
@@ -556,9 +525,7 @@ class TelegramBot:
             await query.answer("Not allowed.")
             return
         _, key, choice = (query.data or "::").split(":", 2)
-        future = self._pending.get(key)
-        if future and not future.done():
-            future.set_result(choice == "yes")
+        if self.s.approvals.answer(key, choice == "yes"):
             await query.answer()
         else:
             await query.answer("This request has expired.")
@@ -581,32 +548,16 @@ class TelegramBot:
     # -- commands -------------------------------------------------------------------------------
 
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        lines = [f"Hi! I'm {self.s.config.agent.assistant_name}. Just send me a message.", ""]
-        lines += [f"/{c} - {d}" for c, d in COMMANDS]
-        await update.effective_message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+        await update.effective_message.reply_text(commands.help_text(self.s))  # type: ignore[union-attr]
 
     async def cmd_session(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        session = self.s.new_session()
-        await update.effective_message.reply_text(  # type: ignore[union-attr]
-            f"Started session {session.id}. I've cleared our conversation from my context. "
-            "Memories are kept, and I can still search what we said before."
-        )
+        await update.effective_message.reply_text(commands.new_session(self.s))  # type: ignore[union-attr]
 
     async def cmd_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         assert message is not None
         said = await message.reply_text("Compacting our conversation…")
-        try:
-            summarised = await self.s.agent.compact(str(update.effective_chat.id))  # type: ignore[union-attr]
-        except Exception as exc:
-            log.warning("Couldn't compact the conversation: %s", exc)
-            text = f"I couldn't compact our conversation: {describe_error(exc)}. It's as it was."
-        else:
-            text = (
-                f"Done: I've summarised the {summarised} messages before the last few, and kept them as they were."
-                if summarised
-                else "There's nothing to compact yet: I see only the last few messages as they are."
-            )
+        text = await commands.compact(self.s, self.s.history.current_chat)
         with contextlib.suppress(TelegramError):
             await said.edit_text(text)
 
@@ -631,7 +582,7 @@ class TelegramBot:
         last = self._last.get(chat_id)
         if last and not last.answered:  # stopped, or it went wrong
             text, photos = last.text, last.photos
-        elif exchange := await self.s.take_back_last_exchange(str(chat_id)):
+        elif exchange := await self.s.take_back_last_exchange(self.s.history.current_chat):
             text, photos = exchange.question, self._kept_photos(exchange.photos)  # its text says [Photo]
         else:
             await update.effective_message.reply_text("There's nothing to try again in this session.")  # type: ignore[union-attr]
@@ -646,16 +597,9 @@ class TelegramBot:
         return [photo for name in names if (photo := self.s.history.photos.load(name))]
 
     async def cmd_think(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        choice = " ".join(ctx.args or []).strip().lower()
-        if choice:
-            if choice not in THINKING:
-                await update.effective_message.reply_text("Usage: /think on, /think short or /think off")  # type: ignore[union-attr]
-                return
-            await update.effective_message.reply_text(self._set_thinking(choice))  # type: ignore[union-attr]
-            return
-        await update.effective_message.reply_text(  # type: ignore[union-attr]
-            self._thinking_says(), reply_markup=self._thinking_buttons()
-        )
+        choice = " ".join(ctx.args or [])
+        buttons = None if choice.strip() else self._thinking_buttons()
+        await update.effective_message.reply_text(commands.think(self.s, choice), reply_markup=buttons)  # type: ignore[union-attr]
 
     async def on_think_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -667,24 +611,10 @@ class TelegramBot:
         if choice not in THINKING:
             await query.answer()
             return
-        said = self._set_thinking(choice)
+        said = commands.think(self.s, choice)
         await query.answer()
         with contextlib.suppress(TelegramError):  # say, pressing the one that's already chosen
             await query.edit_message_text(said, reply_markup=self._thinking_buttons())
-
-    def _set_thinking(self, mode: str) -> str:
-        try:
-            saved = self.s.set_thinking(mode)
-        except Exception as exc:  # such as config.toml being invalid
-            log.warning("Couldn't change thinking: %s", exc)
-            return f"I couldn't change that: {exc}"
-        return self._thinking_says() + ("" if saved else " Only until I restart: there's no config.toml to save it in.")
-
-    def _thinking_says(self) -> str:
-        llm = self.s.config.llm
-        return f"Thinking is {llm.thinking_now}: " + THINKING_SAYS[llm.thinking_now].format(
-            tokens=f"{llm.short_thinking_tokens:,}"
-        )
 
     def _thinking_buttons(self) -> InlineKeyboardMarkup:
         now = self.s.config.llm.thinking_now
@@ -702,29 +632,9 @@ class TelegramBot:
         await update.effective_message.reply_text(text, reply_markup=buttons)  # type: ignore[union-attr]
 
     def _tasks_message(self) -> tuple[str, InlineKeyboardMarkup | None]:
-        scheduler = self.s.tasks
-        if scheduler is None:
-            return "Tasks are switched off ([tasks] enabled = false in config.toml).", None
-        tasks = [scheduler.describe(t) for t in scheduler.store.all()]
-        if not tasks:
-            return (
-                "I've no tasks. Ask me to do something regularly, or in the background, such as "
-                "“every weekday at 7:30 send me a briefing”. You can also add them on the dashboard.",
-                None,
-            )
-        lines, rows = ["Tasks I do by myself:"], []
-        for t in tasks:
-            mark = {"active": "▶️", "paused": "⏸", "done": "✓", "running": "⚙️"}.get(t["status"], "")
-            nxt = ""
-            if t["status"] == "running":
-                nxt = " · working on it now"
-            elif t["waiting_for_you"]:
-                nxt = " · due, waiting until you've finished chatting"
-            elif t["next_run"]:
-                when = datetime.fromtimestamp(t["next_run"], scheduler.tz)
-                nxt = f" · next {when:%a %-d %b %H:%M}"
-            last = f" · last: {t['last_outcome']}" if t["last_outcome"] else ""
-            lines.append(f"{mark} #{t['id']} {t['title']}: {t['when']}{nxt}{last}")
+        text, listed = commands.tasks(self.s)
+        rows = []
+        for t in listed:
             row = [InlineKeyboardButton(f"▶ Run #{t['id']}", callback_data=f"task:run:{t['id']}")]
             if t["status"] == "running":
                 row = [InlineKeyboardButton(f"⏹ Stop #{t['id']}", callback_data=f"task:stop:{t['id']}")]
@@ -734,7 +644,7 @@ class TelegramBot:
                 row.append(InlineKeyboardButton("⏯ Resume", callback_data=f"task:resume:{t['id']}"))
             row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"task:delete:{t['id']}"))
             rows.append(row)
-        return "\n".join(lines), InlineKeyboardMarkup(rows)
+        return text, InlineKeyboardMarkup(rows) if rows else None
 
     async def on_task_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -761,57 +671,19 @@ class TelegramBot:
             await query.edit_message_text(text, reply_markup=buttons)
 
     async def cmd_remember(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        text = " ".join(ctx.args or []).strip()
-        if not text:
-            await update.effective_message.reply_text("Usage: /remember <fact>")  # type: ignore[union-attr]
-            return
-        memory_id, created = await self.s.memory.remember(text, source="telegram")
-        msg = f"Saved as memory #{memory_id}." if created else f"I already knew that (memory #{memory_id})."
-        await update.effective_message.reply_text(msg)  # type: ignore[union-attr]
+        said = await commands.remember(self.s, " ".join(ctx.args or []), source="telegram")
+        await update.effective_message.reply_text(said)  # type: ignore[union-attr]
 
     async def cmd_recall(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        query = " ".join(ctx.args or []).strip()
-        memory = self.s.memory
-        if query:
-            found = await memory.find(query, 8)
-            header = f"Memories matching '{query}':"
-        else:
-            found = [Found("fact", 1.0, h.text, id=h.id) for h in memory.store.recent(10)]
-            header = "Most recent memories:"
-        if not found:
-            await update.effective_message.reply_text("Nothing found.")  # type: ignore[union-attr]
-            return
-        lines = [header]
-        for f in found:
-            text = f.text if len(f.text) < 300 else f.text[:300] + "..."
-            score = f" ({1 - f.distance:.2f})" if query and f.distance is not None else ""
-            # A document goes by its path: its passages come and go with it when you index, so /forget isn't for them.
-            label = f"📄 {memory.show_path(f.path)}" if f.kind == "document" and f.path else f"#{f.id}"
-            lines.append(f"{label}{score} {text}")
-        await self._send(ctx.bot, update.effective_chat.id, "\n".join(lines))  # type: ignore[union-attr]
+        said = await commands.recall(self.s, " ".join(ctx.args or []))
+        await self._send(ctx.bot, update.effective_chat.id, said)  # type: ignore[union-attr]
 
     async def cmd_forget(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            memory_id = int((ctx.args or [""])[0].lstrip("#"))
-        except ValueError:
-            await update.effective_message.reply_text("Usage: /forget <id> (find ids with /recall)")  # type: ignore[union-attr]
-            return
-        ok = self.s.memory.forget(memory_id)
-        await update.effective_message.reply_text(  # type: ignore[union-attr]
-            f"Forgot memory #{memory_id}." if ok else f"There's no memory #{memory_id}."
-        )
+        said = commands.forget(self.s, " ".join(ctx.args or []))
+        await update.effective_message.reply_text(said)  # type: ignore[union-attr]
 
     async def cmd_tools(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        lines = ["Tools:"]
-        for tool in self.s.tools.all():
-            lines.append(f"- {tool.name} [{tool.source}]{flags(tool, self.s.tools)}")
-        lines.append("")
-        lines.append("MCP servers:")
-        for st in self.s.mcp.status() or []:
-            lines.append(f"- {st.name}: " + (f"connected, {st.tools} tools" if st.connected else f"down - {st.error}"))
-        if not self.s.mcp.status():
-            lines.append("- none configured")
-        await ctx.bot.send_message(update.effective_chat.id, "\n".join(lines))  # type: ignore[union-attr]
+        await ctx.bot.send_message(update.effective_chat.id, commands.tools(self.s))  # type: ignore[union-attr]
 
     async def cmd_reload(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Reconnecting to MCP servers...")  # type: ignore[union-attr]
@@ -823,16 +695,4 @@ class TelegramBot:
         await self.cmd_tools(update, ctx)
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        cfg = self.s.config
-        lines = [f"Model: {cfg.llm.model} (thinking {cfg.llm.thinking_now})", f"Endpoint: {cfg.llm.base_url}"]
-        try:
-            models = await asyncio.wait_for(self.s.llm.list_models(), 10)
-            ok = cfg.llm.model in models
-            lines.append("Model server: reachable" + ("" if ok else f" (but '{cfg.llm.model}' isn't listed)"))
-        except Exception as exc:
-            lines.append(f"Model server: unreachable ({type(exc).__name__})")
-        counts = self.s.memory.store.count()
-        lines.append(f"Memory: {counts.get('fact', 0)} facts, {counts.get('document', 0)} document chunks")
-        connected = sum(1 for st in self.s.mcp.status() if st.connected)
-        lines.append(f"Tools: {len(self.s.tools.all())} ({connected}/{len(self.s.mcp.status())} MCP servers up)")
-        await update.effective_message.reply_text("\n".join(lines))  # type: ignore[union-attr]
+        await update.effective_message.reply_text(await commands.status(self.s))  # type: ignore[union-attr]

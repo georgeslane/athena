@@ -5,6 +5,7 @@ CI installs the browser (`playwright install --only-shell chromium`), and there 
 they're skipped without one, or ATHENA_TEST_BROWSER can name a Chromium to use.
 """
 
+import asyncio
 import os
 import time
 
@@ -18,7 +19,7 @@ try:
 except ImportError:  # pragma: no cover - it's a dev dependency
     async_playwright = None
 
-TABS = ["status", "activity", "tasks", "memory", "skills", "board", "tools"]
+TABS = ["status", "chat", "activity", "tasks", "memory", "skills", "board", "tools"]
 LOOKS = [(360, 800, "light"), (1280, 900, "dark")]  # a small phone, and a desktop in dark mode
 
 
@@ -237,3 +238,191 @@ async def test_earlier_activity_comes_a_page_at_a_time(athena, browser):  # noqa
     assert await page.locator("#tab-activity .entry").count() == PAGE + 6  # and when Athena started
     assert not await page.is_visible("text=Show earlier")
     assert errors == []
+
+
+# -- chat -------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def talking(athena):  # noqa: F811
+    """Athena with a model that asks for send_note, which asks first, when a message says "use send_note"."""
+    from conftest import FakeLLMServer
+    from test_chat import Model
+
+    from athena.tools import Tool
+
+    let_go = asyncio.Event()
+
+    async def send_note(args):
+        return "Sent."
+
+    async def wait_here(args):
+        await let_go.wait()
+        return "Waited."
+
+    params = {"type": "object", "properties": {}}
+    athena.tools.add(Tool("send_note", "Sends a note.", params, send_note, needs_confirmation=True))
+    athena.tools.add(Tool("wait_here", "Waits.", params, wait_here))
+    athena.llm = athena.agent.llm = FakeLLMServer(Model()).client(athena.config.llm)
+    athena.let_go = let_go
+    return athena
+
+
+async def test_chatting_approving_and_carrying_on_an_earlier_session(talking, browser):
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.fill(".composer textarea", "Hello **there**")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.theirs >> text=Hello there.")
+    assert await page.input_value(".composer textarea") == ""
+    assert await page.inner_text(".session[aria-current] .session-title") == "Hello **there**"  # your words, as typed
+
+    # It asks before send_note: Allow, here.
+    await page.fill(".composer textarea", "Please use send_note")
+    await page.click(".chat-send")
+    await page.wait_for_selector("li.approval >> text=send_note")
+    assert await page.inner_text('.tab[data-tab="chat"] .tab-count') == "1"
+    await page.click("li.approval button:text-is('Allow')")
+    await page.wait_for_selector(".msg.theirs >> text=Done: Sent.")
+    await page.wait_for_selector('.tab[data-tab="chat"] .tab-count', state="detached")
+
+    # A command, from the suggestions, says what it did.
+    await page.fill(".composer textarea", "/he")
+    await page.wait_for_selector(".chat-suggest:not([hidden]) >> text=/help")
+    await page.press(".composer textarea", "Tab")
+    assert await page.input_value(".composer textarea") == "/help "
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.note >> text=Just send me a message.")
+
+    # A new chat, then back to the first, which says sending carries it on.
+    await page.click("text=New chat")
+    await page.wait_for_selector(".chat-empty")
+    await page.fill(".composer textarea", "Second conversation")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.theirs >> text=Hello there.")
+    await page.click(".session >> text=Hello **there**")
+    await page.wait_for_selector(".chat-notice >> text=An earlier session")
+    await page.fill(".composer textarea", "Back again")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.mine >> text=Back again")
+    await page.wait_for_selector(".chat-notice", state="hidden")
+    assert talking.history.session.id == 1
+    assert await page.inner_text(".session[aria-current] .current") == "Current"
+    assert errors == []
+
+
+async def test_allowing_a_tool_for_a_message_or_the_session(talking, browser):
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.click(".chat-tools")
+    row = page.locator(".allow-tool", has_text="send_note")
+    await row.locator("text=Next message").click()
+    await page.click("dialog >> text=Done")
+    assert await page.inner_text(".chat-allowed .chip") == "send_note"  # for the next message only
+    await page.fill(".composer textarea", "Please use send_note")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".msg.theirs >> text=Done: Sent.")  # without asking
+    await page.wait_for_selector(".chat-allowed", state="hidden")
+
+    await page.click(".chat-tools")
+    await page.locator(".allow-tool", has_text="send_note").locator("text=Session").click()
+    await page.click("dialog >> text=Done")
+    await page.wait_for_selector(".chat-tools >> text=1 allowed")
+    assert talking.history.session.allowed_tools == ("send_note",)
+    assert errors == []
+
+
+async def test_on_a_phone_the_shield_opens_the_menu(talking, browser):
+    page, base, errors = await signed_in(browser, talking, 375, 760)
+    assert await page.is_hidden("#tabs")
+    assert await page.inner_text("#brand-where") == "Status"
+    await page.click("#brand")
+    await page.wait_for_selector("#tabs")
+    assert await page.get_attribute("#brand", "aria-expanded") == "true"
+    await page.click('.tab[data-tab="chat"]')
+    await page.wait_for_selector("#tabs", state="hidden")
+    await page.wait_for_selector("#brand-where:text-is('Chat')")
+    assert page.url.endswith("#chat")
+    await page.click("#brand")
+    await page.keyboard.press("Escape")
+    await page.wait_for_selector("#tabs", state="hidden")
+
+    # A conversation, or the list of them, one at a time.
+    await page.wait_for_selector(".chat-main")
+    assert await page.is_hidden(".chat-sessions")
+    await page.click(".chat-back")
+    await page.wait_for_selector(".chat-sessions")
+    assert await page.is_hidden(".chat-main")
+    await page.click(".session")
+    await page.wait_for_selector(".chat-main")
+    assert errors == []
+
+
+async def test_while_athena_answers_enter_doesnt_stop_it_and_the_button_does(talking, browser):
+    page, base, errors = await signed_in(browser, talking)
+    await page.goto(f"{base}/#chat")
+    await page.fill(".composer textarea", "Please use wait_here")
+    await page.press(".composer textarea", "Enter")
+    await page.wait_for_selector(".typing >> text=Using wait_here")
+    assert await page.get_attribute(".chat-send", "aria-label") == "Stop"
+    await page.fill(".composer textarea", "And another thing")
+    await page.press(".composer textarea", "Enter")  # nothing: one message at a time
+    await page.wait_for_timeout(300)
+    assert talking.chat.replying is not None and await page.input_value(".composer textarea") == "And another thing"
+    assert await page.is_disabled("text=New chat")
+
+    await page.click(".chat-send")  # Stop
+    await page.wait_for_selector(".msg.failed >> text=Didn't get an answer: You stopped it.")
+    talking.let_go.set()
+    await page.click(".msg.failed >> text=Try again")
+    await page.wait_for_selector(".msg.theirs >> text=Done: Waited.")
+    await page.wait_for_selector(".msg.failed", state="detached")
+    assert errors == []
+
+
+async def test_turning_notifications_on_testing_them_and_off(talking, browser):
+    import json
+
+    import httpx
+    from test_push import Device
+
+    device, received = Device(), []
+    talking.push.http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: received.append(device.read(r.content)) or httpx.Response(201))
+    )
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    # The browser's push service, which headless Chromium hasn't: a subscription as Safari would give, once you've
+    # allowed notifications, which headless Chromium can't ask you.
+    sub = json.dumps(device.subscription)
+    await context.add_init_script(
+        f"""
+        const sub = {sub};
+        let current = null;
+        const made = {{ endpoint: sub.endpoint, options: {{}}, toJSON: () => sub,
+                        unsubscribe: async () => {{ current = null; return true; }} }};
+        PushManager.prototype.subscribe = async function () {{ return (current = made); }};
+        PushManager.prototype.getSubscription = async function () {{ return current; }};
+        Object.defineProperty(Notification, "permission", {{ get: () => "granted" }});
+        Notification.requestPermission = async () => "granted";
+        """
+    )
+    page = await context.new_page()
+    base = f"http://127.0.0.1:{talking.dashboard.port}"
+    await page.goto(f"{base}/")
+    await page.fill("#password", PASSWORD)
+    await page.click("#sign-in-form button[type=submit]")
+    await page.goto(f"{base}/#chat")
+    await page.wait_for_function("navigator.serviceWorker.controller !== null || navigator.serviceWorker.ready")
+    assert await page.evaluate("navigator.serviceWorker.ready.then((r) => r.active.scriptURL)") == f"{base}/sw.js"
+
+    await page.click(".chat-head .bell")
+    await page.click("dialog >> text=Turn on")
+    await page.wait_for_selector(".chat-head .bell[data-on=true]")
+    assert talking.push.subscribed(device.subscription["endpoint"]) == 1
+    await page.click("dialog >> text=Send a test")  # the dialog says they're on, and offers a test
+    await page.wait_for_selector("#toast >> text=Sent.")
+    assert received[0]["body"].startswith("Notifications are on.")
+    await page.click("dialog >> text=Turn off")
+    await page.wait_for_selector(".chat-head .bell[data-on=false]")
+    assert talking.push.subscribed() == 0
+    await context.close()

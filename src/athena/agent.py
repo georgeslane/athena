@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -25,7 +25,7 @@ from athena.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 from athena.status import StatusTracker, Task, describe_error
 from athena.timeline import MESSAGE, Timeline, ToolEvent, steps
 from athena.tool_search import USE_TOOL, unwrap
-from athena.tools import ToolError, ToolRegistry, Turn, begin_turn
+from athena.tools import NEVER_UNASKED, ToolError, ToolRegistry, Turn, begin_turn
 
 log = logging.getLogger(__name__)
 
@@ -207,10 +207,16 @@ class Agent:
     # -- tools --------------------------------------------------------------------------
 
     async def _run_tool(
-        self, call: ToolCall, confirm: ConfirmFn | None, task: Task, only: frozenset[str] | None = None
+        self,
+        call: ToolCall,
+        confirm: ConfirmFn | None,
+        task: Task,
+        only: frozenset[str] | None = None,
+        allowed: frozenset[str] = frozenset(),
     ) -> ToolEvent:
-        """Run a tool call. Returns what the model is told, what happened (RAN, FAILED or DECLINED), and whether it
-        was asked for approval and what the privacy check found."""
+        """Run a tool call. A tool that asks first runs without asking if it's in ``allowed``, unless it always asks
+        (NEVER_UNASKED). Returns what the model is told, what happened (RAN, FAILED or DECLINED), whether it was
+        asked about or allowed, and what the privacy check found."""
         args = call.arguments or {}
         tool = self.tools.get(call.name)
         if tool is None:
@@ -225,8 +231,10 @@ class Agent:
         flagged = verdict.describe() if verdict and verdict.findings else ""
         if verdict and verdict.refused:
             return ToolEvent(tool.name, args, f"Error: {refusal(verdict)}", FAILED, flagged=flagged)
+        approval = ""
+        unasked = tool.name in allowed and tool.name not in NEVER_UNASKED
         if tool.needs_confirmation:
-            if confirm is None:
+            if confirm is None and not unasked:
                 said = "Error: this action needs the user's approval, which can't be requested here."
                 return ToolEvent(tool.name, args, said, FAILED, flagged=flagged)
             summary = None
@@ -237,28 +245,32 @@ class Agent:
                     return ToolEvent(tool.name, args, self._tool_error(call.name, exc), FAILED, flagged=flagged)
             if verdict and verdict.findings:
                 summary = warning(verdict) + (f"\n{summary}" if summary else "")
-            try:
-                with task.approval(tool.name):
-                    approved = await confirm(tool.name, call.arguments, summary)
-            except Exception as exc:
-                log.warning("Confirmation request failed: %s", exc)
-                approved = False
-            if not approved:
-                said = "The user declined this action. Don't retry it unless they ask."
-                return ToolEvent(tool.name, args, said, DECLINED, asked=True, flagged=flagged)
-        asked = tool.needs_confirmation
+            if unasked:
+                approval = "allowed"
+                log.info("%s ran without asking, as it may here", tool.name)
+            else:
+                approval = "you"
+                try:
+                    with task.approval(tool.name):
+                        approved = await confirm(tool.name, call.arguments, summary)  # type: ignore[misc]
+                except Exception as exc:
+                    log.warning("Confirmation request failed: %s", exc)
+                    approved = False
+                if not approved:
+                    said = "The user declined this action. Don't retry it unless they ask."
+                    return ToolEvent(tool.name, args, said, DECLINED, approval, flagged)
         task.using(tool.name)
         try:
             result = await asyncio.wait_for(tool.handler(call.arguments), self.cfg.tool_timeout_seconds)
         except Exception as exc:
-            return ToolEvent(tool.name, args, self._tool_error(call.name, exc), FAILED, asked=asked, flagged=flagged)
+            return ToolEvent(tool.name, args, self._tool_error(call.name, exc), FAILED, approval, flagged)
         result = result if isinstance(result, str) else json.dumps(result, default=str)
         limit = self.cfg.max_tool_result_chars
         if len(result) > limit:
             result = result[:limit] + f"\n[...truncated {len(result) - limit} characters]"
         # An MCP server's own errors come back as text starting "Error:" (see mcp_manager.result_to_text).
         outcome = FAILED if result.startswith("Error:") else RAN
-        return ToolEvent(tool.name, args, result or "(no output)", outcome, asked=asked, flagged=flagged)
+        return ToolEvent(tool.name, args, result or "(no output)", outcome, approval, flagged)
 
     def _tool_error(self, name: str, exc: Exception) -> str:
         """What the model is told when a tool fails. Call it from the `except` block."""
@@ -362,6 +374,7 @@ class Agent:
         text: str,
         *,
         confirm: ConfirmFn | None = None,
+        allowed: Collection[str] = (),
         on_tool: ToolEventFn | None = None,
         note: str | None = None,
         channel: str = "",
@@ -369,7 +382,8 @@ class Agent:
         photos: list[Photo] | None = None,
     ) -> AgentResult:
         """Answer ``text``, and ``photos`` if it came with any. ``note`` goes in the context block for this message
-        only, e.g. how it was sent.
+        only, e.g. how it was sent. Tools that ask first run without asking if they're in ``allowed``, unless they
+        always ask.
 
         ``channel`` says where it came from, such as "Siri", for the usage statistics. ``background``
         is for a task Athena works on by itself: it doesn't hold up changes to the tools, which it
@@ -392,7 +406,9 @@ class Agent:
                 on_tool = _both(collect, on_tool)
             result: AgentResult | None = None
             try:
-                result = await self._respond(chat_id, text, task, confirm, on_tool, note, record, background, photos)
+                result = await self._respond(
+                    chat_id, text, task, confirm, frozenset(allowed), on_tool, note, record, background, photos
+                )
             except BaseException as exc:  # including cancellation, so the board never sticks on "working"
                 task.finish(exc)
                 record.error = describe_error(exc)
@@ -478,6 +494,7 @@ class Agent:
         text: str,
         task: Task,
         confirm: ConfirmFn | None,
+        allowed: frozenset[str],
         on_tool: ToolEventFn | None,
         note: str | None,
         record: QueryRecord,
@@ -494,12 +511,14 @@ class Agent:
             *self.history.load(chat_id),
             {"role": "user", "content": with_photos(f"{self.build_context(memories, note)}\n\n{text}", photos or [])},
         ]
-        result = await self._work(messages, task, confirm, on_tool, record, background)
+        result = await self._work(messages, task, confirm, on_tool, record, background, allowed)
         if not result.text.strip():
             result.text = "Sorry, I didn't manage to produce an answer. Could you rephrase that?"
             record.error = "No answer"
         else:
-            self.history.append_exchange(chat_id, text, result.text, tools=result.tools_used, photos=photos)
+            self.history.append_exchange(
+                chat_id, text, result.text, tools=result.tools_used, photos=photos, channel=record.channel
+            )
             result.saved = True
         return result
 
@@ -511,6 +530,7 @@ class Agent:
         on_tool: ToolEventFn | None,
         record: QueryRecord,
         background: Background | None,
+        allowed: frozenset[str] = frozenset(),
     ) -> AgentResult:
         """Call the model, and the tools it asks for, until it answers. Adds to ``messages`` as it goes."""
         started = time.monotonic()
@@ -549,7 +569,7 @@ class Agent:
                     if isinstance(run, str):
                         event = ToolEvent(call.name, call.arguments or {}, run, FAILED)
                     else:
-                        event = await self._run_tool(run, confirm, task, only)
+                        event = await self._run_tool(run, confirm, task, only, allowed)
                     output = event.output
                     result.tools_used.append(event.tool)
                     record.tools.append((event.tool, event.outcome))

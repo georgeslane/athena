@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from telegram.ext import CallbackQueryHandler, MessageHandler
 
 from athena.agent import AgentResult
+from athena.approvals import Approvals
 from athena.config import TelegramConfig
+from athena.history import ConversationStore
 from athena.telegram_bot import TelegramBot
 
 ME = 111
@@ -39,7 +41,13 @@ class FakeBot:
 
 def make_bot(config, respond, allowed=(ME,)):
     config.telegram = TelegramConfig(bot_token="123456:TEST", allowed_user_ids=list(allowed))
-    services = SimpleNamespace(config=config, agent=SimpleNamespace(respond=respond), rewarm=asyncio.Event())
+    services = SimpleNamespace(
+        config=config,
+        agent=SimpleNamespace(respond=respond),
+        rewarm=asyncio.Event(),
+        history=ConversationStore(config.db_path),
+        approvals=Approvals(),
+    )
     return TelegramBot(services)
 
 
@@ -72,7 +80,7 @@ def test_handlers_depend_on_allowlist(config):
 
 
 async def test_message_round_trip_with_confirmation(config):
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         approved = await confirm("delete_note", {"name": "shopping"})
         return AgentResult(text=f"**{'Deleted' if approved else 'Kept'}** it")
 
@@ -107,7 +115,7 @@ async def test_message_round_trip_with_confirmation(config):
 
 
 async def test_confirmation_times_out_as_denied(config):
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         return AgentResult(text="Kept it" if not await confirm("x", {}) else "Did it")
 
     bot = make_bot(config, respond)
@@ -122,7 +130,7 @@ async def test_confirmation_shows_long_arguments_in_full(config):
     body = "Hi Sam,\n\n" + "Here's the plan for the weekend. " * 200 + "\nP.S. the door code is 4321."
     args = {"to": "sam@example.com", "body": body}
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         return AgentResult(text="Sent" if await confirm("send_email", args) else "Not sent")
 
     bot = make_bot(config, respond)
@@ -145,7 +153,7 @@ async def test_agent_errors_become_friendly_replies(config):
     import httpx
     import openai
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         raise openai.APIConnectionError(request=httpx.Request("POST", "http://mac/v1/chat/completions"))
 
     bot = make_bot(config, respond)
@@ -204,15 +212,22 @@ async def test_keeps_the_model_server_warm(config):
         await bot.cmd_reload(update, SimpleNamespace(bot=FakeBot()))
         while len(calls) == settled:
             await asyncio.sleep(0.01)
+
+        # It warms up the current session: after a new one, that one.
+        bot.s.history.new_session()
+        bot.s.rewarm.set()
+        while calls[-1] != "session:2":
+            await asyncio.sleep(0.01)
     finally:
         task.cancel()
-    assert reloaded == [True] and set(calls) == {str(ME)}  # it reconnects every server
+    assert reloaded == [True]  # it reconnects every server
+    assert set(calls) == {"session:1", "session:2"}  # your conversation, not Telegram's chat
 
 
 async def test_confirmation_shows_what_the_tool_says_it_will_do(config):
     args = {"side": "buy", "ticker": "AAPL_US_EQ", "quantity": 2}
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         approved = await confirm("trading212_place_order", args, "Buy 2 Apple <Inc> at the market price.")
         return AgentResult(text="Bought" if approved else "Not bought")
 
@@ -341,7 +356,7 @@ async def test_compact_says_how_it_went(config):
         [(first, message)] = sent
         assert first == "Compacting our conversation…"
         said.append(message.edits[-1])
-    assert asked == ["1", "1", "1"]
+    assert asked == ["session:1"] * 3  # the conversation, the current session
     assert said[0].startswith("Done: I've summarised the 12 messages before the last few")
     assert said[1].startswith("There's nothing to compact yet")
     assert said[2].startswith("I couldn't compact our conversation:") and said[2].endswith("It's as it was.")
@@ -401,7 +416,7 @@ async def test_think_shows_and_changes_how_much_the_model_thinks(config):
 async def test_stop_stops_the_answer_in_progress(config):
     started = asyncio.Event()
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         started.set()
         await asyncio.Event().wait()  # thinking for ever
 
@@ -421,7 +436,7 @@ async def test_stop_stops_the_answer_in_progress(config):
 
 
 async def test_stop_while_waiting_for_your_approval(config):
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         await confirm("delete_note", {"name": "shopping"})
         return AgentResult(text="Never sent")
 
@@ -443,7 +458,7 @@ async def test_stop_while_waiting_for_your_approval(config):
 async def test_retry_stops_and_asks_again(config):
     asked = []
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         asked.append(text)
         if len(asked) == 1:
             await asyncio.Event().wait()  # the first time it never finishes
@@ -468,7 +483,7 @@ async def test_retry_stops_and_asks_again(config):
 async def test_retry_takes_back_the_last_answer_and_asks_again(config):
     asked, taken = [], []
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         asked.append(text)
         return AgentResult(text=f"Answer {len(asked)}", saved=True)
 
@@ -481,7 +496,7 @@ async def test_retry_takes_back_the_last_answer_and_asks_again(config):
     ctx = SimpleNamespace(bot=FakeBot(), args=[])
     await bot.on_text(text_update(ME, "What's the weather tomorrow?"), ctx)
     await bot.cmd_retry(command_update()[0], ctx)
-    assert taken == ["1"] and asked == ["What's the weather tomorrow?"] * 2
+    assert taken == ["session:1"] and asked == ["What's the weather tomorrow?"] * 2
     assert ctx.bot.sent[-1].text == "Answer 2"
 
     # After a restart, it's the last answer the model sees; in a new session, there isn't one.
@@ -558,7 +573,6 @@ async def test_tasks_lists_them_with_buttons_to_run_pause_and_delete(config):
 async def test_tasks_reach_you_through_telegram(config):
     bot = make_bot(config, None)
     bot._bot = FakeBot()
-    assert bot.chat_id == str(ME)
     await bot.tell("📋 **Briefing**\n\nAll quiet.")
     assert bot._bot.sent[-1].text == "📋 <b>Briefing</b>\n\nAll quiet." and bot._bot.sent[-1].chat_id == ME
 
@@ -606,7 +620,7 @@ def photo_update(user_id, sizes, caption=None, group=None, chat_id=1, document=N
 def asking(answer="It's a cat."):
     asked = []
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         asked.append((text, photos))
         return AgentResult(text=answer, saved=True)
 
@@ -675,7 +689,7 @@ async def test_a_model_that_cant_take_photos_says_so(config):
     import httpx
     import openai
 
-    async def respond(chat_id, text, confirm, note=None, channel=None, photos=None):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
         request = httpx.Request("POST", "http://llm.test/v1/chat/completions")
         raise openai.BadRequestError(
             "Model does not support images", response=httpx.Response(400, request=request), body=None
@@ -699,9 +713,29 @@ async def test_retry_sends_the_photos_again(config, tmp_path):
 
     bot = make_bot(config, respond)
     bot.s.take_back_last_exchange = take_back
-    bot.s.history = SimpleNamespace(photos=store)
+    bot.s.history.photos = store
     ctx = SimpleNamespace(bot=FakeBot(), args=[])
     await bot.cmd_retry(command_update()[0], ctx)
     ((text, photos),) = asked
     assert text == "[Photo] What's this?" and [p.data for p in photos] == [JPEG]  # one that's gone is left out
     assert ctx.bot.sent[0].text == "🔁 Trying again: [Photo] What's this?"
+
+
+async def test_an_approval_asked_here_can_be_answered_on_the_dashboard(config):
+    async def respond(chat_id, text, confirm, allowed=(), note=None, channel=None, photos=None):
+        return AgentResult(text="Sent" if await confirm("send_email", {"to": "sam"}) else "Not sent")
+
+    bot = make_bot(config, respond)
+    ctx = SimpleNamespace(bot=FakeBot())
+    task = asyncio.create_task(bot.on_text(text_update(ME, "email Sam"), ctx))
+    while not bot.s.approvals.pending():
+        await asyncio.sleep(0.01)
+    [approval] = bot.s.approvals.pending()
+    assert (approval.tool, approval.session, approval.why) == ("send_email", 1, "")  # your message, in session 1
+    assert bot.s.approvals.answer(approval.id, True)  # as the dashboard does
+    await asyncio.wait_for(task, 2)
+    prompt = ctx.bot.sent[0]
+    assert prompt.edits == ["Allowed: <b>send_email</b>"] and ctx.bot.sent[-1].text == "Sent"
+    upd, answers = button_update(ME, prompt.kwargs["reply_markup"].inline_keyboard[0][0].callback_data)
+    await bot.on_button(upd, ctx)
+    assert answers == ["This request has expired."]  # pressing it here afterwards does nothing

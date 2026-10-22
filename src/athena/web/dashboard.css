@@ -25,7 +25,6 @@
   --font-title: Cinzel, "Trajan Pro", Optima, Candara, "Palatino Linotype", Palatino, Georgia, serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --gutter: 16px;
-  --bottom-bar: 0px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -244,7 +243,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .panel {
   max-width: 1120px;
   margin: 0 auto;
-  padding: 18px max(var(--gutter), env(safe-area-inset-right)) calc(32px + var(--bottom-bar) + env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
+  padding: 18px max(var(--gutter), env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
 }
 
 .banner {
@@ -261,32 +260,49 @@ button, input, select, textarea { font: inherit; color: inherit; }
 @media (min-width: 1152px) { .app > .banner { margin-left: auto; margin-right: auto; } }
 .banner.info { background: color-mix(in srgb, var(--working) 10%, var(--surface)); border-color: color-mix(in srgb, var(--working) 35%, var(--surface)); }
 
-/* Phones: the tabs move to a bar at the bottom, within reach of your thumb. */
+/* Phones: the tabs are a menu, which the shield in the corner opens. It says which tab you're on, and the number
+   of things waiting for you. */
+.brand-where, .brand-chevron, .brand-count { display: none; }
 @media (max-width: 719px) {
-  :root { --bottom-bar: 58px; }
-  /* A blurred header would hold the bar inside it (a filter makes a containing block), so it's plain here. */
-  .top { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--bg); }
-  .top-inner { padding-top: 8px; padding-bottom: 7px; }
+  .top-inner { position: relative; padding-top: 8px; padding-bottom: 7px; }
+  .brand { padding: 2px 8px 2px 0; border-radius: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .top .wordmark { display: none; }
+  .brand-where { display: block; font-size: 18px; font-weight: 650; }
+  .brand-chevron { display: block; width: 18px; height: 18px; margin-left: -4px; fill: none; stroke: var(--muted); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s; }
+  .top[data-menu="open"] .brand-chevron { transform: rotate(180deg); }
+  .brand-count:not([hidden]) { display: inline-block; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--approval); color: var(--on-accent); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
+  .top[data-menu="open"] .brand-count { visibility: hidden; }
   .tabs {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 20;
+    display: none;
+    position: absolute;
+    top: calc(100% + 2px);
+    left: max(var(--gutter), env(safe-area-inset-left));
+    z-index: 30;
+    width: min(300px, calc(100vw - 2 * var(--gutter)));
+    max-height: calc(100dvh - 90px);
+    overflow-y: auto;
+    flex-direction: column;
+    gap: 2px;
     margin: 0;
-    padding: 6px max(12px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
-    border-radius: 0;
-    border: 0;
-    border-top: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg) 96%, transparent);
-    -webkit-backdrop-filter: saturate(1.4) blur(14px);
-    backdrop-filter: saturate(1.4) blur(14px);
+    padding: 6px;
+    border-radius: 16px;
+    background: var(--surface);
+    box-shadow: 0 14px 40px rgb(40 25 10 / 22%), var(--shadow);
   }
-  .tab { flex: 1; flex-direction: column; gap: 2px; padding: 5px 0 3px; font-size: 11px; }
-  .tab svg { width: 23px; height: 23px; }
-  .tab[aria-current="page"] { background: none; box-shadow: none; color: var(--accent); }
-  .tab-count { position: absolute; top: 1px; left: calc(50% + 6px); }
+  .top[data-menu="open"] .tabs { display: flex; }
+  .tab { gap: 12px; padding: 11px 12px; font-size: 16px; }
+  .tab svg { width: 20px; height: 20px; }
+  .tab .tab-count { margin-left: auto; }
+  .tab[aria-current="page"] { background: var(--surface-2); box-shadow: none; color: var(--accent); }
   .top .pill { margin-left: auto; }
+  .menu-backdrop:not([hidden]) { position: fixed; inset: 0; z-index: 9; background: rgb(20 12 4 / 22%); }
+}
+@media (min-width: 720px) { .menu-backdrop { display: none; } }
+/* Tablets: the tabs as icons, with each one's name when you point at it. */
+@media (min-width: 720px) and (max-width: 1099px) {
+  .tab > span:not(.tab-count) { display: none; }
+  .tab { padding: 7px 11px; }
+  .tab .tab-count { position: absolute; top: -4px; right: -4px; }
 }
 
 /* -- cards ---------------------------------------------------------------------------------------- */
@@ -610,7 +626,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(18px + var(--bottom-bar) + env(safe-area-inset-bottom));
+  bottom: calc(18px + env(safe-area-inset-bottom));
   z-index: 30;
   transform: translateX(-50%);
   max-width: calc(100vw - 2 * var(--gutter));
@@ -821,3 +837,115 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .story-form { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); min-width: 0; }
 
 .try-head { display: grid; gap: 2px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+
+/* -- chat: your sessions beside the conversation in one, or on a phone, one at a time ------------------------ */
+
+.chat-panel { padding-top: 14px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+.chat {
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+  gap: 14px;
+  /* The screen's height, less the header's, and the keyboard's on a phone: chat.js keeps these up to date. */
+  height: calc(var(--vvh, 100dvh) - var(--top-h, 64px) - 26px - env(safe-area-inset-bottom));
+  min-height: 320px;
+}
+.chat-sessions, .chat-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.chat-sessions-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 14px 10px; }
+.chat-sessions-head h2 { font-size: 17px; }
+.chat svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.session-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 0 8px 8px; list-style: none; }
+.session { display: grid; gap: 2px; padding: 9px 10px; border-radius: 10px; color: inherit; text-decoration: none; }
+.session:hover { background: var(--surface-2); }
+.session[aria-current="true"] { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+.session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; font-weight: 600; }
+.session-meta { font-size: 12.5px; color: var(--muted); }
+.session-meta .current { color: var(--idle); font-weight: 650; }
+
+.chat-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+.chat-heading { flex: 1; min-width: 0; }
+.chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+.chat-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--muted); }
+.tools-count { display: none; }
+.chat-back { display: none; padding-left: 4px; }
+
+.chat-log { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 14px; list-style: none; }
+.msg { display: grid; gap: 3px; max-width: min(78%, 680px); min-width: 0; }
+.msg.mine { align-self: flex-end; justify-items: end; }
+.msg.theirs, .msg.note { align-self: flex-start; }
+.msg-text { min-width: 0; padding: 9px 13px; border-radius: 17px; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+.msg.mine .msg-text { background: var(--accent); color: var(--on-accent); border-bottom-right-radius: 5px; }
+.msg.mine .msg-text a { color: inherit; }
+.msg.theirs .msg-text { background: var(--surface-2); border: 1px solid var(--border); border-bottom-left-radius: 5px; }
+.msg.note .msg-text { border: 1px dashed var(--divider); color: var(--muted); font-size: 14px; }
+.msg.command .msg-text { font-family: var(--font-mono); font-size: 13.5px; }
+.msg.pending .msg-text, .msg.failed .msg-text { opacity: 0.72; }
+.msg-meta { padding: 0 6px; font-size: 11.5px; color: var(--faint); overflow-wrap: anywhere; }
+.msg-failed { display: grid; justify-items: end; gap: 6px; font-size: 13px; color: var(--failed); text-align: right; }
+.msg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.msg-notice { align-self: center; max-width: 92%; padding: 3px 11px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 12.5px; text-align: center; overflow-wrap: anywhere; }
+.day-sep { align-self: center; margin: 6px 0 2px; color: var(--faint); font-size: 11px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+.chat-earlier { align-self: center; }
+.chat-empty { display: grid; gap: 4px; margin: auto; padding: 20px; color: var(--muted); text-align: center; }
+
+/* What Athena writes, in Markdown (md.js). */
+.md > * + * { margin-top: 8px; }
+.md-heading { font-weight: 700; }
+.md-heading.h1 { font-size: 1.15em; }
+.md-list { display: grid; gap: 3px; margin: 0; padding-left: 1.35em; }
+.md-quote { margin: 0; padding-left: 10px; border-left: 3px solid var(--divider); color: var(--muted); }
+.md-code { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); font: 12.5px/1.5 var(--font-mono); white-space: pre; overflow-x: auto; }
+.md-inline { padding: 1px 4px; border-radius: 5px; background: var(--bg); border: 1px solid var(--border); }
+.md-rule { border: 0; border-top: 1px solid var(--border); }
+
+.typing { display: flex; align-items: center; gap: 9px; padding: 9px 13px; border-radius: 17px; border-bottom-left-radius: 5px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); font-size: 13.5px; }
+.dots { display: inline-flex; gap: 3px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: blink 1.2s ease-in-out infinite; }
+.dots i:nth-child(2) { animation-delay: 0.2s; }
+.dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .dots i { animation: none; } }
+
+.approval { align-self: stretch; display: grid; gap: 8px; padding: 12px 14px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--approval) 55%, var(--surface)); background: color-mix(in srgb, var(--approval) 10%, var(--surface)); }
+.approval-title { font-weight: 600; overflow-wrap: anywhere; }
+.approval-summary { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-args { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); font: 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+.approval-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.approval-time { flex: 1 1 auto; }
+
+.composer { position: relative; display: grid; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.composer-row { display: flex; align-items: flex-end; gap: 8px; }
+.composer textarea { flex: 1; min-width: 0; min-height: 42px; max-height: 200px; padding: 10px 14px; border-radius: 21px; resize: none; font-family: var(--font); font-size: 16px; line-height: 1.4; }
+.chat-send { flex: none; width: 42px; height: 42px; min-height: 42px; padding: 0; border-radius: 50%; }
+.chat .chat-send svg { width: 19px; height: 19px; }
+.chat-send.stop { background: var(--failed); border-color: var(--failed); }
+.chat-send.stop svg { fill: currentColor; }
+.chat-notice { font-size: 12.5px; color: var(--muted); }
+.chat-allowed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chat-allowed[hidden], .chat-notice[hidden] { display: none; }
+.chat-suggest { position: absolute; left: 12px; right: 12px; bottom: calc(100% - 4px); z-index: 5; max-height: 260px; overflow-y: auto; margin: 0; padding: 4px; list-style: none; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 10px 30px rgb(40 25 10 / 18%); }
+.chat-suggest li { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding: 7px 10px; border-radius: 8px; font-size: 13.5px; cursor: pointer; }
+.chat-suggest li[aria-selected="true"], .chat-suggest li:hover { background: var(--surface-2); }
+.chat-suggest code { flex: none; color: var(--accent); font-weight: 650; }
+.chat-suggest span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+
+.allow-tools { display: grid; gap: 12px; max-height: 55vh; overflow-y: auto; margin: 12px 0; padding: 0; list-style: none; }
+.allow-tool { display: grid; gap: 6px; min-width: 0; }
+.allow-name { display: grid; gap: 1px; min-width: 0; }
+.allow-name code { font-weight: 650; overflow-wrap: anywhere; }
+.allow-tool .switcher { justify-self: start; }
+
+@media (max-width: 719px) {
+  .chat { grid-template-columns: minmax(0, 1fr); }
+  .chat[data-view="conversation"] .chat-sessions, .chat[data-view="list"] .chat-main { display: none; }
+  .chat-back { display: inline-flex; padding: 3px 6px; }
+  .chat-head { gap: 6px; padding: 10px 10px 10px 6px; }
+  .chat-head .wide-only { display: none; } /* the buttons say what they are with their icons, and their labels */
+  .chat-head .tools-count { display: inline; font-weight: 700; }
+  .msg { max-width: 88%; }
+  .chat-log { padding: 12px 10px; }
+}
+
+/* Notifications on this device: the bell, filled while they're on (notifications.js). */
+.bell svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.bell[data-on="true"] { color: var(--accent); }
+.bell[data-on="true"] svg { fill: currentColor; }
