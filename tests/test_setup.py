@@ -197,3 +197,29 @@ def test_on_linux_it_installs_and_starts_the_service(home, monkeypatch, tmp_path
     ]
     assert f"WorkingDirectory={home}" in (tmp_path / "athena.service").read_text()
     assert any("Athena's running" in line for line in said)
+
+
+def test_changes_are_used_once_the_running_athena_is_restarted(home, monkeypatch):
+    """It reads them when it starts, so a new dashboard password does nothing until then."""
+    from test_service import Recorder
+
+    client, _ = servers()
+    monkeypatch.setattr(setup_wizard.sys, "platform", "darwin")
+    wizard(["George", "", "Europe/London", "http://mac:8000/v1", "", "", "n"], ["sk-mac", "", ""], client)[0].start()
+    monkeypatch.setattr(setup_wizard.sys, "platform", "linux")
+    monkeypatch.setattr(setup_wizard.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def setup(answers, secrets=()):
+        w, said, answers, _ = wizard(answers, secrets, client)
+        w.run = Recorder()
+        w.start()
+        assert answers == []
+        return w.run.calls, said
+
+    calls, _ = setup(["5", "y", "", "y"], ["open-sesame-123456"])  # a new password, then yes, restart
+    assert calls == ["systemctl is-active --quiet athena", "sudo systemctl restart athena"]
+    calls, said = setup(["5", "y", "", "n"], ["open-sesame-654321"])
+    assert calls == ["systemctl is-active --quiet athena"]
+    assert "  It'll use them when it next starts: `sudo systemctl restart athena`." in said
+    calls, _ = setup(["5", "n", ""])  # nothing changed: nothing to ask
+    assert calls == []

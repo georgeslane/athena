@@ -61,6 +61,7 @@ class Wizard:
         self.run = run or subprocess.run  # for the service's commands
         self.path = find_config(config)
         self.settings = Settings(self.path, self.path.parent / ".env")
+        self.changed = False  # whether a setting or secret has been saved
         load_dotenv(self.path.parent / ".env", override=False, interpolate=False)  # which secrets are set
 
     # -- asking --
@@ -109,12 +110,14 @@ class Wizard:
         except SettingsError as exc:
             self.say(f"  Not saved: {exc}")
             return False
+        self.changed = True
         return True
 
     def set_secrets(self, values: dict[str, str | None]) -> None:
         changes = {name: value for name, value in values.items() if value is not None}
         if changes:
             EnvFile(self.path.parent / ".env").update(changes)
+            self.changed = True
 
     # -- the whole thing --
 
@@ -142,6 +145,8 @@ class Wizard:
                 self.say(f"  {i}  {part.title:<22} {part.show(self)}")
             choice = self.ask_raw("\nChange which? (number, or Enter when you're done): ").strip()
             if not choice:
+                if self.changed:
+                    self.offer_restart()
                 return
             if not choice.isdigit() or not 1 <= int(choice) <= len(parts):
                 self.say("  Choose one of the numbers.")
@@ -149,6 +154,18 @@ class Wizard:
             part = parts[int(choice) - 1]
             self.say(f"\n== {part.title}")
             part.change(self)
+
+    def offer_restart(self) -> None:
+        """Athena reads its settings and secrets when it starts, so restart it, if it's running, to use new ones."""
+        if sys.platform != "linux" or not shutil.which("systemctl"):
+            return
+        if self.run(["systemctl", "is-active", "--quiet", "athena"]).returncode != 0:
+            return
+        if self.yes("Athena's running with what it had before. Restart it to use the changes?"):
+            self.run(["sudo", "systemctl", "restart", "athena"], check=True)
+            self.say("  Restarted.")
+        else:
+            self.say("  It'll use them when it next starts: `sudo systemctl restart athena`.")
 
     def make_home(self) -> None:
         """Athena's home folder, with config.toml and .env to start from, or moved from an old checkout."""
