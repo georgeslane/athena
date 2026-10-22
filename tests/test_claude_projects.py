@@ -532,7 +532,7 @@ async def test_claude_that_stopped_part_way_carries_on(projects, github):
 async def test_athena_gives_up_and_says_so_then_you_can_restart_it(make, github):
     projects = make(max_restarts=2)
     clock = projects.clock
-    project = await hand(projects)
+    await hand(projects)
     told = []
     for _ in range(12):
         clock.wait(4 * HOUR)
@@ -540,12 +540,13 @@ async def test_athena_gives_up_and_says_so_then_you_can_restart_it(make, github)
     assert len(github.labelled()) == 3  # handed over, then two tries
     assert len(told) == 2 and told[1].startswith(
         "⚠️ Claude still hasn't started on “Bank statements” after 2 tries. Check its routine at "
-        "claude.ai/code/routines, then press Restart on the Board tab."
+        "claude.ai/code/routines, then ask me to start it again."
     )
     assert projects.projects[0].gave_up
 
-    # You fix the routine and press Restart.
-    await projects.restart(project.folder)
+    # You fix the routine and ask Athena to start it again.
+    said = await tool(projects, "claude_projects").handler({"project": "bank", "restart": True})
+    assert said.startswith("Started Claude again on “Bank statements”.")
     assert len(github.labelled()) == 4 and not projects.projects[0].gave_up
     clock.wait(31 * 60)
     await projects.refresh()
@@ -635,7 +636,7 @@ def test_it_needs_a_token_and_a_repo(config):
 
 
 def test_a_task_always_asks_before_pushing_to_github():
-    from athena.tasks import NEVER_UNASKED
+    from athena.tools import NEVER_UNASKED
 
     assert {"hand_to_claude", "answer_claude", "extend_claude_project"} <= NEVER_UNASKED
 

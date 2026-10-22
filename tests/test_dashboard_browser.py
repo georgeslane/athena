@@ -178,7 +178,7 @@ async def test_a_runs_steps_stay_open_when_the_tab_is_drawn_again(athena, browse
 
 def test_the_seeded_steps_are_what_a_run_records():
     """seed() writes steps by hand: they have the fields steps() gives them."""
-    from athena.timeline import steps
+    from athena.steps import steps
 
     taken, _ = steps()
     assert taken == [] and completion("x")["choices"][0]["message"]["content"] == "x"

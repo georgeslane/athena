@@ -1,11 +1,12 @@
-"""Chatting with Athena on the dashboard.
+"""Chatting with Athena's agents on the dashboard.
 
-You send a message in a session, which makes it the current session if it wasn't (history.py), and Athena
+Each agent is a session (history.py), its conversation, with a model, guidance and DAG of its own (dags/). You
+send a message to an agent, which makes it the main one, the current session, if it wasn't, and Athena
 answers in the background while the page follows how it's going. One message at a time: while Athena's
 answering you, here or anywhere else, nothing more can be sent, so messages can't pile up, and sessions can't be
 changed. If it couldn't answer, your message is kept, here only, for you to try again. A message can come with
 photos, which the model sees, and files, which go into the workspace's inbox/ as Telegram's do (files.py).
-Sessions can be named, muted so they don't notify your devices, and deleted, with their tasks.
+Agents can be named, muted so they don't notify your devices, and deleted, with their DAGs.
 
 Tools that ask first ask here, and Telegram's requests can be answered here too (approvals.py). You can allow
 tools without asking for one message, or for a whole session, which Telegram's messages in it get too.
@@ -99,14 +100,19 @@ class DashboardChat:
 
     # -- sessions ---------------------------------------------------------------------------------
 
-    def new_session(self) -> Session:
-        """A new conversation, as the current session: the current one, if nothing's been said in it yet."""
+    def new_session(self, name: Any = "") -> Session:
+        """A new agent, as the main one: the main one, if nothing's been said in it and it's nothing else yet."""
+        if not isinstance(name, str):
+            raise ValueError('Send its name: {"name": "Job hunting"}.')
         if self.busy:
             raise Busy()
         current = self.s.history.session
-        if not self.s.history.messages(current.id, limit=1)[0] and current.id not in self.failed:
-            return current
-        return self.s.new_session()
+        config = self.s.dags.store.get(current.id)
+        empty = not (current.name or config.dag or config.guidance or config.context or config.model)
+        if empty and not self.s.history.messages(current.id, limit=1)[0] and current.id not in self.failed:
+            return self.s.history.rename(current.id, name) if name.strip() else current
+        session = self.s.new_session()
+        return self.s.history.rename(session.id, name) if name.strip() else session
 
     def allow_in_session(self, session_id: int, names: Collection[str]) -> Session:
         """The tools that may run without asking in a session. KeyError if there's no such session."""
@@ -126,8 +132,8 @@ class DashboardChat:
         return self.s.history.set_muted(session_id, muted)
 
     async def delete(self, session_id: int) -> Session:
-        """Delete a session, with its tasks. Returns the current session. Busy if Athena's answering you in it,
-        KeyError if there's no such session."""
+        """Delete an agent, with its DAG and runs. Returns the main agent. Busy if Athena's answering you in it,
+        KeyError if there's no such agent."""
         session = await self.s.delete_session(session_id)
         self._changed()
         return session
@@ -300,7 +306,12 @@ class DashboardChat:
         elsewhere = None
         if self.replying is None and self.s.agent.answering_you:
             elsewhere = {"session": history.session.id, "channel": snapshot.channel, "text": snapshot.task}
-        tasks = self.s.tasks.store.all() if self.s.tasks else []
+        dags = self.s.dags
+        configs = {c.id: c for c in dags.store.all()}
+        current = dags.current
+        waiting: dict[int, int] = {}
+        for proposal in dags.store.proposals():
+            waiting[proposal.agent] = waiting.get(proposal.agent, 0) + 1
         return {
             "current": history.session.id,
             "sessions": [
@@ -313,9 +324,10 @@ class DashboardChat:
                     "messages": s.messages,
                     "last": s.last_message,
                     "muted": s.muted,
-                    "tasks": sum(t.session_id == s.id for t in tasks),
+                    "dag": self._dag(configs.get(s.id), current is not None and current.run.agent == s.id),
+                    "proposals": waiting.get(s.id, 0),
                 }
-                for s in history.sessions(also={t.session_id for t in tasks if t.session_id is not None})
+                for s in history.sessions(also={c.id for c in configs.values() if c.dag})
             ],
             "busy": self.busy,
             "replying": self.replying.as_dict() if self.replying else None,
@@ -332,13 +344,25 @@ class DashboardChat:
             "attach": {"photos": MAX_PER_MESSAGE, "files": MAX_FILES if self.s.config.workspace.enabled else 0},
         }
 
+    def _dag(self, config: Any, running: bool) -> dict[str, Any] | None:
+        """An agent's DAG, as the list of agents shows it: when it runs, and whether it is."""
+        if config is None or not config.dag:
+            return None
+        spec = self.s.dags.spec(config.dag)
+        return {
+            "when": spec.describe() if spec else "its file has a problem",
+            "running": running,
+            "paused": config.paused,
+            "next_run": config.next_run if not config.paused else None,
+        }
+
     def session(self, session_id: int, before: int | None = None) -> dict[str, Any]:
-        """A session's messages, the last page of them or those before a message, and what's allowed in it."""
+        """An agent's messages, the last page of them or those before a message, and its settings: what's allowed in
+        it, its model, guidance and what its DAG kept."""
         session = self.s.history.get_session(session_id)
         if session is None:
             raise KeyError(session_id)
         messages, more = self.s.history.messages(session_id, before)
-        scheduler = self.s.tasks
         return {
             "id": session.id,
             "name": session.name,
@@ -346,7 +370,7 @@ class DashboardChat:
             "started": session.started,
             "last_used": session.last_used,
             "allowed_tools": list(session.allowed_tools),
-            "tasks": [scheduler.describe(t) for t in scheduler.in_session(session_id)] if scheduler else [],
+            **self.s.dags.store.get(session_id).as_dict(),
             "messages": [
                 {
                     "id": m.id,

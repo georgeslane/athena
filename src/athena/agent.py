@@ -8,14 +8,15 @@ import json
 import logging
 import time
 from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from athena.compaction import KEEP_MESSAGES, MIN_MESSAGES, summarise
 from athena.config import AgentConfig
+from athena.gate import Gate
 from athena.history import ConversationStore, session_of
 from athena.llm import LLMClient, LLMReply, ToolCall
 from athena.memory import MemoryHit, MemoryService
@@ -23,7 +24,7 @@ from athena.photos import Photo, label, with_photos
 from athena.privacy import Privacy, refusal, warning
 from athena.stats import DECLINED, FAILED, RAN, QueryRecord, UsageStats
 from athena.status import StatusTracker, Task, describe_error
-from athena.timeline import MESSAGE, Timeline, ToolEvent, steps
+from athena.steps import ToolEvent
 from athena.tool_search import USE_TOOL, unwrap
 from athena.tools import NEVER_UNASKED, ToolError, ToolRegistry, Turn, begin_turn
 
@@ -53,6 +54,17 @@ def render_system_prompt(template: str | None, cfg: AgentConfig) -> str:
     }.items():
         prompt = prompt.replace("{" + key + "}", value)
     return prompt.strip()
+
+
+class Directory(Protocol):
+    """What makes each agent's conversation its own (dags/): the model it uses, what it's told at the start of
+    it, and what its DAG's doing now."""
+
+    def model(self, chat_id: str) -> str | None: ...
+
+    def intro(self, chat_id: str) -> str: ...
+
+    def note(self, chat_id: str) -> str: ...
 
 
 @dataclass
@@ -120,8 +132,10 @@ class Agent:
         self.on_answered: Callable[[AgentResult, Background | None], None] | None = None
         # Looks through what each tool would send for personal details and secrets (privacy.py).
         self.privacy: Privacy | None = None
-        # Where your messages, and what was done for them, are noted for the dashboard (timeline.py).
-        self.timeline: Timeline | None = None
+        # Each agent's model, guidance and DAG (dags/), for its conversation.
+        self.directory: Directory | None = None
+        # Your messages go first, between the tasks Athena does by itself (gate.py).
+        self.gate = Gate()
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._compact_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._compacting: dict[str, asyncio.Task[None]] = {}  # compacting after an answer, by chat
@@ -215,12 +229,13 @@ class Agent:
         task: Task,
         only: frozenset[str] | None = None,
         allowed: frozenset[str] = frozenset(),
+        hidden: Sequence[str] = (),
     ) -> ToolEvent:
         """Run a tool call. A tool that asks first runs without asking if it's in ``allowed``, unless it always asks
         (NEVER_UNASKED). Returns what the model is told, what happened (RAN, FAILED or DECLINED), whether it was
         asked about or allowed, and what the privacy check found."""
         args = call.arguments or {}
-        tool = self.tools.get(call.name)
+        tool = self.tools.get(call.name, hidden)
         if tool is None:
             return ToolEvent(call.name, args, f"Error: there is no tool called '{call.name}'.", FAILED)
         if only is not None and call.name not in only:
@@ -356,16 +371,18 @@ class Agent:
         only has to be read itself. Skipped while a message is being answered, which does the same.
         """
         lock = self._locks[chat_id]
-        if lock.locked():
+        if lock.locked() or self.gate.working:  # the model's in use, by you or by a task Athena's doing by itself
             return None
         async with self._working(), lock:
             messages = [
                 {"role": "system", "content": self.prompt()},
-                *self.history.load(chat_id),
+                *self.history.load(chat_id, intro=self._intro(chat_id)),
                 {"role": "user", "content": "Hi"},  # the next message goes here; only what's before it is reused
             ]
             session = self.history.session.id
-            reply = await self.llm.chat(messages, self.tools.schemas() or None, max_tokens=1)
+            reply = await self.llm.chat(
+                messages, self.tools.schemas() or None, max_tokens=1, model=self._model(chat_id)
+            )
             if self.stats and reply.prompt_tokens:  # how much the conversation takes up, for the dashboard
                 self.stats.note_context(session, reply.prompt_tokens)
             return reply
@@ -388,9 +405,9 @@ class Agent:
         always ask.
 
         ``channel`` says where it came from, such as "Siri", for the usage statistics. ``background``
-        is for a task Athena works on by itself: it doesn't hold up changes to the tools, which it
-        could for many minutes, and doesn't count as you chatting. Nor does it hold up your messages in
-        the same session, which it waits for: what it says is kept after them.
+        is for something Athena works on by itself: it doesn't hold up changes to the tools, which it
+        could for many minutes, and doesn't count as you chatting. A message of yours waits for the task
+        Athena's working on by itself, if it is, to finish (gate.py).
         """
         async with contextlib.AsyncExitStack() as stack:
             if background is None:
@@ -398,7 +415,6 @@ class Agent:
                 self.answering_you += 1
                 self.chatting.set()
                 stack.callback(self._answered_you)
-                await stack.enter_async_context(self._locks[chat_id])
             shown = text or (label(len(photos)) if photos else "")  # a photo without a caption
             task = self.status.begin(background.label if background else shown)
             session = session_of(chat_id)
@@ -406,13 +422,14 @@ class Agent:
                 session=session if session is not None else self.history.session.id,
                 channel=channel or self.status.channel,
             )
-            # Your messages go on the timeline here; what Athena does by itself, where it's done (tasks/).
-            noting = background is None and self.timeline is not None
-            taken, collect = steps()
-            if noting:
-                on_tool = _both(collect, on_tool)
             result: AgentResult | None = None
             try:
+                if background is None:
+                    if self.gate.held:
+                        task.waiting_for_task(self.gate.working or "a task")
+                    await stack.enter_async_context(self.gate.yours())
+                    task.thinking()
+                    await stack.enter_async_context(self._locks[chat_id])
                 result = await self._respond(
                     chat_id, text, task, confirm, frozenset(allowed), on_tool, note, record, background, photos
                 )
@@ -422,8 +439,6 @@ class Agent:
                 raise
             finally:
                 self._record(record)
-                if noting:
-                    self._note(shown, record, result, taken)
             task.finish()
         if result.saved and self.on_saved:
             self.on_saved()
@@ -436,11 +451,31 @@ class Agent:
     async def follow_up(self, transcript: list[dict[str, Any]], text: str, background: Background) -> AgentResult:
         """Ask the model ``text`` after what it did in ``transcript`` (from AgentResult.transcript), working by
         itself: to look back at how a skill went. Nothing's kept in the history."""
+        return await self.work([*transcript, {"role": "user", "content": text}], background, channel="Skills")
+
+    async def work(
+        self,
+        messages: list[dict[str, Any]],
+        background: Background,
+        *,
+        confirm: ConfirmFn | None = None,
+        allowed: Collection[str] = (),
+        on_tool: ToolEventFn | None = None,
+        hidden: Sequence[str] = (),
+        model: str | None = None,
+        dag: Any = None,
+        session: int | None = None,
+        channel: str = "DAG",
+    ) -> AgentResult:
+        """Work by itself on the last of ``messages``, a conversation of Athena's own, such as a DAG run's (dags/):
+        nothing's kept in the history, and ``messages`` gets what the model and tools said along the way. ``hidden``
+        tools are found when they're needed, as well as [tools] on_demand; ``dag`` is the run it's for."""
         task = self.status.begin(background.label)
-        record = QueryRecord(session=self.history.session.id, channel="Skills")
-        messages = [*transcript, {"role": "user", "content": text}]
+        record = QueryRecord(session=session if session is not None else self.history.session.id, channel=channel)
         try:
-            result = await self._work(messages, task, None, None, record, background)
+            result = await self._work(
+                messages, task, confirm, on_tool, record, background, frozenset(allowed), None, hidden, model, dag
+            )
         except BaseException as exc:
             task.finish(exc)
             record.error = describe_error(exc)
@@ -450,6 +485,12 @@ class Agent:
         task.finish()
         return result
 
+    def _model(self, chat_id: str) -> str | None:
+        return self.directory.model(chat_id) if self.directory else None
+
+    def _intro(self, chat_id: str) -> str:
+        return self.directory.intro(chat_id) if self.directory else ""
+
     def _answered_you(self) -> None:
         self.answering_you -= 1
         self.last_answered_you = time.monotonic()
@@ -457,7 +498,7 @@ class Agent:
             self.chatting.clear()
 
     def _record(self, record: QueryRecord) -> None:
-        record.seconds = time.time() - record.started  # for the timeline too
+        record.seconds = time.time() - record.started
         if not self.stats:
             return
         try:
@@ -465,29 +506,15 @@ class Agent:
         except Exception:  # statistics mustn't get in the way of an answer
             log.exception("Couldn't record usage statistics")
 
-    def _note(self, text: str, record: QueryRecord, result: AgentResult | None, taken: list[dict[str, str]]) -> None:
-        """Put your message, and how it was answered, on the timeline."""
-        assert self.timeline is not None
-        outcome = "answered"
-        if record.error:
-            outcome = "stopped" if record.error == "Stopped" else f"failed: {record.error}"
-        try:
-            self.timeline.add(
-                MESSAGE,
-                text,
-                outcome,
-                said=result.text if result and not record.error else "",
-                channel=record.channel,
-                seconds=record.seconds,
-                steps=taken,
-            )
-        except Exception:  # like the statistics, it mustn't get in the way of an answer
-            log.exception("Couldn't note the message on the timeline")
-
     async def _chat(
-        self, record: QueryRecord, messages: list[dict[str, Any]], schemas: Any, thinking: str | None = None
+        self,
+        record: QueryRecord,
+        messages: list[dict[str, Any]],
+        schemas: Any,
+        thinking: str | None = None,
+        model: str | None = None,
     ) -> LLMReply:
-        reply = await self.llm.chat(messages, schemas, thinking=thinking)
+        reply = await self.llm.chat(messages, schemas, thinking=thinking, model=model)
         record.model_calls += 1
         record.prompt_tokens = max(record.prompt_tokens, reply.prompt_tokens or 0)
         record.completion_tokens += reply.completion_tokens or 0
@@ -511,14 +538,22 @@ class Agent:
         memories = await self._recall(text) if text.strip() else []
         if photos and not text.startswith(label(len(photos))):  # as it is when /retry sends it again
             text = f"{label(len(photos))} {text}".rstrip()  # so the history, memory and skills know of them
+        if self.directory and (happening := self.directory.note(chat_id)):
+            note = f"{note}\n{happening}" if note else happening
         # Dynamic context goes in the newest user message, not the system prompt, so
         # everything before it is byte-identical to the previous request (prompt cache hit).
+        history = self.history.load(chat_id, intro=self._intro(chat_id))
+        context = self.build_context(memories, note)
+        if not history and (intro := self._intro(chat_id)):
+            context = f"{intro}\n\n{context}"  # what the conversation starts with, as history.load gives it after
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.prompt()},
-            *self.history.load(chat_id),
-            {"role": "user", "content": with_photos(f"{self.build_context(memories, note)}\n\n{text}", photos or [])},
+            *history,
+            {"role": "user", "content": with_photos(f"{context}\n\n{text}", photos or [])},
         ]
-        result = await self._work(messages, task, confirm, on_tool, record, background, allowed, chat_id)
+        result = await self._work(
+            messages, task, confirm, on_tool, record, background, allowed, chat_id, model=self._model(chat_id)
+        )
         if not result.text.strip():
             result.text = "Sorry, I didn't manage to produce an answer. Could you rephrase that?"
             record.error = "No answer"
@@ -541,18 +576,21 @@ class Agent:
         background: Background | None,
         allowed: frozenset[str] = frozenset(),
         chat_id: str | None = None,
+        hidden: Sequence[str] = (),
+        model: str | None = None,
+        dag: Any = None,
     ) -> AgentResult:
         """Call the model, and the tools it asks for, until it answers. Adds to ``messages`` as it goes."""
         started = time.monotonic()
-        schemas = self.tools.schemas() or None
+        schemas = self.tools.schemas(hidden) or None
         result = AgentResult(text="")
         thinking = background.thinking if background else None
         only = background.only_tools if background else None
-        turn = Turn(alone=(background.source or background.label) if background else None, chat=chat_id)
+        turn = Turn(alone=(background.source or background.label) if background else None, chat=chat_id, dag=dag)
         end_turn = begin_turn(turn)
 
         def step(tools: Any) -> Awaitable[LLMReply]:
-            call = lambda: self._chat(record, messages, tools, thinking)  # noqa: E731
+            call = lambda: self._chat(record, messages, tools, thinking, model)  # noqa: E731
             return background.step(task, call) if background else call()
 
         try:
@@ -579,7 +617,7 @@ class Agent:
                     if isinstance(run, str):
                         event = ToolEvent(call.name, call.arguments or {}, run, FAILED)
                     else:
-                        event = await self._run_tool(run, confirm, task, only, allowed)
+                        event = await self._run_tool(run, confirm, task, only, allowed, hidden)
                     output = event.output
                     result.tools_used.append(event.tool)
                     record.tools.append((event.tool, event.outcome))
@@ -604,12 +642,3 @@ class Agent:
             result.transcript = [*messages, {"role": "assistant", "content": result.text}]
         result.elapsed = time.monotonic() - started
         return result
-
-
-def _both(first: ToolEventFn, then: ToolEventFn | None) -> ToolEventFn:
-    async def on_tool(event: ToolEvent) -> None:
-        await first(event)
-        if then:
-            await then(event)
-
-    return on_tool

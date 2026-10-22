@@ -1,4 +1,4 @@
-"""Triggers: events from outside that start tasks, such as you arriving home.
+"""Triggers: events from outside that start agents' DAGs, such as you arriving home.
 
 An iPhone Shortcuts automation ("When I arrive home"), or anything else on your tailnet that can make an
 HTTP request, calls the dashboard's address:
@@ -7,9 +7,9 @@ HTTP request, calls the dashboard's address:
     Authorization: Bearer <TRIGGERS_TOKEN>
     {"text": "anything that helps, optional"}
 
-and the tasks whose schedule is "on arrive-home" run as soon as Athena isn't answering you (tasks.py).
-What comes with an event is given to the task as information, never as instructions, and it's limited
-in size. The token is its own, not the dashboard's password: it can start tasks you've made, and nothing
+and the DAGs with "arrive-home" in their triggers run as soon as Athena's free (dags/scheduler.py).
+What comes with an event is given to the run as information, never as instructions, and it's limited
+in size. The token is its own, not the dashboard's password: it can start DAGs you've made, and nothing
 else. Wrong tokens are counted, and too many in a while are refused, as are too many events in an hour.
 """
 
@@ -23,12 +23,12 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING
 
-from athena.tasks.schedules import EVENT
+from athena.dags.spec import EVENT
 from athena.webserver import HTTPError, Request, Response
 
 if TYPE_CHECKING:
     from athena.config import TriggersConfig
-    from athena.tasks import Scheduler
+    from athena.dags.scheduler import Dags
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ WRONG_TRIES, WRONG_WINDOW = 10, 600.0  # wrong tokens allowed in WRONG_WINDOW se
 
 
 class Hooks:
-    def __init__(self, cfg: TriggersConfig, scheduler: Scheduler | None):
+    def __init__(self, cfg: TriggersConfig, scheduler: Dags | None):
         self.cfg = cfg
         self.scheduler = scheduler
         self._wrong: deque[float] = deque()
@@ -58,7 +58,7 @@ class Hooks:
         """Answer a request to /hooks/<event>."""
         if not self.on:
             why = (
-                "tasks are switched off"
+                "agents' DAGs are switched off"
                 if self.scheduler is None
                 else f"TRIGGERS_TOKEN isn't set in .env, or is shorter than {MIN_TOKEN_CHARS} characters"
             )
@@ -84,12 +84,10 @@ class Hooks:
         text = _text(request)
         waiting = self.scheduler.waiting_for().get(name)
         if not waiting:
-            raise HTTPError(404, f"No task runs on “{name}”. Give one the schedule “on {name}” first.")
+            raise HTTPError(404, f'No agent\'s DAG starts on “{name}”. Add triggers=["{name}"] to one first.')
         self._taken.append(now)
-        started = [task.title for task in self.scheduler.fire(name, text)]
-        said = (
-            "Started." if started else "Its tasks ran in the last minute, or are about to, so they weren't run again."
-        )
+        started = self.scheduler.fire(name, text)
+        said = "Started." if started else "Its DAGs started on it in the last minute, or are about to, so not again."
         return Response(
             json.dumps({"event": name, "started": started, "said": said}, ensure_ascii=False),
             "application/json",

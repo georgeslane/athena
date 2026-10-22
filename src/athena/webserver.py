@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import parse_qsl, unquote
 
 MAX_REQUEST_BYTES = 16_384  # per line, and for the body
@@ -173,3 +175,18 @@ async def _read_body(
             await reader.readexactly(min(length, MAX_DISCARD_BYTES))
         raise HTTPError(413, "That's too long for me.")
     return await reader.readexactly(length)
+
+
+def json_response(payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> Response:
+    return Response(json.dumps(payload, ensure_ascii=False), "application/json", status, headers or {})
+
+
+def json_body(request: Request) -> dict[str, Any]:
+    """A request's body, a JSON object. HTTPError if it isn't one."""
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        raise HTTPError(400, "That isn't JSON.") from None
+    if not isinstance(body, dict):
+        raise HTTPError(400, "Send a JSON object.")
+    return body

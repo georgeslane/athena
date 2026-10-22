@@ -29,11 +29,12 @@ async def test_running_them(config):
         assert await run("/forget") == "Usage: /forget <id> (find ids with /recall)"
         assert (await run("/think off")).startswith("Thinking is off")
         assert await run("/think sometimes") == "Usage: /think on, /think short or /think off"
-        assert (await run("/tasks")).startswith("I've no tasks.")
+        assert (await run("/dags")).startswith("No agent has a DAG yet.")
+        assert (await run("/tasks")).startswith("No agent has a DAG yet.")  # as it was called
         assert (await run("/tools")).startswith("Tools:\n- remember [")
         assert (await run("/status")).startswith("Model: test-model")
         assert (await run("/compact")).startswith("There's nothing to compact yet")
-        assert (await run("/session")).startswith("Started session 2.") and services.history.session.id == 2
+        assert (await run("/new")).startswith("Started a new agent (#2)") and services.history.session.id == 2
         services.agent.answering_you = 1
         assert await run("/session") == "I'm still answering. Wait until I've finished, or stop me, first."
         assert await run("/stop") is None and await run("/nonsense") is None  # each front end's own, or none

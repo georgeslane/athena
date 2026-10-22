@@ -18,9 +18,13 @@ from athena.builtin import Builtin, Unavailable
 from athena.channel import Reach
 from athena.chat import DashboardChat
 from athena.config import THINKING, Config, parse_config
+from athena.dags.migrate import tasks_to_dags
+from athena.dags.scheduler import Dags
+from athena.dags.spec import CLAUDE_DONE
+from athena.dags.store import AgentStore
 from athena.dashboard import DashboardServer
 from athena.documents import DocumentIndex
-from athena.history import Busy, ConversationStore, Exchange, Session, session_of
+from athena.history import Busy, ConversationStore, Exchange, Session
 from athena.integrations import BUILTINS
 from athena.llm import LLMClient
 from athena.mcp_manager import MCPManager
@@ -36,8 +40,6 @@ from athena.skills import Skills, SkillStore
 from athena.stats import UsageStats
 from athena.status import StatusTracker
 from athena.status_api import StatusServer
-from athena.tasks import Scheduler, TaskStore
-from athena.timeline import ATHENA, Timeline
 from athena.tool_approvals import ToolApprovals
 from athena.tools import Tool, ToolRegistry
 from athena.watching import WatchStore
@@ -104,7 +106,6 @@ class Services:
     status_api: StatusServer | None
     builtins: Builtins = field(default_factory=Builtins)
     stats: UsageStats | None = None
-    timeline: Timeline | None = None  # what Athena did, for the dashboard's Activity tab
 
     def __post_init__(self) -> None:
         # Set to have the model server read the prompt again now, e.g. after the tools change.
@@ -113,29 +114,28 @@ class Services:
         self.channel: Channel | None = None
         # Tools waiting for your OK, which Telegram or the dashboard can give (approvals.py).
         self.approvals = Approvals()
-        # Tasks Athena does by itself, on a schedule, and tells you about (tasks.py).
-        self.tasks: Scheduler | None = None
-        if self.config.tasks.enabled:
-            self.tasks = Scheduler(
-                self.config.tasks,
-                TaskStore(self.config.db_path),
-                self.agent,
-                timezone=self.config.agent.timezone,
-                channel=lambda: self.reach,
-                tools=self.tools.all,
-                on_ran=self.rewarm.set,  # your chat has the report in it now
-                watches=WatchStore(self.config.db_path),  # what it keeps an eye on for you (watching.py)
-                timeline=self.timeline,
-            )
-            for tool in self.tasks.tools():
-                self.tools.add(tool)
-            self.agent.on_answered = self.tasks.after_answer  # it looks back at how skills went
+        # Agents: each one's model, guidance and DAG, which runs by itself and tells you what it found (dags/).
+        agents = AgentStore(self.config.db_path)
+        tasks_to_dags(self.config.db_path, agents, self.history)  # once: tasks from before become DAGs
+        self.dags = Dags(
+            self.config.tasks,
+            agents,
+            self.agent,
+            timezone=self.config.agent.timezone,
+            channel=lambda: self.reach,
+            tools=self.tools,
+            on_ran=self.rewarm.set,  # the main agent's conversation may have what a run found in it
+            watches=WatchStore(self.config.db_path),  # what it keeps an eye on for you (watching.py)
+        )
+        for tool in self.dags.tools():
+            self.tools.add(tool)
+        self.agent.directory = self.dags
+        self.agent.on_answered = self.dags.after_answer  # it looks back at how skills went
         # How to do things your way, which Athena reads before doing them (skills.py).
         self.skills = Skills(
             SkillStore(self.config.db_path),
             self.history,
             timezone=self.config.agent.timezone,
-            chat_name=self._chat_name,
             on_change=self.rewarm.set,  # the list of them is in the prompt
         )
         # After the system prompt: what some MCP servers are, and the skills.
@@ -153,7 +153,7 @@ class Services:
         # Messages you when something Athena needs stops working (alerts.py).
         self.alerts = None
         if self.config.alerts.enabled:
-            self.alerts = HealthMonitor(self.config.alerts, lambda: check_health(self), self._alert, self.timeline)
+            self.alerts = HealthMonitor(self.config.alerts, lambda: check_health(self), self._alert)
         # After the memory and task tools, in this order, so the tools' order (and the prompt) stays the same.
         self.tools.add_provider(lambda: self.builtins.tools)
         self.tools.add_provider(self.mcp.tools)
@@ -197,23 +197,24 @@ class Services:
         if self.dashboard:
             await self.dashboard.start()
         self.index_conversations()  # anything said while the embeddings server was down
-        if self.tasks:
-            self.tasks.start()
+        if self.config.tasks.enabled:
+            self.dags.start()
         if self.alerts:
             self.alerts.start()
-        if self.timeline:
-            self.timeline.add(ATHENA, f"{self.config.agent.assistant_name} started", "started")
         self._projects = asyncio.create_task(self._watch_projects(), name="claude-projects")
         self._security = asyncio.create_task(self.security.forever(), name="security-updates")
 
     async def notify(self, text: str, *, session: int | None = None) -> bool:
-        """Tell you something you didn't ask about, such as what a task found: in Telegram, and on your devices
-        unless you're looking at the dashboard, or it's what was said in a ``session`` that's muted. False if it
-        couldn't reach you."""
+        """Tell you something you didn't ask about, such as what an agent's DAG found: in Telegram, and on your
+        devices unless you're looking at the dashboard. Nowhere, if it's what was said in a ``session``, an agent,
+        you've muted: it's in the agent's chat. False if it couldn't reach you."""
         name = self.config.agent.assistant_name
         if session is None:
-            told = await self.notify_devices(name, text, url="#chat", tag="athena")
+            told = await self.notify_devices(name, text, url="#agents", tag="athena")
         else:
+            agent = self.history.get_session(session)
+            if agent is None or agent.muted:
+                return False
             told = await self._notify_about(session, text)
         if self.channel is None:
             if not told:  # not what it says: it can be personal
@@ -252,7 +253,7 @@ class Services:
         name, where = self.config.agent.assistant_name, self.history.title(session_id)
         # Where it was said is part of what was said: left out with the rest, if you'd rather.
         title = f"{name} · {where}" if where and self.push and self.push.show_text else name
-        return await self.notify_devices(title, text, url=f"#chat/{session_id}", tag=f"reply-{session_id}")
+        return await self.notify_devices(title, text, url=f"#agents/{session_id}", tag=f"reply-{session_id}")
 
     def _answered_on_the_dashboard(self, reply: Any, result: Any) -> None:
         """Your devices hear of an answer to a message sent on the dashboard, in case you've gone."""
@@ -266,7 +267,7 @@ class Services:
         if approval.summary:
             said += f" {approval.summary}"
         title = f"{self.config.agent.assistant_name} needs your OK"
-        url = f"#chat/{approval.session}" if approval.session is not None else "#chat"
+        url = f"#agents/{approval.session}" if approval.session is not None else "#agents"
         self._later(self.notify_devices(title, said, url=url, tag=f"ask-{approval.id}", urgent=True))
 
     async def _alert(self, text: str) -> bool:
@@ -276,13 +277,6 @@ class Services:
         """Keep something Athena told you by itself in your conversation, the current session, so you can reply to
         it: ``yours`` is a line for your side, such as "(Your task “Briefing” ran.)"."""
         self.history.append_exchange(self.history.current_chat, yours, said, channel="Athena")
-
-    def _chat_name(self, chat_id: str) -> str:
-        """Who a chat is with, for recent_work: you, or a task by its title."""
-        if session_of(chat_id) is not None or not chat_id.startswith("task:"):
-            return "you"
-        task = self.tasks.store.get(int(chat_id[5:])) if self.tasks and chat_id[5:].isdigit() else None
-        return f"task “{task.title}”" if task else "a task"
 
     # -- projects handed to Claude (claude_projects.py) ------------------------------------------
 
@@ -301,6 +295,9 @@ class Services:
         for text in news:
             if await self.notify(text):  # in your chat too, so you can reply to it
                 self.keep("(Claude's projects changed.)", text)
+        for project in projects.finished:  # the DAGs waiting for Claude to finish something
+            said = f"Claude has finished “{project.title}”" + (f": {project.progress}" if project.progress else ".")
+            self.dags.fire(CLAUDE_DONE, f"{said}\n{project.url}")
         return projects.board()
 
     async def _watch_projects(self) -> None:
@@ -329,11 +326,10 @@ class Services:
                     await task
         if self.alerts:
             await self.alerts.stop()
-        if self.tasks:
-            await self.tasks.stop()
-            self.tasks.store.close()
-            if self.tasks.watches:
-                self.tasks.watches.close()
+        await self.dags.stop()
+        self.dags.store.close()
+        if self.dags.watches:
+            self.dags.watches.close()
         self.skills.store.close()
         self.privacy.close()
         if self.dashboard:
@@ -356,8 +352,6 @@ class Services:
         self.history.close()
         if self.stats:
             self.stats.close()
-        if self.timeline:
-            self.timeline.close()
         for task in self._notifying:
             task.cancel()
         if self.push:
@@ -438,9 +432,7 @@ class Services:
             raise Busy("I'm answering you in that session. Wait until I've finished, or stop me, first.")
         if self.history.get_session(session_id) is None:
             raise KeyError(session_id)
-        if self.tasks:
-            for task in self.tasks.in_session(session_id):
-                self.tasks.delete(task.id)  # stopping it first, if it's running
+        await self.dags.delete(session_id)  # its DAG, runs and what they proposed, stopping a run if one's going
         if self._indexer and not self._indexer.done():
             await asyncio.wait({self._indexer})  # so nothing said in it is added to memory just after
         was_current = session_id == self.history.session.id
@@ -459,9 +451,8 @@ class Services:
     async def forget_everything(self) -> Session:
         """Delete every memory, the conversation history, the code's workspace, what tasks found and the timeline,
         and start a new session. Usage statistics, and the tasks themselves, stay."""
-        if self.tasks:
-            self.tasks.stop_running()  # it would save what it's doing after everything's deleted
-            self.tasks.reviews.clear()  # they hold what was said
+        await self.dags.halt()  # it would save what it's doing after everything's deleted
+        self.dags.reviews.clear()  # they hold what was said
         async with self.agent.paused():
             if self._indexer:
                 self._indexer.cancel()
@@ -471,10 +462,7 @@ class Services:
             await asyncio.to_thread(self.memory.store.clear)
             session = await asyncio.to_thread(self.history.clear)
             await asyncio.to_thread(clear_workspace, self.config)  # what code made from what was said
-            if self.tasks:
-                await asyncio.to_thread(self.tasks.forget)  # what tasks found, and the steps they took
-            if self.timeline:
-                await asyncio.to_thread(self.timeline.clear)
+            await asyncio.to_thread(self.dags.forget)  # what runs found and kept, and what checks noted
         self.rewarm.set()
         return session
 
@@ -527,7 +515,6 @@ def build_services(cfg: Config) -> Services:
     llm = LLMClient(cfg.llm)
     history = ConversationStore(cfg.db_path, cfg.agent.max_history_messages)
     stats = UsageStats(cfg.db_path)
-    timeline = Timeline(cfg.db_path)
 
     tools = ToolRegistry()
     tools.on_demand = list(cfg.tools.on_demand)
@@ -564,7 +551,6 @@ def build_services(cfg: Config) -> Services:
         status=status,
         stats=stats,
     )
-    agent.timeline = timeline
     return Services(
         cfg,
         llm,
@@ -578,5 +564,4 @@ def build_services(cfg: Config) -> Services:
         status_api,
         Builtins.build(cfg),
         stats,
-        timeline,
     )

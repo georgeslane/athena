@@ -151,12 +151,12 @@ on_demand = []
 
 [mcp_registry]
 # Lets Athena search the official MCP Registry for servers that would help with something it
-# can't do yet, and suggest them (see docs/tasks.md). You add any you want on the dashboard.
+# can't do yet, and suggest them (see docs/tools.md). You add any you want on the dashboard.
 enabled = true
 
 [claude_projects]
-# Coding projects Athena hands to Claude as pull requests in a private GitHub repo, shown on the
-# dashboard's Board tab (see docs/claude-projects.md). Handing one over always asks you first.
+# Coding projects Athena hands to Claude as pull requests in a private GitHub repo, which tell you,
+# and agents' DAGs, when they're done (see docs/claude-projects.md). Handing one over always asks you first.
 enabled = false
 repo = "your-name/zeus-solutions"      # owner/name; it must be private, with CLAUDE.md on main
 branch = "main"
@@ -168,21 +168,21 @@ stalled_minutes = 120                  # no push for this long: Claude stopped p
 max_restarts = 6                       # starting it again, waiting longer each time, then telling you
 
 [tasks]
-# Things Athena does by itself, now or on a schedule, then messages you about (see docs/tasks.md).
-# They wait while you're chatting, and stop for you while they run.
+# Agents' DAGs: the tasks Athena does by itself, on a schedule or when something happens, then tells you
+# about (see docs/agents.md). A message from you is answered between tasks, before the next one starts.
 enabled = true
-quiet_minutes = 5                      # a task waits until you haven't messaged for this long
-max_minutes = 30                       # the most a run works for, not counting waiting for you
+quiet_minutes = 5                      # a scheduled run waits until Athena's been inactive this long
+max_minutes = 30                       # the most a task works for, not counting waiting for your OK
 max_tool_rounds = 25
 thinking = "on"                        # tasks aren't in a hurry
 confirm_minutes = 60                   # how long a task waits for you to allow a tool that asks
-heartbeat_minutes = 30                 # how often it checks what it's watching for you; 0: never
+heartbeat_minutes = 60                 # how often it checks what it's watching for you; 0: never
 heartbeat_tools = []                   # tools that ask first which checking may use without asking
 
 [triggers]
-# Events that start tasks whose schedule is "on <event>": POST /hooks/<event> on the dashboard's
-# address, from an iPhone Shortcut or anything on your tailnet (see docs/tasks.md). Off until
-# TRIGGERS_TOKEN is set in .env.
+# Events that start agents' DAGs with "<event>" in their triggers: POST /hooks/<event> on the
+# dashboard's address, from an iPhone Shortcut or anything on your tailnet (see docs/agents.md). Off
+# until TRIGGERS_TOKEN is set in .env.
 max_per_hour = 30                      # events taken in an hour, of every kind; more are refused
 
 [security_updates]

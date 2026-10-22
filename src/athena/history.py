@@ -432,10 +432,10 @@ class ConversationStore:
             (chat_id, message_id),
         )
 
-    def load(self, chat_id: str) -> list[dict[str, Any]]:
-        """Messages the model should see, oldest first, always starting with a user message, and with the chat's
-        summary at the start if it's been compacted. The last IN_CONTEXT messages with photos have them, as long
-        as they're kept."""
+    def load(self, chat_id: str, intro: str = "") -> list[dict[str, Any]]:
+        """Messages the model should see, oldest first, always starting with a user message, and with ``intro``,
+        such as an agent's guidance, and the chat's summary if it's been compacted, at the start. The last
+        IN_CONTEXT messages with photos have them, as long as they're kept."""
         with self._lock, self._conn:
             rows = self._rows(chat_id)
             if len(rows) > 2 * self.max_messages:
@@ -448,8 +448,8 @@ class ConversationStore:
         shown = {row[0] for row in [r for r in rows if r[3]][-IN_CONTEXT:]}
         messages: list[dict[str, Any]] = []
         for message_id, role, content, names in rows:
-            if summary and not messages:
-                content = f"{summary_block(summary)}\n\n{content}"
+            if not messages and (start := [part for part in (intro, summary and summary_block(summary)) if part]):
+                content = "\n\n".join([*start, content])
             photos = [p for name in json.loads(names) if (p := self.photos.load(name))] if message_id in shown else []
             messages.append({"role": role, "content": with_photos(content, photos)})
         return messages

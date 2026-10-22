@@ -117,12 +117,12 @@ class TelegramBot:
             me = filters.User(user_id=list(self.allowed))
             app.add_handler(CommandHandler("start", self.cmd_start, filters=me))
             app.add_handler(CommandHandler("help", self.cmd_start, filters=me))
-            app.add_handler(CommandHandler(["session", "reset"], self.cmd_session, filters=me))
+            app.add_handler(CommandHandler(["new", "session", "reset"], self.cmd_session, filters=me))
             app.add_handler(CommandHandler("compact", self.cmd_compact, filters=me))
             app.add_handler(CommandHandler("stop", self.cmd_stop, filters=me))
             app.add_handler(CommandHandler("retry", self.cmd_retry, filters=me))
             app.add_handler(CommandHandler("think", self.cmd_think, filters=me))
-            app.add_handler(CommandHandler("tasks", self.cmd_tasks, filters=me))
+            app.add_handler(CommandHandler(["dags", "tasks"], self.cmd_dags, filters=me))
             app.add_handler(CommandHandler("remember", self.cmd_remember, filters=me))
             app.add_handler(CommandHandler("recall", self.cmd_recall, filters=me))
             app.add_handler(CommandHandler("forget", self.cmd_forget, filters=me))
@@ -134,7 +134,7 @@ class TelegramBot:
             app.add_handler(MessageHandler(me & filters.Document.ALL & ~filters.Document.IMAGE, self.on_file))
             app.add_handler(CallbackQueryHandler(self.on_button, pattern=r"^confirm:"))
             app.add_handler(CallbackQueryHandler(self.on_think_button, pattern=r"^think:"))
-            app.add_handler(CallbackQueryHandler(self.on_task_button, pattern=r"^task:"))
+            app.add_handler(CallbackQueryHandler(self.on_dag_button, pattern=r"^dag:"))
         app.add_handler(MessageHandler(filters.ALL, self.on_stranger))
         app.add_error_handler(self.on_error)
         return app
@@ -452,6 +452,9 @@ class TelegramBot:
         None if /stop stopped it.
         """
         files: list[str] = []
+        if working := self.s.agent.gate.working if self.s.agent.gate.held else None:  # answered after it (gate.py)
+            with contextlib.suppress(TelegramError):
+                await bot.send_message(chat_id, f"I'm finishing {working} first, then I'll answer.")
         typing = asyncio.create_task(self._keep_typing(bot, chat_id))
         asked = self._last[chat_id] = _Asked(text, photos=list(photos or []))
 
@@ -630,46 +633,44 @@ class TelegramBot:
             ]
         )
 
-    async def cmd_tasks(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        text, buttons = self._tasks_message()
+    async def cmd_dags(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text, buttons = self._dags_message()
         await update.effective_message.reply_text(text, reply_markup=buttons)  # type: ignore[union-attr]
 
-    def _tasks_message(self) -> tuple[str, InlineKeyboardMarkup | None]:
-        text, listed = commands.tasks(self.s)
+    def _dags_message(self) -> tuple[str, InlineKeyboardMarkup | None]:
+        text, listed = commands.dags(self.s)
         rows = []
-        for t in listed:
-            row = [InlineKeyboardButton(f"▶ Run #{t['id']}", callback_data=f"task:run:{t['id']}")]
-            if t["status"] == "running":
-                row = [InlineKeyboardButton(f"⏹ Stop #{t['id']}", callback_data=f"task:stop:{t['id']}")]
-            elif t["status"] == "active":
-                row.append(InlineKeyboardButton("⏸ Pause", callback_data=f"task:pause:{t['id']}"))
+        for d in listed:
+            if d["state"] == "running":
+                row = [InlineKeyboardButton(f"⏹ Stop {d['name']}", callback_data=f"dag:stop:{d['id']}")]
             else:
-                row.append(InlineKeyboardButton("⏯ Resume", callback_data=f"task:resume:{t['id']}"))
-            row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"task:delete:{t['id']}"))
+                row = [InlineKeyboardButton(f"▶ Run {d['name']}", callback_data=f"dag:run:{d['id']}")]
+                pause = ("⏯ Resume", "resume") if d["state"] == "paused" else ("⏸ Pause", "pause")
+                row.append(InlineKeyboardButton(pause[0], callback_data=f"dag:{pause[1]}:{d['id']}"))
             rows.append(row)
         return text, InlineKeyboardMarkup(rows) if rows else None
 
-    async def on_task_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def on_dag_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         assert query is not None
         if not update.effective_user or update.effective_user.id not in self.allowed:
             await query.answer("Not allowed.")
             return
-        _, action, task_id = (query.data or "::").split(":", 2)
-        scheduler = self.s.tasks
-        done = {"run": "Running it now", "pause": "Paused", "resume": "Resumed", "stop": "Stopped", "delete": "Deleted"}
+        _, action, agent_id = (query.data or "::").split(":", 2)
+        dags = self.s.dags
+        done = {"run": "It'll run as soon as I'm free", "pause": "Paused", "resume": "Resumed", "stop": "Stopped"}
         try:
-            if scheduler is None or action not in done:
+            if action not in done or not agent_id.isdigit():
                 raise ValueError("That's not something I can do.")
             if action == "stop":
-                scheduler.stop_running()
+                dags.stop_running(int(agent_id))
             else:
-                getattr(scheduler, {"run": "run_now"}.get(action, action))(int(task_id))
+                getattr(dags, {"run": "run_now"}.get(action, action))(int(agent_id))
         except ValueError as exc:
             await query.answer(str(exc))
             return
         await query.answer(done[action])
-        text, buttons = self._tasks_message()
+        text, buttons = self._dags_message()
         with contextlib.suppress(TelegramError):
             await query.edit_message_text(text, reply_markup=buttons)
 

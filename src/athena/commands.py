@@ -23,12 +23,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 COMMANDS = [
-    ("session", "Start a new session: a new conversation (memories are kept)"),
+    ("new", "Start a new agent, as the main one: a new conversation (memories are kept)"),
     ("compact", "Summarise our conversation so far, keeping the last few messages, to make room"),
     ("stop", "Stop the answer I'm working on"),
     ("retry", "Answer your last message again"),
     ("think", "Think before answering: /think on, short or off"),
-    ("tasks", "What I do by myself: run, pause or delete it"),
+    ("dags", "What each agent does by itself: run, pause or resume its DAG"),
     ("remember", "Save a fact: /remember <text>"),
     ("recall", "Search memory: /recall <query>"),
     ("forget", "Delete a memory: /forget <id>"),
@@ -58,14 +58,14 @@ async def run(services: Services, name: str, rest: str, *, source: str, chat_id:
     ``chat_id`` is the chat /compact compacts, the current session's if it's not given."""
     if name in ("help", "start"):
         return help_text(services)
-    if name in ("session", "reset"):
+    if name in ("new", "session", "reset"):
         return new_session(services)
     if name == "compact":
         return await compact(services, chat_id or services.history.current_chat)
     if name == "think":
         return think(services, rest)
-    if name == "tasks":
-        return tasks(services)[0]
+    if name in ("dags", "tasks"):
+        return dags(services)[0]
     if name == "remember":
         return await remember(services, rest, source)
     if name == "recall":
@@ -109,7 +109,7 @@ def new_session(services: Services) -> str:
     except Busy as exc:
         return str(exc)
     return (
-        f"Started session {session.id}. I've cleared our conversation from my context. "
+        f"Started a new agent (#{session.id}), as the main one: name it, and give it a DAG, on the dashboard. "
         "Memories are kept, and I can still search what we said before."
     )
 
@@ -147,34 +147,43 @@ def thinking_says(services: Services) -> str:
     )
 
 
-def tasks(services: Services) -> tuple[str, list[dict[str, Any]]]:
-    """What the tasks are, and each task as the dashboard describes it, for buttons to act on them."""
-    scheduler = services.tasks
-    if scheduler is None:
-        return "Tasks are switched off ([tasks] enabled = false in config.toml).", []
-    listed = [scheduler.describe(t) for t in scheduler.store.all()]
+def dags(services: Services) -> tuple[str, list[dict[str, Any]]]:
+    """What each agent with a DAG does by itself, and each one for buttons to act on it: {"id", "name", "state"},
+    where state is running, paused or waiting."""
+    scheduler = services.dags
+    if not services.config.tasks.enabled:
+        return "Agents' DAGs are switched off ([tasks] enabled = false in config.toml).", []
+    listed, lines = [], []
+    current = scheduler.current
+    for config in scheduler.store.all():
+        if not config.dag.strip():
+            continue
+        name = services.history.title(config.id) or f"Agent {config.id}"
+        spec = scheduler.spec(config.dag)
+        running = current is not None and current.run.agent == config.id
+        state = "running" if running else "paused" if config.paused else "waiting"
+        if running and current:
+            when = f"running now, on {current.doing or 'its first task'}"
+        elif spec is None:
+            when = "its DAG file has a problem: fix it on the dashboard"
+        elif config.paused:
+            when = "paused"
+        elif config.next_run:
+            when = f"{spec.describe()} · next {datetime.fromtimestamp(config.next_run, scheduler.tz):%a %-d %b %H:%M}"
+        else:
+            when = spec.describe()
+        last = scheduler.store.runs(config.id, 1)
+        went = f" · last run: {last[0].state}" if last else ""
+        mark = {"running": "⚙️", "paused": "⏸"}.get(state, "▶️")
+        lines.append(f"{mark} {name}: {when}{went}")
+        listed.append({"id": config.id, "name": name, "state": state})
     if not listed:
         return (
-            "I've no tasks. Ask me to do something regularly, or in the background, such as "
-            "“every weekday at 7:30 send me a briefing”. You can also add them on the dashboard.",
+            "No agent has a DAG yet. Ask me, in an agent, to do something regularly, such as “every weekday at 7:30 "
+            "send me a briefing”, or write one on the dashboard.",
             [],
         )
-    lines = ["Tasks I do by myself:"]
-    for t in listed:
-        mark = {"active": "▶️", "paused": "⏸", "done": "✓", "running": "⚙️"}.get(t["status"], "")
-        nxt = ""
-        if t["status"] == "running":
-            nxt = " · working on it now"
-        elif t["waiting_for_you"]:
-            nxt = " · due, waiting until you've finished chatting"
-        elif t["next_run"]:
-            when = datetime.fromtimestamp(t["next_run"], scheduler.tz)
-            nxt = f" · next {when:%a %-d %b %H:%M}"
-        last = f" · last: {t['last_outcome']}" if t["last_outcome"] else ""
-        where = services.history.title(t["session"]) if t["session"] is not None else ""
-        within = f" (in “{where}”)" if where and where != t["title"] else ""
-        lines.append(f"{mark} #{t['id']} {t['title']}{within}: {t['when']}{nxt}{last}")
-    return "\n".join(lines), listed
+    return "What each agent does by itself:\n" + "\n".join(lines), listed
 
 
 async def remember(services: Services, text: str, source: str) -> str:
