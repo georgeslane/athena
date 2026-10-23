@@ -76,6 +76,8 @@ def intro_for(dags: Dags, agent_id: int) -> str:
             "Its DAG, which says what it does by itself (change_dag changes it, asking first):",
             f"```python\n{config.dag.strip()}\n```",
         ]
+    else:
+        lines.append("It has no DAG yet, so it does nothing by itself: change_dag gives it one, asking first.")
     lines.append("</agent>")
     return "\n".join(lines)
 
@@ -100,7 +102,7 @@ def roster(dags: Dags) -> list[str]:
         "Their other agents:",
         *lines,
         "When a run of one of their DAGs has news, it's told to you here too. agent_runs reads what any of them "
-        "did; change_dag and run_dag act on one of them by name.",
+        "did; change_dag and run_dag act on this agent, or on one of them by name.",
     ]
 
 
