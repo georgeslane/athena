@@ -58,7 +58,9 @@ Every DAG ends with five tasks of its own, which aren't in its file, each given 
 
 A run that finds nothing, with every list its tasks returned empty and every branch picking none, ends without them: it has nothing to look back on, and checking for something often should cost little. One of them failing doesn't make the run a failure.
 
-What the reviews propose waits for you to approve or reject, on the agent's DAG view or the run's History, showing exactly what would change. A change proposed before the DAG changed in another way is out of date.
+What the reviews propose waits for you to approve or reject, on the agent's DAG view or the run's History, showing exactly what would change, and, in red, any tool that asks first which it would let run without asking. Each is a whole new DAG file, checked as it's proposed, so approving one changes the file, and nothing runs that the file doesn't say. A run's newer proposal replaces one of the same kind still waiting. A change proposed before the DAG changed in another way is out of date, except a change to tool lists, which applies to the file as it is.
+
+Proposals wait in agentic-airflow's queue, beside the runs, so anything else that proposes a change to a DAG through it waits there too, and is checked and approved the same way.
 
 ### History
 

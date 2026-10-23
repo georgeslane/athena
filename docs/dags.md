@@ -154,7 +154,7 @@ A group's tasks share its settings: `allowed_tools`, `hidden_tools`, `denied_too
 - **`allowed_tools`** is the whole list of tools the tasks may use without asking. Left out, they may use any tool, asking first for those that do. Naming a tool that asks first lets it run without asking; any tool that isn't named, when there's a list, waits for your OK when it's called. A group's or a task's own list replaces the DAG's.
 - **Always asking**: changing a DAG (`change_dag`) and handing work to Claude always ask, whatever `allowed_tools` says.
 - **Hidden**: a tool in `hidden_tools`, or `[tools] on_demand`, isn't in the prompt: the model finds it with `search_tools` when it needs it.
-- **The tool review**, at the end of each run, can propose the lists, for one task or for the DAG, from what the run used and what you allowed: you approve or reject it, and the file's changed where it's written.
+- **The tool review**, at the end of each run, can propose the lists, for one task or for the DAG, from what the run used and what you allowed: you approve or reject it, and the file's changed where it's written. A change that would let a tool that asks first run without asking says so, plainly, wherever you're asked: in the run's summary, on the dashboard, and when Athena asks to change the file with `change_dag`.
 
 Allowing a task to fetch or search without asking lets it send what it's read to those sites unseen, so allow only what it needs, where it needs it.
 
