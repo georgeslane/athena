@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from athena import files, workspace
 from athena.dags import files as agent_files
-from athena.dags.spec import CLAUDE_DONE, DagError, parse, unknown_tools
+from athena.dags import runs
+from athena.dags.reader import CLAUDE_DONE, DagError, as_dict, unknown_tools
 from athena.history import Busy
 from athena.tools import ToolError
 from athena.webserver import HTTPError, Request, Response
@@ -83,6 +84,8 @@ class AgentsAPI:
                     raise ValueError(f"Send {key} as text.")
             if settings:
                 self.s.dags.store.update(agent_id, **{k: v.strip() for k, v in settings.items()})
+                if "model" in settings:
+                    self.s.dags.changed(agent_id)  # its runs use it too
                 self.s.rewarm.set()  # what the agent's conversation starts with has changed
             return self.s.chat.session(agent_id)
 
@@ -156,14 +159,15 @@ class AgentsAPI:
         return _json(self.dag(self._known(agent)))
 
     def dag(self, agent_id: int) -> dict[str, Any]:
-        """An agent's DAG, and what can start it, for the DAG tab: the events DAGs wait for, and which tasks'
-        outlets they come from, whether /hooks/<event> takes them, and the tools a DAG can name."""
+        """An agent's DAG, and what can start it, for the DAG tab: the assets and webhooks DAGs wait for, which
+        tasks' outlets update each asset, whether /hooks/<name> takes webhooks, and the tools a DAG can name."""
         dags = self.s.dags
         return {
             **dags.describe(agent_id),
             "events": {
-                "waiting": dags.waiting_for(),  # event: [agents]
-                "sources": dags.sources(),  # event: [{"agent", "name", "task"}], from outlets
+                "assets": dags.assets(),  # asset: [agents]
+                "webhooks": dags.webhooks(),  # webhook: [agents]
+                "sources": dags.sources(),  # asset: [{"agent", "name", "task"}], from outlets
                 "claude": CLAUDE_DONE,
                 "hooks": self.hooks.on,  # type: ignore[attr-defined]
             },
@@ -173,14 +177,13 @@ class AgentsAPI:
 
     def _check_dag(self, request: Request, method: str, agent: str) -> Response:
         """{"source"}: whether a DAG file would do, and its tasks if it would, as it's being written."""
-        self._known(agent)
-        source = _source(request)
+        agent_id = self._known(agent)
         try:
-            spec = parse(source)
+            dag = self.s.dags.check(agent_id, _source(request))
         except DagError as exc:
             return _json({"dag": None, "error": exc.as_dict(), "unknown": []})
         known = [t.name for t in self.s.tools.all()]
-        return _json({"dag": spec.as_dict(), "error": None, "unknown": unknown_tools(spec, known)})
+        return _json({"dag": as_dict(dag), "error": None, "unknown": unknown_tools(dag, known)})
 
     def _save_dag(self, request: Request, method: str, agent: str) -> Response:
         agent_id = self._known(agent)
@@ -192,16 +195,18 @@ class AgentsAPI:
         log.info("Dashboard: changed agent %d's DAG", agent_id)
         return _json(self.dag(agent_id))
 
-    def _dag_action(self, request: Request, method: str, agent: str, action: str) -> Response:
+    async def _dag_action(self, request: Request, method: str, agent: str, action: str) -> Response:
         agent_id, dags = self._known(agent), self.s.dags
         try:
             if action == "run":
-                dags.run_now(agent_id)
+                if not self.s.config.tasks.enabled:
+                    raise ValueError("Agents' DAGs are switched off ([tasks] enabled = false in config.toml).")
+                await dags.run_now(agent_id)
             elif action == "pause":
                 dags.pause(agent_id)
             elif action == "resume":
                 dags.resume(agent_id)
-            elif not dags.stop_running(agent_id):
+            elif not await dags.stop_running(agent_id):
                 raise ValueError("It isn't running.")
         except ValueError as exc:
             raise HTTPError(409, str(exc)) from None
@@ -210,22 +215,25 @@ class AgentsAPI:
     def _get_runs(self, request: Request, method: str, agent: str) -> Response:
         """The agent's last runs, newest first."""
         agent_id = self._known(agent)
-        return _json({"runs": [run.as_dict(tasks=False) for run in self.s.dags.store.runs(agent_id)]})
+        return _json({"runs": [runs.brief(run) for run in self.s.dags.runs(agent_id)]})
 
     def _get_run(self, request: Request, method: str, run: str) -> Response:
-        """A run: what each of its tasks was given, said and did, and what it proposed."""
+        """A run: what each of its tasks was given, said and did, its DAG as it was, and what it proposed."""
         dags = self.s.dags
-        found = dags.store.run(int(run))
+        found = dags.run(run)
         if found is None:
             raise HTTPError(404, "That run isn't kept any more: only each agent's last 10 are.")
-        current = dags.current
-        spec = dags.spec(found.source)
+        try:
+            dag = as_dict(dags.engine.dag_for(found))  # as it was for the run, if it's going; else as it is now
+        except Exception:  # its DAG's been deleted, or won't read now
+            dag = None
         return _json(
             {
-                **found.as_dict(),
-                "dag": spec.as_dict() if spec else None,  # as it was for the run
-                "doing": current.doing if current and current.run.id == found.id else "",
-                "proposals": [dags.show(p) for p in dags.store.proposals(run_id=found.id)],
+                **runs.detail(found),
+                "agent": dags.agent_of(found),
+                "dag": dag,
+                "doing": dags._doing(found) if not found.is_terminal else "",
+                "proposals": [dags.show(p) for p in dags.store.proposals(run_id=found.run_id)],
             }
         )
 

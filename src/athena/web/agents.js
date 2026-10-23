@@ -75,7 +75,7 @@ function route() {
   if (which && /^\d+$/.test(which)) agents_.id = Number(which);
   else if (!agents_.list) agents_.id = null;
   agents_.view = VIEWS.some(([v]) => v === view) ? view : "chat";
-  agents_.run = view === "runs" && run && /^\d+$/.test(run) ? Number(run) : null;
+  agents_.run = view === "runs" && run && /^run_[0-9A-Za-z_]+$/.test(run) ? run : null;
 }
 
 export const address = (id, view = "chat", run = null) => `#agents/${id}${view !== "chat" ? `/${view}` : ""}${run ? `/${run}` : ""}`;

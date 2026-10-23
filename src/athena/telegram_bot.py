@@ -452,7 +452,8 @@ class TelegramBot:
         None if /stop stopped it.
         """
         files: list[str] = []
-        if working := self.s.agent.gate.working if self.s.agent.gate.held else None:  # answered after it (gate.py)
+        gate, model = self.s.agent.gate, self.s.agent.model_for(self.s.history.master_chat)
+        if gate.busy(model) and (working := gate.doing.get(model)):  # answered after it (gate.py)
             with contextlib.suppress(TelegramError):
                 await bot.send_message(chat_id, f"I'm finishing {working} first, then I'll answer.")
         typing = asyncio.create_task(self._keep_typing(bot, chat_id))
@@ -658,14 +659,16 @@ class TelegramBot:
             return
         _, action, agent_id = (query.data or "::").split(":", 2)
         dags = self.s.dags
-        done = {"run": "It'll run as soon as I'm free", "pause": "Paused", "resume": "Resumed", "stop": "Stopped"}
+        done = {"run": "It'll run when it's its turn", "pause": "Paused", "resume": "Resumed", "stop": "Stopped"}
         try:
             if action not in done or not agent_id.isdigit():
                 raise ValueError("That's not something I can do.")
             if action == "stop":
-                dags.stop_running(int(agent_id))
+                await dags.stop_running(int(agent_id))
+            elif action == "run":
+                await dags.run_now(int(agent_id))
             else:
-                getattr(dags, {"run": "run_now"}.get(action, action))(int(agent_id))
+                getattr(dags, action)(int(agent_id))
         except ValueError as exc:
             await query.answer(str(exc))
             return

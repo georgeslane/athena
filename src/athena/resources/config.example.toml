@@ -169,16 +169,16 @@ max_restarts = 6                       # starting it again, waiting longer each 
 
 [tasks]
 # Agents' DAGs: the tasks Athena does by itself, on a schedule or when something happens, then tells you
-# about (see docs/agents.md). A message from you is answered between tasks, before the next one starts.
+# about (see docs/dags.md). Runs take turns, one at a time on each model; a message from you is answered
+# between tasks, before the next one starts.
 enabled = true
-quiet_minutes = 5                      # a scheduled run waits until Athena's been inactive this long
 max_minutes = 30                       # the most a task works for, not counting waiting for your OK
 max_tool_rounds = 25
 thinking = "on"                        # tasks aren't in a hurry
 confirm_minutes = 60                   # how long a task waits for you to allow a tool that asks
 
 [triggers]
-# Events that start agents' DAGs with "<event>" in their triggers: POST /hooks/<event> on the
+# Webhooks that start agents' DAGs with Webhook("<name>") in their schedule: POST /hooks/<name> on the
 # dashboard's address, from an iPhone Shortcut or anything on your tailnet (see docs/dags.md). Off
 # until TRIGGERS_TOKEN is set in .env.
 max_per_hour = 30                      # events taken in an hour, of every kind; more are refused

@@ -11,7 +11,7 @@ from test_dags import FakeChannel
 
 from athena.agent import Agent, Background
 from athena.config import TasksConfig
-from athena.dags.scheduler import Dags
+from athena.dags.service import Dags
 from athena.dags.store import AgentStore
 from athena.history import ConversationStore
 from athena.skills import NO_CHANGE, Skills, SkillStore, check, diff
@@ -202,15 +202,13 @@ def athena(config, memory, skills):
         agent = Agent(config.agent, server.client(config.llm), tools, skills.history, memory)
         agent.prompt_extra = skills.index
         channel = channel or FakeChannel()
-        agent.gate.grace = 0.0
         scheduler = Dags(
-            TasksConfig(quiet_minutes=0),
+            TasksConfig(),
             AgentStore(config.db_path),
             agent,
             timezone="Europe/London",
             channel=lambda: channel,
-            tools=tools,
-            poll_seconds=0.01,
+            state=config.db_path.with_name("dags.db"),
         )
         agent.directory = scheduler
         agent.on_answered = scheduler.after_answer
@@ -304,15 +302,13 @@ async def test_reviews_wait_until_youve_finished_chatting(athena, skills, config
     agent, scheduler, server, _ = athena(
         [completion(None, [("read_skill", {"name": "Trip plans"})]), completion("Trip."), completion(NO_CHANGE)]
     )
-    scheduler.cfg.quiet_minutes = 1
     await agent.respond("111", "Plan a trip")  # you've just had a reply
-    scheduler.poll = 0.01
-    scheduler.start()
+    await scheduler.start()
     try:
         await asyncio.sleep(0.2)
         assert len(server.requests) == 2 and len(scheduler.reviews) == 1  # still waiting for you
-        agent.last_answered_you = time.monotonic() - 61
-        scheduler.wake()
+        scheduler.reviews[0].at = time.monotonic() - 61  # a minute later
+        scheduler._wake.set()
         for _ in range(500):
             if len(server.requests) == 3:
                 break
@@ -326,7 +322,7 @@ async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills
     def model(body):
         last = body["messages"][-1]
         text = last["content"] if isinstance(last["content"], str) else ""
-        if "Task “commute”" in text:
+        if text.endswith("Check my train."):
             return completion(None, [("remember", {"fact": "George's train to work is the 7:52."})])
         if last["role"] == "tool" and "remember" in json.dumps(body["messages"][-2]):
             calls = [("save_skill", {"name": "Commute", "description": "Trains to work", "instructions": "7:52."})]
@@ -339,8 +335,13 @@ async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills
 
     agent, scheduler, server, channel = athena(model)
     scheduler.history.rename(1, "Commute")
-    scheduler.save(1, "with DAG():\n    commute = Task(prompt='Check my train.')\n")
-    await scheduler.runner.run(1, "manual")
+    scheduler.save(1, "with Dag('commute', prompt='p'):\n    AgenticTask('commute', prompt='Check my train.')\n")
+    await scheduler.start()
+    try:
+        run = await scheduler.run_now(1)
+        await scheduler.engine.wait(run.run_id, timeout=10, stop_on_pause=False)
+    finally:
+        await scheduler.stop()
     (fact,) = memory.store.suggestions()
     assert (fact.text, fact.source) == ("George's train to work is the 7:52.", "the DAG of your agent “Commute”")
     assert memory.store.count().get("fact", 0) == 0  # not remembered until you approve it

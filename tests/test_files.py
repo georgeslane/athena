@@ -311,7 +311,7 @@ async def test_a_dag_task_sends_the_files_it_made(config, memory):
 
     from athena.agent import Agent
     from athena.config import TasksConfig
-    from athena.dags.scheduler import Dags
+    from athena.dags.service import Dags
     from athena.dags.store import AgentStore
     from athena.history import ConversationStore
     from athena.tools import ToolRegistry
@@ -328,12 +328,16 @@ async def test_a_dag_task_sends_the_files_it_made(config, memory):
         + [completion("NO CHANGES")] * 6
     )
     agent = Agent(config.agent, server.client(config.llm), tools, ConversationStore(config.db_path), memory)
-    agent.gate.grace = 0.0
     channel = FakeChannel()
-    dags = Dags(TasksConfig(quiet_minutes=0), AgentStore(config.db_path), agent, timezone="Europe/London",
-                channel=lambda: channel, tools=tools, poll_seconds=0.01)  # fmt: skip
-    dags.save(1, "with DAG():\n    summary_file = Task(prompt='Write a summary and send it.')\n")
-    await dags.runner.run(1, "manual")
+    dags = Dags(TasksConfig(), AgentStore(config.db_path), agent, timezone="Europe/London",
+                channel=lambda: channel, state=config.db_path.with_name("dags.db"))  # fmt: skip
+    dags.save(1, "with Dag('files', prompt='p'):\n    AgenticTask('summary_file', prompt='Write and send it.')\n")
+    await dags.start()
+    try:
+        run = await dags.run_now(1)
+        await dags.engine.wait(run.run_id, timeout=10, stop_on_pause=False)
+    finally:
+        await dags.stop()
     assert channel.files == [json.dumps({"path": "summary.md", "caption": ""})]
 
 

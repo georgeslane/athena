@@ -5,11 +5,12 @@
 // each layer are ordered by where those they're joined to are (the barycentre, sweeping down then up a few times),
 // so few edges cross. A DAG has at most 30 tasks, so this takes no time at all.
 //
-// A task that runs for each item of a list is drawn as a stack, and the edge from the list says "each"; one that
-// runs only if a yes or no said so has an edge that says "yes" or "no". A task group is a box round its tasks, where
-// that doesn't take in others, and a tag on each of them where it would. Tasks that run for each item of what
-// started the run come after a node that stands for it. Only the edges to what a task comes after directly are
-// drawn: not one to a task it comes after through another, such as the list a group's later tasks run for.
+// As agentic-airflow runs them: a task after one that fans out a list runs once for each item, and so does one that
+// follows the mapping of one that does; those are drawn as stacks, the edge from the list says "each", and an edge
+// from a stack to a task that runs once says "all", as it's given every item's. An edge from a branch says "if
+// picked". Task("items", fn=trigger_items) stands for what started the run. A task group is a box round its tasks,
+// where that doesn't take in others, and a tag on each of them where it would. Only the edges to what a task comes
+// after directly are drawn: not one to a task it comes after through another.
 
 import { h, icon } from "./core.js";
 
@@ -20,20 +21,16 @@ const GAP_Y = 48;
 const PAD = 8; // round a group's tasks
 const SWEEPS = 4;
 const SVG = "http://www.w3.org/2000/svg";
-const TRIGGER = "trigger"; // for_each=trigger, as the server says it
 let drawn = 0; // each drawing's arrowhead has an id of its own
 
-// tasks: [{id, prompt, upstream, returns, for_each, run_if, run_when, group, alert, outlets}], in the order the
-// server gives (each after its upstream). end: [{id, about}]. run: {task id: {state, count, states}} for a run's
-// view. selected: a task's id.
+// tasks: [{id, kind, prompt, fn, return_type, fan_out, follow_mapping, allow_none, group, upstream, outlets, alert}],
+// in the order the server gives (each after its upstream). end: [{id, about}]. run: {task id: {state, count,
+// states}} for a run's view. selected: a task's id.
 export function graph({ tasks, end, run = null, selected = null, onSelect = null }) {
   [NODE_W, GAP_X] = window.matchMedia("(max-width: 479px)").matches ? [136, 14] : [176, 28];
-  const started = tasks.some((t) => t.for_each === TRIGGER);
-  const drawnTasks = direct(
-    started
-      ? [{ id: TRIGGER, synthetic: true, upstream: [] }, ...tasks.map((t) => (t.for_each === TRIGGER ? { ...t, upstream: [TRIGGER, ...t.upstream] } : t))]
-      : tasks
-  );
+  const each = mapped(tasks);
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const drawnTasks = direct(tasks).map((t) => ({ ...t, each: each.has(t.id) }));
   const { positions, width, height, endY } = layout(drawnTasks);
   const ends = Boolean(end && end.length);
   const box = h("div.graph", { style: { width: `${width}px`, height: `${ends ? endY : height}px` } });
@@ -57,10 +54,11 @@ export function graph({ tasks, end, run = null, selected = null, onSelect = null
   for (const task of drawnTasks) {
     for (const up of task.upstream) {
       const skipped = run && ["skipped", "upstream_failed"].includes((run[task.id] || {}).state);
-      const kind = up === task.run_if ? (task.run_when ? "yes" : "no") : up === task.for_each ? "each" : "";
-      const [path, middle] = edge(positions.get(up), positions.get(task.id), skipped || kind === "no" || kind === "yes", arrow);
+      const from = byId.get(up);
+      const kind = from.fan_out ? "each" : from.kind === "agentic_branch" ? "if" : each.has(up) && !each.has(task.id) ? "all" : "";
+      const [path, middle] = edge(positions.get(up), positions.get(task.id), skipped || kind === "if", arrow);
       svg.append(path);
-      if (kind) labels.push(h(`span.graph-edge-label.${kind}`, { text: kind, style: { left: `${middle.x}px`, top: `${middle.y}px` } }));
+      if (kind) labels.push(h(`span.graph-edge-label.${kind}`, { text: kind === "if" ? "if picked" : kind, style: { left: `${middle.x}px`, top: `${middle.y}px` } }));
     }
   }
   if (ends) {
@@ -71,10 +69,22 @@ export function graph({ tasks, end, run = null, selected = null, onSelect = null
   box.append(svg, ...labels);
   for (const task of drawnTasks) {
     const p = positions.get(task.id);
-    box.append(task.synthetic ? startNode(p) : node(task, p, run && run[task.id], selected === task.id, onSelect, tagged.has(task.id)));
+    box.append(task.fn === "trigger_items" ? startNode(task, p, run && run[task.id]) : node(task, p, run && run[task.id], selected === task.id, onSelect, tagged.has(task.id)));
   }
   // The tasks every DAG ends with, in a row below, as wide as there's room for: the arrows above end at it.
   return h("div.graph-scroll", {}, box, ends ? endRow(end, run, selected, onSelect) : null);
+}
+
+// The tasks that run once for each item, as agentic-airflow maps them: those after a task that fans out a list, and
+// those that follow the mapping of one that runs for each item.
+function mapped(tasks) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const each = new Set();
+  for (const t of tasks) {
+    const ups = t.upstream.map((u) => byId.get(u)).filter(Boolean);
+    if (ups.some((u) => u.fan_out) || (t.follow_mapping && ups.some((u) => each.has(u.id)))) each.add(t.id);
+  }
+  return each;
 }
 
 // The tasks, each with only what it comes after directly: not a task it comes after through another of those.
@@ -166,23 +176,29 @@ function groups(tasks, positions) {
   return { boxes, tagged };
 }
 
-function startNode(p) {
+function startNode(task, p, went) {
   return h(
     "div.graph-node.graph-start",
-    { style: { left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, height: `${NODE_H}px` }, title: "The items that came with what started the run: for_each=trigger" },
-    h("span.graph-node-head", {}, icon("bolt"), h("code", { text: "trigger" })),
-    h("span.graph-node-text", { text: "What started the run" })
+    {
+      style: { left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, height: `${NODE_H}px` },
+      title: "The items that came with what started the run: what comes after it runs once for each",
+      "data-state": went ? went.state : null,
+    },
+    h("span.graph-node-head", {}, icon("bolt"), h("code", { text: task.id })),
+    h("span.graph-node-text", { text: "Each item that started the run" })
   );
 }
 
 function node(task, p, went, selected, onSelect, tagged) {
   const marks = [];
   if (tagged) marks.push(h("span.graph-mark", { title: `In the task group ${task.group}`, text: task.group }));
-  if (task.for_each) marks.push(h("span.graph-mark", { title: "Runs once for each item" }, went && went.count ? `×${went.count}` : "×n"));
-  if (task.returns === "list") marks.push(h("span.graph-mark", { title: "Returns a list", text: "list" }));
-  if (task.returns === "bool") marks.push(h("span.graph-mark", { title: "Returns yes or no", text: "y/n" }));
+  if (task.each) marks.push(h("span.graph-mark", { title: "Runs once for each item" }, went && went.count ? `×${went.count}` : "×n"));
+  if (task.fan_out) marks.push(h("span.graph-mark", { title: "Returns a list: what's after it runs for each item", text: "list" }));
+  else if (task.return_type && task.return_type !== "string") marks.push(h("span.graph-mark", { title: `Returns ${task.return_type}`, text: task.return_type }));
+  if (task.kind === "agentic_branch") marks.push(h("span.graph-mark", { title: task.allow_none ? "Picks what runs after it, or none" : "Picks what runs after it", text: "picks" }));
+  if (task.kind === "agentic_evaluator") marks.push(h("span.graph-mark", { title: "Checks what's before it, and has it done again", text: "checks" }));
   if (task.alert) marks.push(h("span.graph-mark", { title: "Tells you what it found" }, icon("bell")));
-  if (task.outlets && task.outlets.length) marks.push(h("span.graph-mark", { title: `Starts ${task.outlets.join(", ")} with what it finds` }, icon("send")));
+  if (task.outlets && task.outlets.length) marks.push(h("span.graph-mark", { title: `Updates ${task.outlets.join(", ")} with what it finds` }, icon("send")));
   const state = went ? went.state : "";
   const how = went && went.states ? ` (${went.states})` : "";
   return h(
@@ -191,10 +207,10 @@ function node(task, p, went, selected, onSelect, tagged) {
       type: onSelect ? "button" : null,
       style: { left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, height: `${NODE_H}px` },
       "data-state": state || null,
-      "data-each": task.for_each ? "" : null,
+      "data-each": task.each ? "" : null,
       "aria-pressed": onSelect ? String(selected) : null,
       "aria-label": `${task.id}${state ? `: ${state.replace("_", " ")}${how}` : ""}`,
-      title: `${task.prompt}${how ? `\n${how.slice(2, -1)}` : ""}`,
+      title: `${task.prompt || ""}${how ? `\n${how.slice(2, -1)}` : ""}`,
       onclick: onSelect ? () => onSelect(task.id) : null,
     },
     h("span.graph-node-head", {}, h("code", { text: task.id }), ...marks),
@@ -221,7 +237,7 @@ function endRow(end, run, selected, onSelect) {
             "aria-pressed": onSelect ? String(selected === t.id) : null,
             onclick: onSelect ? () => onSelect(t.id) : null,
           },
-          t.id.replace("_", " ")
+          t.id.replace("end.", "").replace("_", " ")
         );
       })
     )

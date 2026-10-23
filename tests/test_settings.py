@@ -194,7 +194,7 @@ def test_a_server_set_up_before_a_setting_came_in_is_given_it(setup):
 def test_settings_that_no_longer_exist_are_taken_out_so_the_config_loads(setup):
     settings, config, _ = setup
     config.write_text(config.read_text().replace("[display]\n", "[display]\nled = true   # the board's light\n", 1))
-    from_before = "[tasks]\nheartbeat_minutes = 60   # checking what was watched\nheartbeat_tools = []\n"
+    from_before = "[tasks]\nheartbeat_minutes = 60   # what was watched\nheartbeat_tools = []\nquiet_minutes = 5\n"
     config.write_text(config.read_text().replace("[tasks]\n", from_before, 1))
     with pytest.raises(ConfigError, match="led"):
         load_config(config)
@@ -202,9 +202,10 @@ def test_settings_that_no_longer_exist_are_taken_out_so_the_config_loads(setup):
         "removed display.led",
         "removed tasks.heartbeat_minutes",
         "removed tasks.heartbeat_tools",
+        "removed tasks.quiet_minutes",
     ]
     loaded = load_config(config)
-    assert "led" not in loaded.display.model_dump() and loaded.tasks.quiet_minutes == 5  # the rest as it was
+    assert "led" not in loaded.display.model_dump() and loaded.tasks.max_minutes == 30  # the rest as it was
 
 
 def test_later_settings_arent_added_to_a_server_that_isnt_set_up(setup):
