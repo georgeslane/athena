@@ -52,6 +52,7 @@ async def test_reloading_applies_the_tools_settings_from_config_toml(services, m
     memory_and_tasks = {"remember", "search_memory", "read_document", "forget_memory"}
     tasks_and_skills = {
         "change_dag",
+        "change_context",
         "run_dag",
         "agent_runs",
         "read_skill",

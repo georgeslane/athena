@@ -432,6 +432,13 @@ async def test_chatting_approving_and_talking_to_another_agent(talking, browser)
     await page.wait_for_selector(".chat-send:enabled")  # once the page knows the last answer's finished
     await page.press(".composer textarea", "Enter")
     await page.wait_for_selector(".msg.mine >> text=Back again")
+    await page.wait_for_selector(".msg.theirs:nth-last-child(1) >> text=Hello there.")
+    # What /help said stays where it was sent, before what was said since, not after each message.
+    said = [t.strip() for t in await page.locator(".chat-log > li").all_inner_texts()]
+    helped = next(i for i, t in enumerate(said) if t == "/help")
+    again = next(i for i, t in enumerate(said) if t.startswith("Back again"))
+    assert again > helped and "Just send me a message." in said[helped + 1], said
+    assert said[-1].startswith("Hello there.")
     assert talking.history.master.id == 1 and len(talking.history.messages(2)[0]) == 2
     assert await page.inner_text(".session[aria-current] .current") == "Telegram"
     assert errors == []

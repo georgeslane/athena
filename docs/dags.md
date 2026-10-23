@@ -74,7 +74,11 @@ Patterns such as `"news_*"` work in all of the tool lists. A task group or a tas
 | `AgenticEvaluator("id", prompt="...")` | Checks what the task before it did, and has it done again if it won't do. See [Checking a task's work](#checking-a-tasks-work). |
 | `Task("items", fn=trigger_items, fan_out=True)` | The items that came with what started the run, one for each task after it. See [What starts a DAG](#what-starts-a-dag). |
 
-An id is a letter then letters, digits, `_`, `.`, `:` or `-`, unique in the DAG, and none can start `end.`, which is for the tasks every DAG ends with. Each task can also have:
+An id is a letter then letters, digits, `_`, `.`, `:` or `-`, unique in the DAG, and none can start `end.`, which is for the tasks every DAG ends with.
+
+Give each task one job, with a prompt saying exactly what to look at and with what: "Read today's calendar events", not "Look for events". A task sees only its own prompt and what the tasks before it found, so a vague one may do their work again. `denied_tools` keeps the tools it shouldn't use from it, such as `denied_tools=["*mail*"]`.
+
+Each task can also have:
 
 | Argument | What it is |
 |---|---|
@@ -265,7 +269,7 @@ fits = AgenticTask("fits", prompt="Should I apply for this job? Ask me if it's b
 ## How a run goes
 
 - **Runs take turns**: one at a time on each model, first come first served. A task holds the model from its first step to its answer, so it's never interrupted; your messages go before the next task, in the order you sent them. A task waiting for your OK doesn't hold the model, so your messages go ahead meanwhile.
-- **Each task** is a request to the model, starting as the agent's chat does, with its guidance, files and what its last run kept, then what the run is, then what the tasks before it found, then the task. A task gets up to `[tasks] max_tool_rounds` (25) steps and `max_minutes` (30), not counting time it waits for your OK. If the model server can't be reached, it tries again after 30 seconds, then 2 minutes, and if it still can't, the rest of the run's tasks don't try.
+- **Each task** is a request to the model, starting as the agent's chat does, with its guidance, files and what its last run kept, then what the run is and how it started: by hand, or on its schedule, with the time it's for. Then what the tasks before it found, then the task. It isn't given the DAG file, which is what's running it. A task gets up to `[tasks] max_tool_rounds` (25) steps and `max_minutes` (30), not counting time it waits for your OK. If the model server can't be reached, it tries again after 30 seconds, then 2 minutes, and if it still can't, the rest of the run's tasks don't try.
 - **A run that finds nothing**, with every task that ran returning nothing or an empty list, and every branch picking none, ends there, so checking for something often costs one task.
 - **Otherwise it ends** with five tasks of its own: reviewing the workflow, the tools and the skills it used, which can propose changes for you to approve; keeping what the next run should know; and a summary, in the agent's chat, which tells you, and the master agent, when there's news. Each is given the run's log, a line for each task. See [Agents](agents.md#the-end-of-each-run).
 - **A run's status** is how the DAG's own tasks went: one of the five failing doesn't make it a failure.

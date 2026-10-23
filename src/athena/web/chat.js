@@ -18,7 +18,7 @@ const PHOTOS = /^\[(?:Photo|\d+ photos)\]\s*/; // how a message notes its photos
 const FILE = /^\[File: ([^\]]+)\]\s*/; // how a message notes a file sent with it (files.receive)
 
 const chat_ = {
-  notes: new Map(), // id -> [{command, said}]: what commands said, here, until the page is reloaded
+  notes: new Map(), // id -> [{command, said, after}]: what commands said, here, until the page is reloaded, after the message that was last then
   attachments: [], // photos and files to send with the next message: {name, kind, data, preview}
   reading: 0, // photos and files still being read, before the message can be sent
   sending: false,
@@ -151,7 +151,15 @@ function renderLog(id) {
   const items = [];
   if (known.more) items.push(h("li.chat-earlier", {}, h("button.button.small", { type: "button", text: "Show earlier", onclick: showEarlier })));
   let day = "";
+  const notes = [...(chat_.notes.get(id) || [])];
+  const noted = (before) => {
+    while (notes.length && (before === undefined || notes[0].after < before)) {
+      const note = notes.shift();
+      items.push(h("li.msg.mine.command", {}, h("div.msg-text", { text: note.command })), h("li.msg.note", {}, h("div.msg-text.md", {}, markdown(note.said))));
+    }
+  };
   for (const m of known.messages) {
+    noted(m.id); // where each command was sent, among the messages
     const at = Date.parse(m.at) / 1000;
     if (isoDay(at) !== day) {
       day = isoDay(at);
@@ -159,7 +167,7 @@ function renderLog(id) {
     }
     items.push(message(m, id));
   }
-  for (const note of chat_.notes.get(id) || []) items.push(h("li.msg.mine.command", {}, h("div.msg-text", { text: note.command })), h("li.msg.note", {}, h("div.msg-text.md", {}, markdown(note.said))));
+  noted();
   const failed = d.failed[String(id)];
   if (failed) items.push(failedMessage(failed));
   const replying = d.replying && d.replying.session === id ? d.replying : null;
@@ -378,7 +386,8 @@ async function send(event, text) {
       e().text.value = "";
       typed();
     }
-    if (said.said) chat_.notes.set(id, [...(chat_.notes.get(id) || []), { command: text, said: said.said }]);
+    const last = (agents().pages.get(id)?.messages || []).at(-1);
+    if (said.said) chat_.notes.set(id, [...(chat_.notes.get(id) || []), { command: text, said: said.said, after: last ? last.id : 0 }]);
     if (!command) {
       agents().once.clear();
       chat_.attachments = [];

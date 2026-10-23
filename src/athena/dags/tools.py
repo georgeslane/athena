@@ -1,13 +1,15 @@
 """The model's tools for agents' DAGs:
 
   change_dag   replaces an agent's DAG file, asking you first and showing what changes
+  change_context  changes what an agent's DAG keeps for its next run, as you tell it to in a chat
   run_dag      runs an agent's DAG now
   agent_runs   reads what your agents' runs did: each agent's last, an agent's last ten, or one run's tasks
 
-change_dag and run_dag act on the agent of the conversation they're used in, or another, by name: so the master
-agent, which Telegram talks to, can act on the others. A run can't change or start a DAG: its reviews propose
-changes instead. An answer that writes out a DAG file without having saved it, as a model may when it says it has,
-is saved by change_dag all the same, asking first (Tool.implied).
+change_dag, change_context and run_dag act on the agent of the conversation they're used in, or another, by name:
+so the master agent, which Telegram talks to, can act on the others. A run can't change or start a DAG, or change
+what's kept: its reviews propose changes instead, and its end keeps what the next run should know. An answer that
+writes out a DAG file without having saved it, as a model may when it says it has, is saved by change_dag all the
+same, asking first (Tool.implied).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from athena.dags import runs
+from athena.dags.ends import CONTEXT_WORDS
 from athena.dags.reader import REFERENCE, DagError, read, when
 from athena.tools import Tool, ToolError, current_turn
 
@@ -82,6 +85,16 @@ def dag_tools(dags: Dags) -> list[Tool]:
             return None
         return {"source": source} if agent_id == here else {"source": source, "agent": f"#{agent_id}"}
 
+    async def change_context(args: dict[str, Any]) -> str:
+        agent_id, context = which(args), str(args.get("context") or "").strip()
+        if len(context.split()) > CONTEXT_WORDS:
+            raise ToolError(f"That's more than {CONTEXT_WORDS} words: keep only what its next run needs.")
+        dags.store.update(agent_id, context=context)
+        name = dags.history.title(agent_id) or "this agent"
+        if not context:
+            return f"{name}'s next run starts with nothing kept."
+        return f"Changed what {name}'s next run starts with."
+
     async def run_dag(args: dict[str, Any]) -> str:
         agent_id = which(args)
         try:
@@ -123,6 +136,23 @@ def dag_tools(dags: Dags) -> list[Tool]:
             needs_confirmation=True,
             preview=preview,
             implied=written_out,
+        ),
+        Tool(
+            name="change_context",
+            description=(
+                "Change what an agent's DAG keeps for its next run, when the user tells you something in it is "
+                "wrong, done with or missing: give the whole of it as it should be, with that changed and the rest "
+                "as it is. Its next run starts with this."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "context": {"type": "string", "description": "All of what to keep, replacing what's kept now"},
+                    "agent": agent,
+                },
+                "required": ["context"],
+            },
+            handler=change_context,
         ),
         Tool(
             name="run_dag",

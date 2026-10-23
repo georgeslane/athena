@@ -6,7 +6,7 @@ Athena revolves around agents. Each agent is something you want Athena to keep a
 - **Its DAG:** the tasks it does by itself, on a schedule or when something happens, written in [agentic-airflow](https://github.com/georgeslane/agentic-airflow)'s Python and run by its engine. See [Writing DAGs](dags.md).
 - **Its guidance:** how Athena acts in it, at a high level: what it's for, what matters, what to avoid. It's at the start of the agent's chat and of each run of its DAG.
 - **Its files:** your CV, notes, or anything else it should know, added with its guidance: PDFs and text files. Its chat and its runs are told they're there, and read them when they'd help.
-- **Its context:** what its DAG's last run kept for the next: say, the jobs it's applied for, rather than the searches it made on the way. Each run's `save_context` task writes it, and you can read and change it.
+- **Its context:** what its DAG's last run kept for the next: say, the jobs it's applied for, rather than the searches it made on the way, or what its DAG says already. Each run's `save_context` task writes it. You can change it on the dashboard, or tell the agent in its chat, such as "that call isn't important", and it changes it with `change_context`.
 - **Its model:** any of the model server's models, chosen in **⋯**. Otherwise it uses `[llm] model`.
 
 Make one with **New agent**, and name, mute or delete it from the top of it: deleting it deletes what was said to it, here and in memory, its DAG, the history of its runs and its files.

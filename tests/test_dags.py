@@ -790,6 +790,78 @@ def test_an_agent_with_no_dag_is_told_change_dag_gives_it_one(athena):
     assert "It has no DAG yet" not in a["dags"].intro_for(a["dags"].master)
 
 
+@pytest.mark.parametrize(
+    ("trigger", "said"),
+    [
+        ({"source": "cron", "scheduled_for": "2026-10-23T12:00:00+00:00"}, "on its schedule: its 13:00 run"),
+        (
+            {"source": "cron", "scheduled_for": "2026-10-23T06:00:00+00:00", "catchup": True},
+            "on its schedule, late: its 07:00 run was missed while Athena was off",
+        ),
+        ({"source": "manual"}, "because George ran it by hand, now, not on a schedule"),
+    ],
+)
+def test_a_run_is_told_how_it_started_and_a_scheduled_one_which_time_its_for(trigger, said):
+    from zoneinfo import ZoneInfo
+
+    assert runs.started_by(DagRun("r", "jobs", RunStatus.RUNNING, trigger), "George", ZoneInfo("Europe/London")) == said
+
+
+@pytest.mark.asyncio
+async def test_a_run_starts_with_what_the_agent_kept_but_not_its_dag_which_its_chat_has(athena):
+    a = athena()
+    a["store"].update(a["jobs"], guidance="Find me data jobs.", context="Applied to Acme already.")
+    a["dags"].save(a["jobs"], THREE)
+    await a["dags"].start()
+    try:
+        await run_once(a, a["jobs"])
+    finally:
+        await a["dags"].stop()
+    opening = a["server"].requests[0]["messages"][0]["content"]
+    assert "Find me data jobs." in opening and "Applied to Acme already." in opening
+    assert "AgenticTask(" not in opening and "Apply to them." not in opening  # another task's prompt
+    assert "runs only when" not in opening and "change_context" not in opening
+    chat = a["dags"].intro_for(a["jobs"])
+    assert "Apply to them." in chat and "(change_context changes it, if the user says it's wrong or done with):" in chat
+
+
+@pytest.mark.asyncio
+async def test_what_an_agent_keeps_can_be_changed_by_chatting_but_not_by_a_run(athena):
+    from athena.tools import Turn, begin_turn
+
+    a = athena()
+    a["store"].update(a["jobs"], context="The call from Sam is important.\nApplied to Acme.")
+    change = next(t for t in a["dags"].tools() if t.name == "change_context")
+    assert not change.needs_confirmation
+    said = await change.handler({"context": "Applied to Acme.", "agent": "Job hunting"})
+    assert (
+        said == "Changed what Job hunting's next run starts with."
+        and a["store"].get(a["jobs"]).context == "Applied to Acme."
+    )
+    with pytest.raises(Exception, match="more than 1200 words"):
+        await change.handler({"context": "word " * 1201, "agent": "Job hunting"})
+    end = begin_turn(Turn(dag=object()))
+    try:
+        with pytest.raises(Exception, match="A run can't change or start a DAG"):
+            await change.handler({"context": "", "agent": "Job hunting"})
+    finally:
+        end()
+    assert a["store"].get(a["jobs"]).context == "Applied to Acme."
+    assert (
+        await change.handler({"context": " ", "agent": "Job hunting"})
+        == "Job hunting's next run starts with nothing kept."
+    )
+
+
+def test_dags_are_written_with_a_job_for_each_task_and_what_runs_keep_isnt_the_dag():
+    from athena.dags.ends import save_context, workflow
+    from athena.dags.reader import REFERENCE
+
+    assert "Give each task one job" in REFERENCE and 'denied_tools=["*mail*"]' in REFERENCE
+    assert "did more than one thing or did another's work again" in workflow(THREE)
+    assert "nor what the DAG says already, such as when it runs or what its tasks do" in save_context("", "George")
+
+
 def test_agents_files_are_listed_in_what_their_conversations_start_with(athena):
     a = athena()
     agent_files.keep(a["workspace"], a["jobs"], "cv.pdf", b"%PDF-1.4 x")

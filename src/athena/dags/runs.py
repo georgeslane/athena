@@ -22,16 +22,20 @@ def number(run: DagRun) -> int:
     return int(run.trigger.get("number") or 0)
 
 
-def started_by(run: DagRun, user: str = "you") -> str:
-    """Why a run started, in words: "on its schedule", "when arrive-home came in"..."""
+def started_by(run: DagRun, user: str = "you", tz: tzinfo | None = None) -> str:
+    """Why a run started, in words: "on its schedule", "when arrive-home came in"... With ``tz``, as the run itself
+    is told: a scheduled run says which time it's for, and one run by hand that it isn't on a schedule."""
     trigger = run.trigger
     source = trigger.get("source")
+    due = trigger.get("scheduled_for")
+    at = f"{datetime.fromisoformat(due).astimezone(tz):%H:%M}" if tz and due else ""
     if source == "cron" and trigger.get("catchup"):
-        return "on its schedule, late: it was missed while Athena was off"
+        late = f"its {at} run was missed" if at else "it was missed"
+        return f"on its schedule, late: {late} while Athena was off"
     if source == "cron":
-        return "on its schedule"
+        return f"on its schedule: its {at} run" if at else "on its schedule"
     if source == "manual":
-        return f"run by {user}"
+        return f"because {user} ran it by hand, now, not on a schedule" if tz else f"run by {user}"
     if source == "webhook":
         return f"when {trigger.get('webhook')} came in"
     if source == "asset":
