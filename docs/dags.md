@@ -59,8 +59,11 @@ Values are written out as they are: strings, numbers, `True`, `False`, `None`, a
 | `thinking` | `"on"` or `"off"`: whether its tasks think before answering. `[tasks] thinking` otherwise. |
 | `skills` | Skills to read into every task's prompt, by name. |
 | `auto_evaluate` | `False` leaves out the tasks every DAG ends with (see [How a run goes](#how-a-run-goes)). |
+| `catchup` | `False` skips a scheduled run missed while Athena was off; otherwise it runs when Athena's back. See [Schedules](#schedules). |
+| `retries`, `retry_delay` | How many times a failed task is tried again (0 to 3), and the seconds between: see [When a task fails](#when-a-task-fails). |
+| `ask_user` | `True` lets its tasks ask you something: see [Asking you](#asking-you). |
 
-Patterns such as `"news_*"` work in all of the tool lists.
+Patterns such as `"news_*"` work in all of the tool lists. A task group or a task can set `retries`, `retry_delay` and `ask_user` for itself too.
 
 ## Tasks
 
@@ -171,7 +174,9 @@ A cron schedule is five fields, minute, hour, day of the month, month and day of
 | `"0 8 1 * *"` | 08:00 on the 1st of each month |
 | `"@hourly"`, `"@daily"`, `"@weekly"`, `"@monthly"` | On the hour; at midnight; at midnight on Sundays; at midnight on the 1st |
 
-A DAG runs at most every 15 minutes. One that's due while its last run is still waiting to start isn't queued again, and one missed while Athena was off isn't run late: it runs when it's next due.
+A DAG runs at most every 15 minutes. One that's due while its last run is still waiting to start isn't queued again.
+
+**Catching up**: a run missed while Athena was off, say the Pi lost power overnight, runs once Athena's back, once however many were missed. The run is told it's late. `catchup=False` on the `Dag` skips it, to wait until it's next due; runs due while the DAG was paused are never caught up.
 
 ## What starts a DAG
 
@@ -241,6 +246,22 @@ with Dag("job_hunting", prompt="Apply for jobs that fit my CV.", schedule=[Asset
 
 `schedule=[Asset("claude-done")]` runs a DAG when Claude finishes a project you handed it, with the project and its pull request (see [Projects for Claude](claude-projects.md)).
 
+## When a task fails
+
+A task that fails, such as one that times out or whose answer never fits, is tried again a minute later, once (`[tasks] retries`). It starts again from the beginning, told what went wrong and which tools it had already used, so it doesn't do twice what they did; a tool that asks first asks again. `retries` (0 to 3) and `retry_delay` (seconds) on the DAG, a task group or a task change that. A task that fails because the model server can't be reached isn't tried again: Athena's tried already. The run's History shows each try.
+
+## Asking you
+
+Runs work by themselves: a task decides for itself, and you see what it did afterwards. For a decision that's yours, such as whether to apply for a job, `ask_user=True` on a task (or a group, or the DAG) gives it the `ask_user` tool:
+
+```python
+fits = AgenticTask("fits", prompt="Should I apply for this job? Ask me if it's borderline.", ask_user=True)
+```
+
+- **The question** comes to Telegram, with a button for each answer it offers and **Skip**: reply to the message to answer in your own words. It's in the agent's chat on the dashboard too, with a box for your answer, and your devices are notified.
+- **The task waits** without holding the model, so your messages and other runs go ahead, for up to `[tasks] ask_minutes` (240). Skipped or unanswered, it's told so, and decides for itself.
+- **Use it sparingly**: a question you don't see for hours holds up the run, so ask only what only you can decide.
+
 ## How a run goes
 
 - **Runs take turns**: one at a time on each model, first come first served. A task holds the model from its first step to its answer, so it's never interrupted; your messages go before the next task, in the order you sent them. A task waiting for your OK doesn't hold the model, so your messages go ahead meanwhile.
@@ -248,7 +269,7 @@ with Dag("job_hunting", prompt="Apply for jobs that fit my CV.", schedule=[Asset
 - **A run that finds nothing**, with every task that ran returning nothing or an empty list, and every branch picking none, ends there, so checking for something often costs one task.
 - **Otherwise it ends** with five tasks of its own: reviewing the workflow, the tools and the skills it used, which can propose changes for you to approve; keeping what the next run should know; and a summary, in the agent's chat, which tells you, and the master agent, when there's news. Each is given the run's log, a line for each task. See [Agents](agents.md#the-end-of-each-run).
 - **A run's status** is how the DAG's own tasks went: one of the five failing doesn't make it a failure.
-- **Restarts**: a run going when Athena stops carries on when it starts again, starting the task that was going again from its beginning, and a tool that was waiting for your OK is asked about again.
+- **Restarts**: a run going when Athena stops carries on when it starts again, starting the task that was going again from its beginning, and a tool that was waiting for your OK, or a question for you, is asked again.
 
 ## When it won't read
 
