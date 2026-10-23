@@ -1,7 +1,7 @@
 // An agent's DAG, on the Agents tab, one part below another: when it runs and what starts it, with the address to
 // start it from an iPhone Shortcut or a webhook; running it now, pausing it; changes its runs propose, to approve or
-// reject; how it works, drawn (graph.js); and its file, in Airflow-style Python that Athena reads but never runs,
-// checked as you write it. How DAG files are written is a dialog of its own (reference()).
+// reject; how it works, drawn (graph.js); and its file, in agentic-airflow's Python, which Athena reads but never
+// runs, checked as you write it. How DAG files are written is a dialog of its own (reference()).
 
 import { ask, call, clock, h, icon, state, toast } from "./core.js";
 import { graph } from "./graph.js";
@@ -18,7 +18,7 @@ const dag_ = {
 
 const drafts = () => state.agents.drafts;
 const draftKey = () => `${dag_.id}/dag`;
-const hook = (event) => `${location.origin}/hooks/${event}`;
+const hook = (name) => `${location.origin}/hooks/${name}`;
 
 export async function dagView(box, id, fresh) {
   if (fresh || dag_.id !== id || !dag_.els || !box.contains(dag_.els.root)) {
@@ -57,7 +57,7 @@ function build(box) {
   e.editor = h(
     "section.card.dag-editor",
     {},
-    h("div.card-head", {}, h("h2", {}, "dag.py"), h("span.aside", { text: "Airflow-style Python: read, never run" }), h("div.actions", {}, guide())),
+    h("div.card-head", {}, h("h2", {}, "dag.py"), h("span.aside", { text: "agentic-airflow Python: read, never run" }), h("div.actions", {}, guide())),
     h("div.code", {}, e.lines, e.text),
     e.problem,
     h("div.tool-actions", {}, h("span.grow"), e.revert, e.save)
@@ -114,34 +114,40 @@ function renderSummary() {
   if (how && opened) how.open = true;
 }
 
-// What starts it, besides its schedule and you: each of its triggers, with where it comes from, and the address
-// to send it to; and what its own outlets start.
+// What starts it, besides its cron schedule and you: each webhook, with the address to send it to; each asset, with
+// the tasks that update it; and each DAG it follows. Then the assets its own tasks update, and who waits for them.
 function starts(spec, d) {
   const events = d.events;
-  const rows = spec.triggers.map((event) => {
-    const from = (events.sources[event] || []).filter((s) => s.agent !== dag_.id);
-    const said = [];
-    if (event === events.claude) said.push("when Claude finishes a project you handed it");
-    for (const s of from) said.push(h("span", {}, "from ", h("a", { href: `#agents/${s.agent}/dag`, text: s.name }), `'s task ${s.task}`));
-    const where = events.hooks
-      ? [h("span.hook-method", { text: "POST" }), h("code.hook-url", {}, ...hook(event).split(/(?<=\/)/).flatMap((part, i) => (i ? [h("wbr"), part] : [part]))), copyButton(hook(event))]
-      : [h("span.hint", { text: "From Shortcuts and webhooks once TRIGGERS_TOKEN is set in .env." })];
-    return h(
-      "li.dag-trigger",
-      {},
-      icon("bolt"),
-      h("div.dag-trigger-body", {}, h("div", {}, h("code", { text: event }), said.length ? h("span.hint", {}, " ", ...said.flatMap((s, i) => (i ? [" and ", s] : [s]))) : null), h("div.hook", {}, ...where))
-    );
+  const rows = spec.schedule.flatMap((entry) => {
+    if (entry.kind === "webhook") {
+      const where = events.hooks
+        ? [h("span.hook-method", { text: "POST" }), h("code.hook-url", {}, ...hook(entry.name).split(/(?<=\/)/).flatMap((part, i) => (i ? [h("wbr"), part] : [part]))), copyButton(hook(entry.name))]
+        : [h("span.hint", { text: "From Shortcuts and webhooks once TRIGGERS_TOKEN is set in .env." })];
+      return [h("li.dag-trigger", {}, icon("bolt"), h("div.dag-trigger-body", {}, h("div", {}, h("code", { text: entry.name }), h("span.hint", { text: " a webhook" })), h("div.hook", {}, ...where)))];
+    }
+    if (entry.kind === "asset") {
+      const from = (events.sources[entry.name] || []).filter((s) => s.agent !== dag_.id);
+      const said = [];
+      if (entry.name === events.claude) said.push("when Claude finishes a project you handed it");
+      for (const s of from) said.push(h("span", {}, "from ", h("a", { href: `#agents/${s.agent}/dag`, text: s.name }), `'s task ${s.task}`));
+      if (!said.length) said.push("no agent's task updates it yet");
+      return [h("li.dag-trigger", {}, icon("bolt"), h("div.dag-trigger-body", {}, h("div", {}, h("code", { text: entry.name }), h("span.hint", {}, " when it's updated, ", ...said.flatMap((s, i) => (i ? [" and ", s] : [s]))))))];
+    }
+    if (entry.kind === "dag") {
+      return [h("li.dag-trigger", {}, icon("bolt"), h("div.dag-trigger-body", {}, h("span", {}, "When the DAG ", h("code", { text: entry.dag_id }), ` finishes (${entry.on.join(" or ")})`)))];
+    }
+    return [];
   });
   const outlets = spec.tasks.flatMap((t) =>
-    t.outlets.map((event) => {
-      const waiting = events.waiting[event] || [];
-      const said = waiting.length ? `: the DAG of ${waiting.join(" and ")} waits for it.` : ": no agent's DAG waits for it yet.";
-      return h("li.dag-trigger.outlet", {}, icon("send"), h("div.dag-trigger-body", {}, h("span", {}, "Its task ", h("code", { text: t.id }), " starts ", h("code", { text: event }), said)));
+    t.outlets.map((name) => {
+      const waiting = events.assets[name] || [];
+      const said = waiting.length ? `: the DAG of ${waiting.join(" and ")} starts on it.` : ": no agent's DAG starts on it yet.";
+      return h("li.dag-trigger.outlet", {}, icon("send"), h("div.dag-trigger-body", {}, h("span", {}, "Its task ", h("code", { text: t.id }), " updates ", h("code", { text: name }), said)));
     })
   );
   if (!rows.length && !outlets.length) return [];
-  return [h("ul.dag-triggers", { "aria-label": "What starts it" }, ...rows, ...outlets), events.hooks && rows.length ? howToCall(spec.triggers[0]) : null];
+  const webhook = spec.schedule.find((entry) => entry.kind === "webhook");
+  return [h("ul.dag-triggers", { "aria-label": "What starts it" }, ...rows, ...outlets), events.hooks && webhook ? howToCall(webhook.name) : null];
 }
 
 function copyButton(text) {
@@ -172,7 +178,7 @@ function howToCall(event) {
     h("ol.help-list", {}, [
       h("li", { text: "In the Shortcuts app, under Automation, make one such as “When I arrive home”, set to run immediately." }),
       h("li", {}, "Give it one action, ", h("b", { text: "Get Contents of URL" }), ", with the address above, Method POST, and a header ", h("code", { text: "Authorization" }), " of ", h("code", { text: "Bearer " }), " then your TRIGGERS_TOKEN."),
-      h("li", {}, "To pass something on, set its Request Body to JSON, with ", h("code", { text: "text" }), ", and ", h("code", { text: "items" }), " for a task with ", h("code", { text: "for_each=trigger" }), " to run once for each."),
+      h("li", {}, "To pass something on, set its Request Body to JSON, with ", h("code", { text: "text" }), ", and ", h("code", { text: "items" }), ": what comes after ", h("code", { text: "Task(\"items\", fn=trigger_items, fan_out=True)" }), " runs once for each."),
     ]),
     h("p.hint", { text: "Anything else on your tailnet can do the same, such as:" }),
     h("pre.code-sample", { text: `curl -X POST ${hook(event)} \\\n  -H "Authorization: Bearer $TRIGGERS_TOKEN" \\\n  -H "Content-Type: application/json" \\\n  -d '{"text": "Home at 18:02", "items": ["milk", "bread"]}'` })
@@ -351,7 +357,7 @@ async function act(event, action) {
   try {
     dag_.data = await call("POST", `/api/agents/${dag_.id}/dag/${action}`, {});
     render();
-    toast({ run: "It'll run as soon as Athena's free.", pause: "Paused: it won't run by itself.", resume: "It runs by itself again.", stop: "Stopped." }[action]);
+    toast({ run: "It'll run when it's its turn.", pause: "Paused: it won't run by itself.", resume: "It runs by itself again.", stop: "Stopped." }[action]);
   } catch (err) {
     toast(err.message, true);
     event.target.disabled = false;
@@ -364,75 +370,71 @@ function guide() {
   return h("button.button.small.quiet", { type: "button", onclick: reference }, icon("info"), "How to write it");
 }
 
-const EXAMPLE = `from athena import DAG, Task, TaskGroup, trigger
+const EXAMPLE = `from agentic_airflow import AgenticBranch, AgenticTask, Asset, Dag, TaskGroup, Webhook
+from athena.dags import alert
 
-with DAG(
-    schedule="0 8 * * *",              # cron, in your time zone; or None
-    triggers=["new-email"],            # events that start it too
-    hidden_tools=["news_*"],           # found only when needed
-    allowed_tools=["read_email"],      # may run without asking, in every task
+with Dag(
+    "emails",
+    prompt="Keep on top of my emails.",
+    schedule=["0 8 * * *", Webhook("new-email")],  # cron, in your time zone; and a webhook
+    hidden_tools=["news_*"],                         # found only when needed
 ):
-    emails = Task(
-        prompt="Which of my emails since the last run need a reply? One item for each.",
-        return_type=list,
-    )
-    with TaskGroup("each_email", for_each=emails, allowed_tools=["draft_email"]) as each_email:
-        urgent = Task(prompt="Is this one urgent? {item}", return_type=bool)
-        draft = Task(prompt="Draft a reply to {item}", run_if=urgent, alert=True)
-        later = Task(prompt="Say why {item} can wait.", run_if=not urgent)
-        urgent >> [draft, later]
-    report = Task(prompt="Say what was drafted.", outlets=["drafted"])
-    each_email >> report`;
+    emails = AgenticTask("emails", prompt="Which of my emails need a reply? One item for each.", return_type="list")
+    with TaskGroup("each_email", allowed_tools=["read_email", "draft_email"]) as each_email:
+        urgent = AgenticBranch("urgent", prompt="Is this one urgent?", allow_none=True)
+        draft = AgenticTask("draft", prompt="Draft a reply to it.", follow_mapping=True, on_complete=alert)
+        urgent >> draft
+    report = AgenticTask("report", prompt="Say what was drafted.", outlets=[Asset("drafted")])
+    emails >> each_email >> report`;
 
 // The reference, as docs/dags.md has it at length: every argument, and what each does.
 function reference() {
-  const d = dag_.data || { events: { waiting: {}, sources: {}, claude: "claude-done", hooks: false }, tools: [] };
+  const d = dag_.data || { events: { assets: {}, webhooks: {}, sources: {}, claude: "claude-done", hooks: false }, tools: [] };
   const dialog = document.getElementById("dialog");
   const code = (text) => h("pre.code-sample", { text });
   const rows = (items) => h("dl.reference", {}, items.flatMap(([name, said]) => [h("dt", {}, h("code", { text: name })), h("dd", { text: said })]));
-  const known = [...new Set([d.events.claude, ...Object.keys(d.events.waiting), ...Object.keys(d.events.sources)])].sort();
+  const assets = [...new Set([d.events.claude, ...Object.keys(d.events.assets), ...Object.keys(d.events.sources)])].sort();
   dialog.replaceChildren(
     h(
       "div.reference-dialog",
       {},
       h("h2", { text: "Writing a DAG" }),
-      h("p", { text: "A DAG says what an agent does by itself. It's Python in the style of Apache Airflow, which Athena reads but never runs: imports, one with DAG(...) block, tasks assigned to names, task groups, and >> between them for what comes after what. Every argument is written out as it is (a string, a list of strings, True, False or None), except those that name a task or a type. Anything else, such as a loop or a call, is refused, with the line it's on." }),
+      h("p", { text: "A DAG says what an agent does by itself. It's Python for agentic-airflow, in the style of Apache Airflow, which Athena reads but never runs: imports, one with Dag(...) block, tasks, task groups, and >> between them for what comes after what. Values are written out as they are: strings, numbers, True, False, None, lists and dicts of them. Anything else, such as a loop, a variable or another call, is refused, with the line it's on." }),
       code(EXAMPLE),
       h("h3", { text: "The DAG" }),
       rows([
-        ["schedule", 'When it runs, in cron in your time zone: minute, hour, day of the month, month and day of the week, such as "30 7 * * 1-5" for 07:30 on weekdays, or "@hourly" or "@daily". At most every 15 minutes. None for only when something starts it.'],
-        ["triggers", 'The events that start it, such as ["new-email"]: from a webhook or an iPhone Shortcut, "claude-done" when Claude finishes a project you handed it, or the outlets of another agent\'s DAG.'],
-        ["hidden_tools", "Tools its tasks find when they need them, rather than in every prompt, which keeps prompts short. Patterns such as news_* work."],
-        ["allowed_tools", "Tools that ask you first which every task may use without asking. A task group and a task can have their own as well."],
+        ["id, prompt", 'Dag("emails", prompt="..."): its id, unique among your agents\' DAGs, and what it\'s for, which every task is told.'],
+        ["schedule", 'What starts it: cron, in your time zone ("30 7 * * 1-5" for 07:30 on weekdays, "@hourly", "@daily"; at most every 15 minutes); Webhook("arrive-home"), from an iPhone Shortcut or a webhook; Asset("job-emails"), when another DAG\'s task updates it; DagTrigger("other_dag"), when that DAG\'s run finishes. Asset("claude-done") is when Claude finishes a project you handed it.'],
+        ["allowed_tools", "All the tools its tasks may use without asking: patterns such as news_* work. Unset, they may use any tool, asking you first for those that ask. Naming a tool that asks first lets it run without asking; one that isn't named waits for your OK. A task group or a task can have its own, which replaces the DAG's."],
+        ["hidden_tools", "Tools its tasks find when they need them, rather than in every prompt, which keeps prompts short."],
+        ["model, thinking, skills", "The model its tasks use (the agent's, unless it says), thinking \"on\" or \"off\", and skills to read into every prompt."],
       ]),
-      h("h3", { text: "A task" }),
+      h("h3", { text: "Tasks" }),
       rows([
-        ["prompt", "What to do: the message the model's given, with what the tasks before it found. Required."],
-        ["task_id", "Its name, in lower case with _: the name it's assigned to, if it's not given."],
-        ["return_type", "What it gives the tasks after it: str, its answer, the default; list, a list of items; or bool, a yes or no. A list or a yes or no is always one: the model gives it with the task_result tool, and the task fails if it doesn't."],
-        ["for_each", "Run it once for each item of a list: for_each=emails for each item the task emails returns, or for each time a task that ran for each item did; for_each=trigger for each item that came with what started the run. Write {item} in its prompt where the item goes."],
-        ["run_if", "Run it only if a task with return_type=bool said yes: run_if=urgent; or only if it said no: run_if=not urgent. Otherwise it's skipped, and so are the tasks after it, unless something else they come after ran."],
-        ["allowed_tools", "Tools that ask you first which this task may use without asking, as well as its group's and the DAG's."],
-        ["alert", "True: what it finds goes to the agent's chat, the master agent's, and to you, in Telegram and on your devices."],
-        ["outlets", 'Events it starts when it finds something, such as ["job-emails"]: the DAGs with that in their triggers run, with what it found. A list that\'s empty, or a no, starts nothing.'],
+        ['AgenticTask("id", prompt="...")', "A task for the model: its prompt, with what the tasks before it found. return_type: \"string\", the default; \"list\", a JSON list, whose items what comes after runs once for each (fan_out=False keeps it one list); or \"json\"."],
+        ['AgenticBranch("id", prompt="...")', "The model picks which of the tasks after it run; the others are skipped. allow_none=True lets it pick none, so a branch with one task after it is a yes or no. multi_select=True lets it pick several."],
+        ['AgenticEvaluator("id", prompt="...")', "Checks what the task before it did, and has it done again, with why, up to max_retries times. The tasks that use it come after the evaluator."],
+        ['Task("items", fn=trigger_items, fan_out=True)', "The items that came with what started the run: what comes after runs once for each."],
+        ["follow_mapping=True", "A task after one that ran for each item runs once for each too, with that item's; otherwise it runs once, given every item's."],
+        ["on_complete=alert", "What it finds is told to you, in Telegram and on your devices, and in the agent's chat and the master agent's."],
+        ["outlets", 'Assets it updates with what it finds, such as [Asset("job-emails")]: the DAGs with that asset in their schedule run with it. A list that\'s empty starts nothing.'],
+        ["context", "The tasks whose outputs it's given: unset, those right before it."],
       ]),
-      h("h3", { text: "Task groups" }),
-      h("p", { text: 'with TaskGroup("each_email", for_each=emails) as each_email: runs the tasks in it once for each item, in turn: all of them for the first item, then the next. Each item\'s tasks see what was found for it, not for the others, and once they\'ve all run, the next task is told what they found. A group can have allowed_tools of its own, and stands for its first or last tasks in >>.' }),
-      h("h3", { text: "What comes after what" }),
+      h("h3", { text: "Task groups, and what comes after what" }),
       h("ul.help-list", {}, [
+        h("li", { text: 'with TaskGroup("each", allowed_tools=[...]) as each: its tasks share its settings; in >>, a group stands for its first tasks, after something, and its last, before something.' }),
         h("li", { text: "a >> b runs b after a; a << b runs a after b; [a, b] >> c runs c after both; chains such as a >> b >> c work too." }),
-        h("li", { text: "A task with for_each or run_if comes after the task it names without saying so." }),
-        h("li", { text: "A task runs once those before it have: it's skipped if one of them failed, or all of them were skipped. A task that ran for each item counts as done if it was for any." }),
+        h("li", { text: "A task runs once those before it have: it's skipped if one of them failed, or all of them were skipped, or a branch before it didn't pick it." }),
       ]),
       h("h3", { text: "What starts it" }),
       h("ul.help-list", {}, [
-        h("li", { text: "Its schedule, Run now above, and run_dag in a chat." }),
-        h("li", { text: d.events.hooks ? `A webhook or an iPhone Shortcut: POST ${hook("<event>")}, with your TRIGGERS_TOKEN, and {"text": ..., "items": [...]} if there's something to pass on.` : "A webhook or an iPhone Shortcut, once TRIGGERS_TOKEN is set in .env: POST /hooks/<event> on the dashboard's address." }),
-        h("li", { text: 'Another agent\'s DAG, with an outlet of the same name: say, the master agent\'s DAG checks your emails every hour, and its task with outlets=["job-emails"] starts the DAG of an agent with triggers=["job-emails"], whose task with for_each=trigger applies for each job it found.' }),
-        h("li", { text: `Events DAGs know of now: ${known.join(", ")}.` }),
+        h("li", { text: "Its schedule, Run now above, and run_dag in a chat. Runs take turns, one at a time on each model, and your messages go between their tasks." }),
+        h("li", { text: d.events.hooks ? `A webhook or an iPhone Shortcut: POST ${hook("<name>")}, with your TRIGGERS_TOKEN, and {"text": ..., "items": [...]} if there's something to pass on.` : "A webhook or an iPhone Shortcut, once TRIGGERS_TOKEN is set in .env: POST /hooks/<name> on the dashboard's address." }),
+        h("li", { text: 'Another agent\'s task: say, the master agent\'s DAG checks your emails every hour, and its task with outlets=[Asset("job-emails")] starts the DAG of an agent with Asset("job-emails") in its schedule, which applies for each job it found.' }),
+        h("li", { text: `Assets DAGs know of now: ${assets.join(", ")}.` }),
       ]),
       h("h3", { text: "The end of each run" }),
-      h("p", { text: "Every DAG ends with five tasks of its own: reviewing the workflow, the tools and the skills it used, which can propose changes for you to approve; keeping what the next run should know; and a summary, which tells you when there's news. A run that finds nothing, with every list its tasks returned empty and every answer no, ends without them, so checking for something often costs little." }),
+      h("p", { text: "Every DAG ends with five tasks of its own: reviewing the workflow, the tools and the skills it used, which can propose changes for you to approve; keeping what the next run should know; and a summary, which tells you when there's news. A run that finds nothing, with every list its tasks returned empty and every branch picking none, ends without them, so checking for something often costs little." }),
       h("details", {}, h("summary", { text: `The tools it can name (${d.tools.length})` }), h("p.hint.tool-names", { text: d.tools.join(", ") })),
       h("p.hint", { text: "There's more in docs/dags.md." }),
       h("div.tool-actions", {}, h("button.button.primary", { type: "button", text: "Close", onclick: () => dialog.close() }))

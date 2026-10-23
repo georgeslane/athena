@@ -1,5 +1,5 @@
-// The History of an agent's DAG, on the Agents tab: its last 10 runs, and for each, its DAG as it was, drawn with how
-// each task went, then what each task was given, said and did, for each item it ran for, and what the run proposed.
+// The History of an agent's DAG, on the Agents tab: its last 10 runs, and for each, its DAG drawn with how each task
+// went, then what each task was given, said and did, for each item it ran for, and what the run proposed.
 
 import { call, clock, duration, h, plural, toast } from "./core.js";
 import { proposalCard } from "./dag.js";
@@ -7,8 +7,20 @@ import { graph } from "./graph.js";
 import { markdown } from "./md.js";
 import { stepList } from "./steps.js";
 
-const STATES = { running: "Running", success: "Done", failed: "Failed", skipped: "Skipped", upstream_failed: "Not run: a task before it failed", stopped: "Stopped" };
-const SHORT = { running: "running", success: "done", failed: "failed", skipped: "skipped", upstream_failed: "not run", stopped: "stopped" };
+const STATES = {
+  pending: "Waiting",
+  queued: "Waiting",
+  running: "Running",
+  paused: "Waiting for your OK",
+  awaiting_tool_approval: "Waiting for your OK",
+  awaiting_user: "Waiting for you",
+  success: "Done",
+  failed: "Failed",
+  skipped: "Skipped",
+  upstream_failed: "Not run: a task before it failed",
+  cancelled: "Stopped",
+};
+const SHORT = { running: "running", success: "done", failed: "failed", skipped: "skipped", upstream_failed: "not run", awaiting_tool_approval: "waiting" };
 const runs_ = { id: null, runs: [], run: null, selected: null, shown: "", els: null };
 
 export async function runsView(box, id, runId, fresh) {
@@ -60,7 +72,7 @@ function render(always = false) {
               h("span.run-number", { text: `#${r.number}` }),
               h("span.run-when", { text: clock(r.started, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) }),
               h("span.run-state", { text: STATES[r.state] || r.state }),
-              h("span.run-meta", { text: [trigger(r.trigger), took(r)].filter(Boolean).join(" · ") })
+              h("span.run-meta", { text: [r.started_by, took(r)].filter(Boolean).join(" · ") })
             )
           )
         )
@@ -77,7 +89,8 @@ function detail(run) {
   for (const t of run.tasks) (states[t.task] ||= { all: [] }).all.push(t.state);
   for (const s of Object.values(states)) {
     s.count = s.all.length;
-    s.state = s.all.includes("running") ? "running" : s.all.includes("success") ? "success" : s.all.includes("failed") ? "failed" : s.all[0];
+    const first = ["running", "awaiting_tool_approval", "success", "failed"].find((state) => s.all.includes(state));
+    s.state = first || s.all[0];
     if (s.count > 1) {
       const counted = {};
       for (const state of s.all) counted[state] = (counted[state] || 0) + 1;
@@ -97,17 +110,9 @@ function detail(run) {
     "section.card.run-head",
     { "data-state": run.state },
     h("div.card-head", {}, h("h2", { text: `Run #${run.number}` }), h("span.run-state", { text: STATES[run.state] || run.state })),
-    h("p.hint", { text: [`Started ${clock(run.started, { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" })}`, trigger(run.trigger), took(run)].filter(Boolean).join(" · ") }),
+    h("p.hint", { text: [`Started ${clock(run.started, { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" })}`, run.started_by, took(run)].filter(Boolean).join(" · ") }),
     run.doing ? h("p.run-doing", { text: `Working on ${run.doing} now.` }) : null,
-    run.input || (run.items && run.items.length)
-      ? h(
-          "details.run-input",
-          { "data-keep": "input" },
-          h("summary", { text: run.items && run.items.length ? `What came with what started it, and ${plural(run.items.length, "item")}` : "What came with what started it" }),
-          run.input ? h("pre", { text: run.input }) : null,
-          run.items && run.items.length ? h("ol.run-items", {}, run.items.map((item) => h("li", { text: item }))) : null
-        )
-      : null,
+    run.payload ? h("details.run-input", { "data-keep": "input" }, h("summary", { text: "What came with what started it" }), h("pre", { text: run.payload })) : null,
     run.summary ? h("div.md.run-summary", {}, markdown(run.summary)) : null
   );
   const drawn = run.dag
@@ -124,9 +129,10 @@ function detail(run) {
 }
 
 function taskCard(t) {
-  const label = t.source ? `${t.task} #${t.index + 1}` : t.task;
+  const label = t.index !== null ? `${t.task} #${t.index + 1}` : t.task;
   const spent = t.started && t.finished ? duration(t.finished - t.started) : "";
-  const returned = typeof t.value === "boolean" ? `Said ${t.value ? "yes" : "no"}` : Array.isArray(t.value) ? `Returned ${plural(t.value.length, "item")}` : "";
+  const picked = t.selected ? (t.selected.length ? `Picked ${t.selected.join(", ")}` : "Picked none") : "";
+  const given = Object.entries(t.given || {});
   return h(
     "details.run-task",
     { "data-task": t.task, "data-keep": `task-${t.id}`, "data-state": t.state, open: runs_.selected === t.task || null },
@@ -135,21 +141,14 @@ function taskCard(t) {
       {},
       h("code", { text: label }),
       h("span.run-state", { text: STATES[t.state] || t.state }),
-      returned ? h("span.chip", { text: returned }) : null,
+      picked ? h("span.chip", { text: picked }) : null,
+      t.attempt > 1 ? h("span.chip", { text: `Try ${t.attempt}` }) : null,
       spent ? h("span.hint", { text: spent }) : null
     ),
-    t.source ? h("p.hint", { text: `For item ${t.index + 1} from ${t.source === "trigger" ? "what started the run" : t.source}` }) : null,
-    t.item ? h("div.step-io", {}, h("span.label", { text: "Its item" }), h("pre", { text: t.item })) : null,
+    ...given.map(([from, text]) => h("div.step-io", {}, h("span.label", { text: `Given by ${from}` }), h("pre", { text }))),
     t.output ? h("div.md.run-output", {}, markdown(t.output)) : null,
     stepList(t.steps, `run-${t.id}`)
   );
-}
-
-function trigger(t) {
-  if (t === "schedule") return "on its schedule";
-  if (t === "manual") return "run by you";
-  if (t.startsWith("event:")) return `when ${t.slice(6)} came in`;
-  return t;
 }
 
 function took(r) {

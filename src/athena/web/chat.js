@@ -12,7 +12,7 @@ import { canTurnOn, turnOnHere } from "./notifications.js";
 const MAX_CHARS = 4000; // as chat.py takes
 const MAX_SIDE = 2048; // a photo's longest side, as it's sent: larger ones are made smaller first
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // as chat.py takes
-const RUN_SAID = /^\(DAG run #(\d+): (.+)\)$/; // what a run said in the chat, on your side (dags/runner.py)
+const RUN_SAID = /^\(DAG run #(\d+): (.+)\)$/; // what a run said in the chat, on your side (dags/service.py)
 const RELAYED = /^\(From your agent “(.+)”, its DAG run #(\d+): (.+)\)$/; // another agent's news, to the master
 const PHOTOS = /^\[(?:Photo|\d+ photos)\]\s*/; // how a message notes its photos (photos.label)
 const FILE = /^\[File: ([^\]]+)\]\s*/; // how a message notes a file sent with it (files.receive)

@@ -8,6 +8,7 @@ they're skipped without one, or ATHENA_TEST_BROWSER can name a Chromium to use.
 import asyncio
 import json
 import os
+import time
 
 import pytest
 from conftest import completion
@@ -69,62 +70,75 @@ def expected(console_error: str) -> bool:
     return "Failed to load resource" in console_error and "409 (Conflict)" in console_error
 
 
-JOBS = """from athena import DAG, Task, TaskGroup, trigger
+JOBS = """from agentic_airflow import AgenticBranch, AgenticTask, Asset, Dag, Task, TaskGroup, Webhook, trigger_items
+from athena.dags import alert
 
-with DAG(schedule="0 9 * * 1-5", triggers=["job-emails"]):
-    with TaskGroup("each_job", for_each=trigger) as each_job:
-        fits = Task(prompt="Does this job fit my CV? {item}", return_type=bool)
-        apply = Task(prompt="Apply to {item}", run_if=fits, alert=True)
+with Dag("job_hunting", prompt="Apply for jobs.", schedule=["0 9 * * 1-5", Asset("job-emails"), Webhook("new-job")]):
+    jobs = Task("jobs", fn=trigger_items, fan_out=True)
+    with TaskGroup("each_job") as each_job:
+        fits = AgenticBranch("fits", prompt="Does this job fit my CV?", allow_none=True)
+        apply = AgenticTask("apply", prompt="Apply for it.", follow_mapping=True, on_complete=alert)
         fits >> apply
-    report = Task(prompt="Say what was applied for.")
-    each_job >> report
+    report = AgenticTask("report", prompt="Say what was applied for.")
+    jobs >> each_job >> report
 """
+MASTER = (
+    "from agentic_airflow import AgenticTask, Asset, Dag\n"
+    "with Dag('master', prompt='Keep an eye on things.', schedule=['@hourly']):\n"
+    "    AgenticTask('job_emails', prompt='New emails about jobs?', return_type='list', fan_out=False,"
+    " outlets=[Asset('job-emails')])\n"
+)
 
 
 def seed(services):
     """The master agent, with a DAG that finds job emails; an agent that applies for each, with guidance, what its
     last run kept, a DAG that's run for two jobs, with its steps, and two proposals; and another that's paused."""
+    from agentic_airflow import DagRun, RunStatus, TaskInstance, TaskStatus
+
     dags, history = services.dags, services.history
-    master = history.master.id
-    dags.save(
-        master,
-        "with DAG(schedule='@hourly'):\n    job_emails = Task(prompt='New emails about jobs?', return_type=list,"
-        " outlets=['job-emails'])\n",
-    )
+    dags.save(history.master.id, MASTER)
     jobs = history.new_session("Job hunting").id
     dags.save(jobs, JOBS)
     dags.store.update(jobs, guidance="Only remote jobs, or in London.", context="CV: Python, data, five years.")
-    store = dags.store
-    run = store.start_run(jobs, "event:job-emails", "From the master agent.", JOBS, ["Job A", "Job B"])
-    long = '{"query": "data engineer", "where": ' + '"London", ' * 20 + "}"  # one long line
-    steps = [
-        {"tool": "search_web", "given": long, "outcome": "ran", "said": "10 results"},
+    now = time.time()
+    payload = ["Job A", "Job B"]
+    trigger = {"source": "asset", "asset": "job-emails", "payload": payload, "from_dag": "master", "number": 1}
+    run = DagRun("run_20261022T090000_seeded", "job_hunting", RunStatus.SUCCESS, trigger, created_at=now - 120)
+    run.started_at, run.finished_at, run.summary = now - 120, now - 60, "Applied to one job of two. **One didn't fit.**"
+
+    def add(instance, task, status, output=None, path=(), selected=None, calls=(), given=None):
+        inst = TaskInstance(instance, task, tuple(path), TaskStatus(status), output=output, selected=selected)
+        inst.tool_calls, inst.started_at, inst.finished_at = list(calls), now - 100, now - 90
+        inst.input_context = {"upstream": given or {}, "retry_history": []}
+        run.instances[instance] = inst
+        run.node_instances.setdefault(task, []).append(instance)
+
+    long = {"query": "data engineer", "where": ", ".join(["London"] * 20)}  # one long line
+    calls = [
+        {"name": "search_web", "arguments": long, "status": "ok", "result": "10 results"},
         {
-            "tool": "fetch",
-            "given": '{"url": "https://jobs.example/1"}',
-            "outcome": "failed",
-            "said": "Error: timed out.",
+            "name": "fetch",
+            "arguments": {"url": "https://jobs.example/1"},
+            "status": "error",
+            "result": "Error: timed out.",
         },
     ]
-    for i, (job, fit) in enumerate([("Job A", True), ("Job B", False)]):
-        store.finish_task(store.add_task(run.id, "fits", i, "running", job, "trigger"), "success",
-                          "**Yes**: Python." if fit else "No.", steps if fit else [], fit)  # fmt: skip
-        applied = store.add_task(run.id, "apply", i, "running" if fit else "skipped", job, "trigger")
-        store.finish_task(applied, "success" if fit else "skipped", "Applied." if fit else "“fits” said no.", [])
-    store.finish_task(store.add_task(run.id, "report", 0, "running"), "success", "Applied to A.", [])
+    add("jobs", "jobs", "success", payload)
+    add("fits_0", "fits", "success", "apply", [0], ["apply"], calls, {"jobs": "Job A"})
+    add("fits_1", "fits", "success", "none", [1], [], given={"jobs": "Job B"})
+    add("apply_0", "apply", "success", "**Applied** to A.", [0], given={"jobs": "Job A"})
+    add("apply_1", "apply", "skipped", path=[1])
+    add("report", "report", "success", "Applied to A.")
     for end in ("review_workflow", "review_tools", "review_skills", "save_context", "summary"):
-        store.finish_task(
-            store.add_task(run.id, end, 0, "running"),
-            "skipped" if end == "review_skills" else "success",
-            f"{end} said.",
-            [],
-        )
-    store.finish_run(run, "success", "Applied to one job of two. **One didn't fit.**")
+        add(f"end.{end}", f"end.{end}", "skipped" if end == "review_skills" else "success", f"{end} said.")
+    dags.engine.state.save_run(run.to_dict())
     better = JOBS.replace("Say what was applied for.", "List what was applied for, with links.")
-    store.propose(jobs, run.id, "workflow", "The report should link to each job.", JOBS, source=better)
-    store.propose(jobs, run.id, "tools", "fetch timed out.", JOBS, changes={"hide": ["read_news"]})
+    dags.store.propose(jobs, run.run_id, "workflow", "The report should link to each job.", JOBS, source=better)
+    dags.store.propose(jobs, run.run_id, "tools", "fetch timed out.", JOBS, changes={"hidden_tools": ["read_news"]})
     other = history.new_session("Briefing").id
-    dags.save(other, "with DAG(schedule='30 7 * * 1-5'):\n    brief = Task(prompt='Brief me for the day.')\n")
+    dags.save(
+        other, "with Dag('briefing', prompt='p', schedule=['30 7 * * 1-5']):\n    AgenticTask('brief', prompt='x')\n"
+    )
     dags.pause(other)
     return jobs
 
@@ -156,15 +170,18 @@ async def test_writing_a_dag_and_seeing_it_drawn(athena, browser):  # noqa: F811
     await page.wait_for_selector(".dag-graph .graph-node >> text=check")  # the file it starts with, drawn
     await page.fill(".code-text", JOBS)
     await page.wait_for_selector(".dag-graph .graph-node >> text=fits")
-    assert await page.locator(".dag-graph .graph-node").count() == 4  # and what started it, for each_job
+    assert await page.locator(".dag-graph .graph-node").count() == 4  # with jobs, what started it, for each item
+    assert await page.locator(".dag-graph .graph-start").count() == 1
     assert await page.locator(".dag-graph .graph-chip").count() == 5  # the tasks every DAG ends with
     assert await page.inner_text(".dag-graph .graph-group-label") == "each_job"
-    assert await page.locator(".dag-graph .graph-node[data-each]").count() == 2  # it and apply, for each item
-    assert await page.inner_text(".dag-graph .graph-edge-label.yes") == "yes"
+    assert await page.locator(".dag-graph .graph-node[data-each]").count() == 2  # fits and apply, for each item
+    assert await page.inner_text(".dag-graph .graph-edge-label.each") == "each"
+    assert await page.inner_text(".dag-graph .graph-edge-label.if") == "if picked"
+    assert await page.inner_text(".dag-graph .graph-edge-label.all") == "all"  # report's given every item's
     # A mistake is said, where it is, and the drawing waits for it to be put right.
     await page.fill(".code-text", JOBS.replace("each_job >> report", "each_job >> nowhere"))
     await page.wait_for_selector(".code-problem >> text=There's no task called “nowhere”")
-    assert (await page.inner_text(".code-lines .bad")).strip() == "9"
+    assert (await page.inner_text(".code-lines .bad")).strip() == "11"
     assert await page.is_disabled(".dag-editor button:text-is('Save')")
     await page.fill(".code-text", JOBS)
     await page.wait_for_selector(".code-problem:empty")
@@ -176,12 +193,19 @@ async def test_writing_a_dag_and_seeing_it_drawn(athena, browser):  # noqa: F811
     await page.wait_for_selector(".dag-trigger >> text=once TRIGGERS_TOKEN is set")  # no token in the tests
     await page.click(".dag-summary >> text=Pause")
     await page.wait_for_selector(".dag-summary >> text=paused")
-    assert athena.dags.store.get(jobs).paused
+    assert athena.dags.paused(jobs)
     await page.click(".dag-summary >> text=Resume")
     await page.wait_for_selector(".dag-summary >> text=next")
     # How it's written: every argument.
     await page.click("text=How to write it")
-    for argument in ("return_type", "for_each", "run_if", "allowed_tools", "outlets", "triggers"):
+    for argument in (
+        "schedule",
+        "allowed_tools",
+        "hidden_tools",
+        "follow_mapping=True",
+        "on_complete=alert",
+        "outlets",
+    ):
         await page.wait_for_selector(f"dialog dt >> text={argument}")
     await page.click("dialog >> text=Close")
     assert errors == []
@@ -211,7 +235,7 @@ async def test_a_runs_history(athena, browser):  # noqa: F811
     await page.wait_for_selector(".run-row >> text=#1")
     await page.wait_for_selector(".run-head >> text=Applied to one job of two.")
     await page.click(".run-input summary")
-    await page.wait_for_selector(".run-items >> text=Job B")  # what started it came with two
+    await page.wait_for_selector(".run-input pre >> text=Job B")  # what started it came with two
     assert await page.get_attribute(".graph-node[aria-label^='fits']", "data-state") == "success"
     assert "×2" in await page.inner_text(".graph-node[aria-label^='fits']")  # once for each
     assert "1 done, 1 skipped" in await page.get_attribute(".graph-node[aria-label^='apply']", "aria-label")
@@ -220,12 +244,13 @@ async def test_a_runs_history(athena, browser):  # noqa: F811
     fits = page.locator(".run-task[data-task='fits']")
     assert await fits.count() == 2
     first = fits.first
-    await first.locator("text=Said yes").wait_for()
+    await first.locator("text=Picked apply").wait_for()
     await first.locator(".step-io pre >> text=Job A").wait_for()  # its item
-    assert await first.locator(".run-output strong").inner_text() == "Yes"  # what it said, as Markdown
     await first.locator("li.step[data-outcome=failed] summary").click()
     assert await page.is_visible("text=Error: timed out.")
+    await fits.nth(1).locator("text=Picked none").wait_for()
     applied = page.locator(".run-task[data-task='apply']")
+    assert await applied.first.locator(".run-output strong").text_content() == "Applied"  # what it said, as Markdown
     assert await applied.nth(1).get_attribute("data-state") == "skipped"
     # Its proposals are here too.
     assert await page.locator(".run-detail .proposal").count() == 2
@@ -278,7 +303,7 @@ async def test_the_master_agent_comes_first_and_stays(athena, browser):  # noqa:
     await page.click("dialog button:text-is('Cancel')")
     # What its DAG finds starts another's: it says so.
     await page.goto(f"{base}/#agents/1/dag")
-    await page.wait_for_selector(".dag-trigger.outlet >> text=the DAG of Job hunting waits for it")
+    await page.wait_for_selector(".dag-trigger.outlet >> text=the DAG of Job hunting starts on it")
     assert errors == []
 
 
@@ -564,7 +589,7 @@ async def test_naming_muting_and_deleting_an_agent(talking, browser):
     await page.wait_for_selector(".session [aria-label=Muted]")
     assert talking.history.get_session(2).muted
 
-    talking.dags.save(2, "with DAG(schedule='0 9 * * *'):\n    find = Task(prompt='Look for new postings.')\n")
+    talking.dags.save(2, "with Dag('jobs', prompt='p', schedule=['0 9 * * *']):\n    AgenticTask('find', prompt='x')\n")
     await page.click(".chat-more")
     await page.click("dialog >> text=Delete agent")
     await page.wait_for_selector("dialog >> text=and so are its DAG")
@@ -585,9 +610,9 @@ async def test_what_a_run_says_arrives_in_the_agents_chat_and_the_masters(talkin
     await page.fill("dialog input[aria-label='Its name']", "Jobs")
     await page.click("dialog >> text=Make it")
     await page.wait_for_selector(".chat-empty")
-    talking.dags.save(2, "with DAG():\n    find = Task(prompt='Look for new postings that fit my CV.')\n")
+    talking.dags.save(2, "with Dag('jobs', prompt='p'):\n    AgenticTask('find', prompt='Look for new postings.')\n")
     await page.click(".agent-view-link >> text=DAG")
-    await page.wait_for_selector(".dag-summary >> text=only when you run it")
+    await page.wait_for_selector(".dag-summary >> text=only when it's run by hand")
 
     # It runs while you're looking at another agent: that one's marked as having something new.
     await page.click(".session >> text=Master")
@@ -599,7 +624,8 @@ async def test_what_a_run_says_arrives_in_the_agents_chat_and_the_masters(talkin
             else "NO CHANGES"
         )
     ).client(talking.config.llm)
-    await talking.dags.runner.run(2, "manual")
+    run = await talking.dags.run_now(2)
+    await talking.dags.engine.wait(run.run_id, timeout=10, stop_on_pause=False)
     # The master agent's told too, where Telegram talks to you, with a link to the agent's runs.
     await page.wait_for_selector(".msg-task-link >> text=Jobs · run #1")
     await page.wait_for_selector(".msg.theirs >> text=Two new jobs at Acme.")
