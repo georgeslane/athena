@@ -214,6 +214,57 @@ async def test_writing_a_dag_and_seeing_it_drawn(athena, browser):  # noqa: F811
     assert errors == []
 
 
+@pytest.mark.parametrize("width", [1280, 390])
+async def test_editing_a_dag_on_the_full_page(athena, browser, width):  # noqa: F811
+    jobs = seed(athena)
+    page, base, errors = await signed_in(browser, athena, width, 800)
+    await page.goto(f"{base}/#agents/{jobs}/dag")
+    await page.wait_for_selector(".dag-graph .graph-node >> text=fits")
+    await page.click(".dag-editor .full-toggle")
+    view = page.locator(".dag-view.full")
+    await view.wait_for()
+    assert await page.evaluate("document.activeElement.classList.contains('code-text')")
+    assert not await page.is_visible(".dag-summary") and not await page.is_visible(".full-toggle")
+    box = await view.bounding_box()
+    assert (box["x"], box["y"], box["width"], box["height"]) == (0, 0, width, 800)  # the whole window
+    editor, drawing = await page.locator(".dag-editor").bounding_box(), await page.locator(".dag-graph").bounding_box()
+    if width > 900:  # side by side
+        assert editor["x"] < drawing["x"] and abs(editor["y"] - drawing["y"]) < 1
+    else:  # the file above its drawing
+        assert editor["y"] + editor["height"] <= drawing["y"] + 1
+    assert editor["y"] + editor["height"] <= 800 and drawing["y"] + drawing["height"] <= 800
+    assert await page.evaluate("document.documentElement.scrollWidth") <= width
+    # It's drawn again as you write.
+    await page.fill(".code-text", JOBS.replace('AgenticTask("report"', 'AgenticTask("summary"'))
+    await page.wait_for_selector(".dag-graph .graph-node >> text=summary")
+    await page.keyboard.press("Escape")
+    await page.wait_for_selector(".dag-view.full", state="detached")
+    assert await page.is_visible(".dag-summary")
+    await page.click(".dag-graph .full-toggle")  # from the drawing too, and Done puts it back
+    await page.click(".dag-full-bar >> text=Done")
+    await page.wait_for_selector(".dag-view.full", state="detached")
+    assert errors == []
+
+
+async def test_answering_a_tasks_question_in_the_agents_chat(athena, browser):  # noqa: F811
+    jobs = seed(athena)
+    page, base, errors = await signed_in(browser, athena, 390, 800)
+    asked = athena.approvals.ask(
+        "Apply to Acme? It's in Leeds.", ["Yes", "No"], timeout=600, why="“apply” asks", session=jobs
+    )
+    waiting = asyncio.create_task(athena.approvals.wait_reply(asked))
+    await page.goto(f"{base}/#agents/{jobs}")
+    card = page.locator(".approval.question")
+    await card.locator(".question-text >> text=Apply to Acme? It's in Leeds.").wait_for()
+    assert await card.locator(".question-choices button").all_inner_texts() == ["Yes", "No"]
+    await card.locator(".question-reply").fill("Only if it's remote")
+    await card.locator("button:text-is('Answer')").click()
+    assert await asyncio.wait_for(waiting, 5) == "Only if it's remote"
+    await page.wait_for_selector(".approval.question", state="detached")
+    assert await page.evaluate("document.documentElement.scrollWidth") <= 390
+    assert errors == []
+
+
 async def test_approving_and_rejecting_what_a_run_proposes(athena, browser):  # noqa: F811
     jobs = seed(athena)
     page, base, errors = await signed_in(browser, athena)

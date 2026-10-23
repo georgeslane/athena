@@ -1,7 +1,8 @@
 // An agent's DAG, on the Agents tab, one part below another: when it runs and what starts it, with the address to
 // start it from an iPhone Shortcut or a webhook; running it now, pausing it; changes its runs propose, to approve or
 // reject; how it works, drawn (graph.js); and its file, in agentic-airflow's Python, which Athena reads but never
-// runs, checked as you write it. How DAG files are written is a dialog of its own (reference()).
+// runs, checked as you write it. How DAG files are written is a dialog of its own (reference()). "Full page" fills
+// the window with the file and its drawing, side by side (one above the other on a phone), to edit it more easily.
 
 import { ask, call, clock, h, icon, state, toast } from "./core.js";
 import { graph } from "./graph.js";
@@ -22,6 +23,7 @@ const hook = (name) => `${location.origin}/hooks/${name}`;
 
 export async function dagView(box, id, fresh) {
   if (fresh || dag_.id !== id || !dag_.els || !box.contains(dag_.els.root)) {
+    full(false);
     dag_.id = id;
     dag_.data = null;
     dag_.checked = null;
@@ -48,7 +50,8 @@ function build(box) {
   e.summary = h("section.card.dag-summary");
   e.proposals = h("div.proposals");
   e.drawing = h("div.dag-drawing");
-  e.graph = h("section.card.dag-graph", {}, h("div.card-head", {}, h("h2", { text: "How it works" }), h("span.aside", { text: "Each task after those it comes after" })), e.drawing);
+  const enlarge = () => h("button.button.small.full-toggle", { type: "button", title: "Edit the file and see its drawing, filling the page", onclick: () => full(true) }, icon("expand"), h("span", { text: "Full page" }));
+  e.graph = h("section.card.dag-graph", {}, h("div.card-head", {}, h("h2", { text: "How it works" }), h("span.aside", { text: "Each task after those it comes after" }), h("div.actions", {}, enlarge())), e.drawing);
   e.lines = h("pre.code-lines", { "aria-hidden": "true" });
   e.text = h("textarea.code-text", { spellcheck: false, autocapitalize: "off", autocomplete: "off", wrap: "off", "aria-label": "The DAG's file", oninput: edited, onkeydown: keys, onscroll: () => (e.lines.scrollTop = e.text.scrollTop) });
   e.problem = h("p.code-problem", { role: "status" });
@@ -57,14 +60,28 @@ function build(box) {
   e.editor = h(
     "section.card.dag-editor",
     {},
-    h("div.card-head", {}, h("h2", {}, "dag.py"), h("span.aside", { text: "agentic-airflow Python: read, never run" }), h("div.actions", {}, guide())),
+    h("div.card-head", {}, h("h2", {}, "dag.py"), h("span.aside", { text: "agentic-airflow Python: read, never run" }), h("div.actions", {}, guide(), enlarge())),
     h("div.code", {}, e.lines, e.text),
     e.problem,
     h("div.tool-actions", {}, h("span.grow"), e.revert, e.save)
   );
-  e.root = h("div.dag-view", {}, e.summary, e.proposals, e.graph, e.editor);
+  e.bar = h("div.dag-full-bar", {}, h("h2", { text: "Editing the DAG" }), h("span.aside", { text: "It's drawn again as you write it" }), h("button.button.small", { type: "button", text: "Done", onclick: () => full(false) }));
+  e.root = h("div.dag-view", {}, e.bar, e.summary, e.proposals, e.graph, e.editor);
   box.replaceChildren(e.root);
 }
+
+// The file and its drawing filling the window, or back in the page.
+function full(on) {
+  if (!dag_.els) return;
+  dag_.els.root.classList.toggle("full", on);
+  document.body.classList.toggle("no-scroll", on);
+  if (on) dag_.els.text.focus();
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && dag_.els && dag_.els.root.classList.contains("full") && !document.querySelector("dialog[open]")) full(false);
+});
+window.addEventListener("hashchange", () => full(false)); // somewhere else: the page is as it was
 
 function render() {
   const d = dag_.data;

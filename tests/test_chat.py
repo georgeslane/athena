@@ -193,6 +193,28 @@ async def test_approving_here_and_allowing_tools_without_asking(chat):
         await answered(http)
 
 
+async def test_answering_a_tasks_question_here(chat):
+    async with client(chat) as http:
+        asked = chat.approvals.ask("Apply to Acme?", ["Yes", "No"], timeout=60, why="“apply” asks", session=1)
+        waiting = asyncio.create_task(chat.approvals.wait_reply(asked))
+        [question] = (await http.get("/api/agents")).json()["approvals"]
+        assert (question["question"], question["choices"], question["session"]) == ("Apply to Acme?", ["Yes", "No"], 1)
+        url = f"/api/approvals/{question['id']}"
+        assert (await http.post(url, json={"reply": "  "})).status_code == 400
+        assert (
+            await http.post(url, json={"allow": True})
+        ).status_code == 409  # a question isn't allowed: it's answered
+        assert (await http.post(url, json={"reply": "Yes, if remote"})).status_code == 200
+        assert await waiting == "Yes, if remote"
+        assert (await http.post(url, json={"reply": "No"})).status_code == 409
+
+        skipped = chat.approvals.ask("Which CV?", [], timeout=60, session=1)
+        waiting = asyncio.create_task(chat.approvals.wait_reply(skipped))
+        await asyncio.sleep(0)
+        assert (await http.post(f"/api/approvals/{skipped.id}", json={"allow": False})).status_code == 200
+        assert await waiting is None and skipped.verdict == "Skipped"
+
+
 async def test_the_page_hears_of_new_messages_as_it_does_the_status(chat):
     async with client(chat) as http:
         before = (await http.get("/api/status")).json()

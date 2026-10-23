@@ -6,12 +6,12 @@ import asyncio
 import json
 
 import pytest
-from agentic_airflow import RunStatus
+from agentic_airflow import DagRun, RunStatus
 from conftest import FakeLLMServer, completion
 
 from athena.agent import Agent
 from athena.config import TasksConfig
-from athena.dags import ends
+from athena.dags import ends, runs
 from athena.dags import files as agent_files
 from athena.dags.reader import (
     MASTER_STARTER,
@@ -80,7 +80,27 @@ def test_a_dag_file_is_read_into_the_engines_objects():
         ("with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt='x')\n    print('hi')\n", 3, "A DAG can call"),
         ("with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt=open('x').read())\n", 2, "Write values out"),
         ("with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt=f'{x}')\n", 2, "Write values out"),
-        ("with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt='x', retries=3)\n", 2, "not retries"),
+        ("with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt='x', priority=3)\n", 2, "not priority"),
+        (
+            "with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt='x', retries=9)\n",
+            2,
+            "retries is a whole number from 0 to 3",
+        ),
+        (
+            "with Dag('d', prompt='p', retry_delay=-1):\n    a = AgenticTask('a', prompt='x')\n",
+            1,
+            "retry_delay is a number",
+        ),
+        (
+            "with Dag('d', prompt='p', catchup=1):\n    a = AgenticTask('a', prompt='x')\n",
+            1,
+            "catchup is True or False",
+        ),
+        (
+            "with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt='x', ask_user='yes')\n",
+            2,
+            "ask_user is True or False",
+        ),
         ("with Dag('d', prompt='p'):\n    a = Task('a', fn=print)\n", 2, "There's no task called “print”"),
         ("with Dag('d', prompt='p'):\n    a = Task('a', fn=found_nothing)\n", 2, "runs trigger_items"),
         ("with Dag('d', prompt='p'):\n    a = AgenticTask('a', prompt='x', on_complete=trigger_items)\n", 2, "alert"),
@@ -157,6 +177,8 @@ class FakeChannel:
         self.asked: list[tuple[str, str, str | None, int | None]] = []
         self.allow = allow
         self.files: list[str] = []
+        self.questions: list[tuple[str, list[str], str, int | None]] = []
+        self.reply: str | None = None  # your answer to a task's question
 
     async def tell(self, text, *, session=None):
         self.said.append((text, session))
@@ -167,6 +189,10 @@ class FakeChannel:
 
     async def send_file(self, noted):
         self.files.append(noted)
+
+    async def question(self, text, choices, *, why, timeout, session=None):
+        self.questions.append((text, choices, why, session))
+        return self.reply
 
 
 END = {
@@ -910,7 +936,7 @@ async def test_a_skill_read_in_a_run_is_looked_back_on_at_its_end(athena):
 
 @pytest.mark.asyncio
 async def test_a_task_that_runs_out_of_time_fails_and_the_run_goes_on(athena):
-    a = athena({"Find new jobs": [calls(("wait_here", {})), "Done."]}, max_minutes=0.1 / 60)  # 0.1 seconds
+    a = athena({"Find new jobs": [calls(("wait_here", {})), "Done."]}, max_minutes=0.1 / 60, retries=0)  # 0.1 s
     a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', 'allowed_tools=["wait_here"]'))
     await a["dags"].start()
     try:
@@ -955,6 +981,7 @@ async def test_the_model_server_unreachable_is_tried_again_then_the_run_stops(at
     finally:
         await a["dags"].stop()
     assert len(tries) == 3  # three tries for the first task, and none for the rest
+    assert run.instances["find_jobs"].attempt == 1  # and the task isn't tried again: it can't help
     assert went(run)["find_jobs"] == "failed" and run.status == RunStatus.FAILED
     assert "couldn't be reached" in a["history"].messages(a["jobs"])[0][-1].text
     assert not any("couldn't be reached" in text for text, _ in a["channel"].said)  # the alerts say it's down
@@ -1196,3 +1223,68 @@ async def test_deleting_an_agent_deletes_its_runs_even_of_a_dag_that_wont_read_n
         assert b["dags"].run(run.run_id) is None and b["store"].get(a["jobs"]).dag == ""
     finally:
         await b["dags"].stop()
+
+
+# -- asking you, trying again, and catching up -------------------------------------------------------------
+
+ASKS = THREE.replace('prompt="Apply to them.",', 'prompt="Apply to them.", ask_user=True,')
+
+
+@pytest.mark.parametrize("reply", ["Yes, with my London CV", None])
+async def test_a_task_with_ask_user_asks_you_and_carries_on(athena, reply):
+    asked = calls(("ask_user", {"question": "Apply to Acme? It's in Leeds.", "choices": ["Yes", "No"]}))
+    a = athena({"Apply to them.": [asked, "Done."], **END})
+    a["channel"].reply = reply
+    a["dags"].save(a["jobs"], ASKS)
+    await a["dags"].start()
+    try:
+        run = await run_once(a, a["jobs"])
+    finally:
+        await a["dags"].stop()
+    assert a["channel"].questions == [
+        ("Apply to Acme? It's in Leeds.", ["Yes", "No"], "“apply”, in Job hunting, asks", a["jobs"])
+    ]
+    told = run.instances["apply"].tool_calls[-1]["result"]
+    if reply:
+        assert told == "The user answered: Yes, with my London CV"
+    else:
+        assert told.startswith("No answer: George didn't answer within 240 minutes. Decide for yourself")
+    assert run.status == RunStatus.SUCCESS
+    # Only the task that may ask is offered it.
+    offering = [
+        b for b in a["server"].requests if any(t["function"]["name"] == "ask_user" for t in b.get("tools") or [])
+    ]
+    first = [next(m["content"] for m in b["messages"] if m["role"] == "user") for b in offering]
+    assert first and all(text.endswith("Apply to them.") for text in first)
+
+
+async def test_a_failed_task_is_tried_again_and_the_dags_file_says_how_often(athena):
+    a = athena({"Find new jobs": "Acme.", **END})
+    real, failures = a["dags"].backend.generate, {"left": 1}
+
+    async def flaky(request):
+        if request.metadata["task_id"] == "find_jobs" and failures["left"]:
+            failures["left"] -= 1
+            raise RuntimeError("the model fell over")
+        return await real(request)
+
+    a["dags"].backend.generate = flaky
+    a["dags"].save(a["jobs"], THREE)
+    await a["dags"].start()
+    try:
+        run = await run_once(a, a["jobs"])
+        assert run.status == RunStatus.SUCCESS and run.instances["find_jobs"].attempt == 2  # [tasks] retries = 1
+        assert "### Attempt 1 failed\nRuntimeError: the model fell over" in a["model"].asked[0]  # it never got far
+        a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', 'allowed_tools=["look"], retries=0'))
+        failures["left"] = 1
+        run = await run_once(a, a["jobs"])
+        assert run.instances["find_jobs"].attempt == 1 and went(run)["find_jobs"] == "failed"
+    finally:
+        await a["dags"].stop()
+
+
+def test_a_dag_catches_up_unless_it_says_not_to():
+    assert read(THREE).catchup is True
+    assert read(THREE.replace('allowed_tools=["look"]', 'allowed_tools=["look"], catchup=False')).catchup is False
+    run = DagRun("run_x", "jobs", RunStatus.SUCCESS, {"source": "cron", "catchup": True})
+    assert runs.started_by(run) == "on its schedule, late: it was missed while Athena was off"

@@ -29,7 +29,8 @@ The page talks to Athena with JSON:
   POST   /api/proposals/<id>    {"approve": true | false}: what to do with a change a run proposed
   GET    /api/models            the models the model server has, for an agent to use
   GET    /api/photos/<name>     a photo sent in a message
-  POST   /api/approvals/<id>    {"allow": true | false}: answer a request for your OK, here or in Telegram
+  POST   /api/approvals/<id>    {"allow": true | false}: answer a request for your OK, here or in Telegram; or
+                                {"reply": "..."}: answer a task's question ({"allow": false} skips it)
   POST   /api/presence          {"looking": bool}: whether you're looking at the page, so devices aren't notified
   GET    /api/push              the key a device needs for notifications; POST {"subscription"} turns them on
                                 for one, /api/push/off {"endpoint"} turns them off, /api/push/test sends one
@@ -472,13 +473,18 @@ class DashboardServer(AgentsAPI, Server):
         return Response(photo.data, photo.mime, headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     def _approve(self, request: Request, method: str, which: str) -> Response:
-        """{"allow": true or false}: answer a request for your OK."""
-        allow = _body(request).get("allow")
-        if not isinstance(allow, bool):
-            raise HTTPError(400, 'Send {"allow": true} or {"allow": false}.')
-        if not self.s.approvals.answer(which, allow):
+        """{"allow": true or false}: answer a request for your OK; or {"reply": "..."}: a task's question."""
+        body = _body(request)
+        reply, allow = body.get("reply"), body.get("allow")
+        if isinstance(reply, str) and reply.strip():
+            answered = self.s.approvals.reply(which, reply)
+        elif isinstance(allow, bool):
+            answered = self.s.approvals.answer(which, allow)
+        else:
+            raise HTTPError(400, 'Send {"allow": true}, {"allow": false} or {"reply": "your answer"}.')
+        if not answered:
             raise HTTPError(409, "That's been answered already, or it's expired.")
-        log.info("Dashboard: %s a tool", "allowed" if allow else "denied")
+        log.info("Dashboard: answered %s", "a question" if reply else "a request for your OK")
         return _json(self.s.chat.state())
 
     def _get_memory(self, request: Request, method: str) -> Response:

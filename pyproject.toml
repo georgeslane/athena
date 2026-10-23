@@ -20,7 +20,7 @@ dependencies = [
     "fpdf2>=2.8",
     "markdown-it-py>=3",
     # Runs agents' DAGs (src/athena/dags/): pinned to a commit, as it isn't on PyPI.
-    "agentic-airflow @ git+https://github.com/georgeslane/agentic-airflow@cd04226f7a11450d63a6d6c4c865be574e7358ff",
+    "agentic-airflow @ git+https://github.com/georgeslane/agentic-airflow@e88793a80d2739fce2e9ef1da6b10f9cd7ed5f6b",
 ]
 
 [project.optional-dependencies]

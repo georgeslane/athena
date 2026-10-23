@@ -297,8 +297,8 @@ async def test_files_the_answer_sends_come_after_it_and_a_link_isnt_sent(config,
 
     bot = make_bot(config, respond)
     tg = FileBot({})
-    await bot.on_text(SimpleNamespace(effective_chat=SimpleNamespace(id=1), message=SimpleNamespace(text="report?")),
-                      SimpleNamespace(bot=tg))  # fmt: skip
+    message = SimpleNamespace(text="report?", reply_to_message=None)
+    await bot.on_text(SimpleNamespace(effective_chat=SimpleNamespace(id=1), message=message), SimpleNamespace(bot=tg))
     assert [m.text for m in tg.sent][0].startswith("Here's the report.")
     assert tg.documents == [(1, "report.pdf", b"%PDF report", "March")]
     assert tg.sent[-1].text.startswith("I couldn't send you env:")  # the link, which isn't followed

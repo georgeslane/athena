@@ -176,6 +176,8 @@ max_minutes = 30                       # the most a task works for, not counting
 max_tool_rounds = 25
 thinking = "on"                        # tasks aren't in a hurry
 confirm_minutes = 60                   # how long a task waits for you to allow a tool that asks
+ask_minutes = 240                      # how long a task that asks you something waits for your answer
+retries = 1                            # times a failed task's tried again, a minute later (0 to 3)
 
 [triggers]
 # Webhooks that start agents' DAGs with Webhook("<name>") in their schedule: POST /hooks/<name> on the

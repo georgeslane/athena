@@ -56,7 +56,7 @@ def text_update(user_id, text, chat_id=1):
     return SimpleNamespace(
         effective_chat=SimpleNamespace(id=chat_id),
         effective_user=SimpleNamespace(id=user_id, username="someone"),
-        message=SimpleNamespace(text=text),
+        message=SimpleNamespace(text=text, reply_to_message=None),
     )
 
 
@@ -603,6 +603,51 @@ async def test_tasks_reach_you_through_telegram(config):
     upd, _ = button_update(ME, prompt.kwargs["reply_markup"].inline_keyboard[0][0].callback_data)
     await bot.on_button(upd, SimpleNamespace(bot=bot._bot))
     assert await asyncio.wait_for(asking, 2) is True
+
+
+async def test_a_tasks_question_is_answered_with_a_button_a_reply_or_skipped(config):
+    bot = make_bot(config, None)
+    bot._bot = FakeBot()
+    ctx = SimpleNamespace(bot=bot._bot)
+
+    async def asked(choices):
+        task = asyncio.create_task(
+            bot.question("Apply to Acme?", choices, why="“apply”, in Job hunting, asks", timeout=5, session=2)
+        )
+        while not bot.s.approvals.pending():
+            await asyncio.sleep(0.01)
+        return task, bot._bot.sent[-1]
+
+    asking, msg = await asked(["Yes", "No"])
+    assert msg.text == (
+        "❓ “apply”, in Job hunting, asks:\n<b>Apply to Acme?</b>\n\n<i>Reply to this message to answer in your own "
+        "words.</i>"
+    )
+    keyboard = msg.kwargs["reply_markup"].inline_keyboard
+    assert [row[0].text for row in keyboard] == ["Yes", "No", "Skip"]
+    assert bot.s.approvals.pending()[0].question == "Apply to Acme?"  # the dashboard can answer it too
+    upd, answers = button_update(ME, keyboard[1][0].callback_data)
+    await bot.on_ask_button(upd, ctx)
+    assert await asyncio.wait_for(asking, 2) == "No" and answers == [None]
+    assert msg.edits == ["Answered: <b>Apply to Acme?</b>\n→ No"]
+    upd, answers = button_update(ME, keyboard[0][0].callback_data)
+    await bot.on_ask_button(upd, ctx)
+    assert answers == ["This question has expired."]
+
+    # Replying to the question answers it in your own words, rather than talking to the master agent.
+    asking, msg = await asked([])
+    update = text_update(ME, "Only if it's remote")
+    update.message.reply_to_message = SimpleNamespace(message_id=msg.message_id)
+    await bot.on_text(update, ctx)
+    assert await asyncio.wait_for(asking, 2) == "Only if it's remote" and bot._bot.sent[-1] is msg
+
+    asking, msg = await asked([])
+    upd, _ = button_update(ME, msg.kwargs["reply_markup"].inline_keyboard[-1][0].callback_data)
+    await bot.on_ask_button(upd, ctx)
+    assert await asyncio.wait_for(asking, 2) is None and msg.edits == ["Skipped: <b>Apply to Acme?</b>"]
+    upd, answers = button_update(999, "ask:x:0")  # someone else
+    await bot.on_ask_button(upd, ctx)
+    assert answers == ["Not allowed."]
 
 
 # -- photos ---------------------------------------------------------------------------------------------

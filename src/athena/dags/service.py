@@ -74,6 +74,7 @@ log = logging.getLogger(__name__)
 
 KEEP_RUNS = 10  # of each DAG's
 CONTEXT_CHARS = 12_000  # of a task's data, as the engine renders it: each upstream output, the run log
+RETRY_SECONDS = 60.0  # before a failed task's tried again, unless its DAG says otherwise
 EVENT_GAP = 60.0  # seconds: the same webhook again sooner doesn't start its DAGs again
 DECLINED = "The user declined this action. Don't retry it unless they ask."
 
@@ -114,7 +115,10 @@ class Dags:
                 thinking="off" if cfg.thinking == "off" else "on",
                 max_tool_steps=cfg.max_tool_rounds,
                 task_timeout=cfg.max_minutes * 60,
-                approval_timeout=cfg.confirm_minutes * 60 + 300,  # Athena asks for less: this is a backstop
+                retries=cfg.retries,
+                retry_delay=RETRY_SECONDS,
+                # Athena asks for less: this is a backstop.
+                approval_timeout=max(cfg.confirm_minutes, cfg.ask_minutes) * 60 + 300,
                 max_mapped=MAX_ITEMS,
                 keep_runs=KEEP_RUNS,
                 max_context_chars=CONTEXT_CHARS,
@@ -357,7 +361,13 @@ class Dags:
             agent_id = self.agent_of(run)
             run.trigger.setdefault("agent", agent_id)  # whose it is, whatever its DAG's called later
             run.trigger.setdefault("number", self.store.next_number(agent_id))
-        elif kind in ("task.finished", "task.failed", "task.awaiting_tool_approval", "task.awaiting_user"):
+        elif kind in (
+            "task.finished",
+            "task.failed",
+            "task.retrying",
+            "task.awaiting_tool_approval",
+            "task.awaiting_user",
+        ):
             self._stopped(event)
         elif kind == "approval.requested":
             self._spawn(self._ask(event.payload))
@@ -368,7 +378,7 @@ class Dags:
             self._spawn(self._finished(event.run_id))
 
     def _stopped(self, event: Event) -> None:
-        error = str((event.payload or {}).get("error") or "") if event.type == "task.failed" else ""
+        error = str((event.payload or {}).get("error") or "") if event.type in ("task.failed", "task.retrying") else ""
         self.working.finish(event.run_id or "", event.instance_id or "", error)
 
     def _label(self, run_id: str, instance_id: str) -> tuple[int, str, str]:
@@ -417,6 +427,9 @@ class Dags:
             return
         self._asking.add(approval_id)
         try:
+            if approval.get("kind") == "question":
+                await self._question(approval)
+                return
             if approval.get("kind") != "tool_call":  # an evaluator that ran out of tries: what it has will do
                 await self.engine.decide(approval_id, "pass")
                 return
@@ -447,6 +460,28 @@ class Dags:
             log.exception("Couldn't ask about a DAG task's tool")
         finally:
             self._asking.discard(approval_id)
+
+    async def _question(self, approval: dict[str, Any]) -> None:
+        """A task with ask_user asks you something: in Telegram and the agent's chat. Unanswered in ask_minutes, it
+        decides for itself."""
+        payload = approval["payload"]
+        run = self.engine.get_run(approval["run_id"])
+        agent_id = self.agent_of(run)
+        channel = self.channel()
+        answer = channel is not None and await channel.question(
+            str(payload.get("question") or ""),
+            list(payload.get("choices") or []),
+            why=f"“{approval['instance_id']}”, in {self._name(agent_id)}, asks",
+            timeout=self.cfg.ask_minutes * 60,
+            session=agent_id,
+        )
+        if answer:
+            await self.engine.answer(approval["approval_id"], answer)
+        else:
+            minutes = f"{self.cfg.ask_minutes:g} minutes"
+            await self.engine.decide(
+                approval["approval_id"], "dismiss", reason=f"{self.user} didn't answer within {minutes}."
+            )
 
     async def _preview(self, name: str, args: dict[str, Any]) -> str | None | Exception:
         """What a tool call will do, for the request for your OK, with what the privacy check found in it; or why it
