@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from athena.dags.service import Dags
 
 OUTPUT_CHARS = 1500  # of what a task said, in a run's
+CHAT_ONLY = frozenset({"change_dag", "change_context", "run_dag"})  # a run can't use them: never offered to its tasks
 CODE = re.compile(r"```[\w+-]*\n(.*?)```", re.DOTALL)  # a block of code in an answer
 
 

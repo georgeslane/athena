@@ -338,7 +338,11 @@ async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills
     agent, _, server, channel = athena(model)
     scheduler = agent.directory
     scheduler.history.rename(1, "Commute")
-    scheduler.save(1, "with Dag('commute', prompt='p'):\n    AgenticTask('commute', prompt='Check my train.')\n")
+    scheduler.save(
+        1,
+        "with Dag('commute', prompt='p', enabled=['remember', 'save_skill']):\n"
+        "    AgenticTask('commute', prompt='Check my train.')\n",
+    )
     await scheduler.start()
     try:
         run = await scheduler.run_now(1)

@@ -3,6 +3,7 @@ model and tools; tools that ask first; alerts and summaries; webhooks, assets an
 with and what they propose; your messages and their tasks taking turns with the model; and the master agent."""
 
 import asyncio
+import re
 
 import pytest
 from agentic_airflow import DagRun, RunStatus
@@ -19,7 +20,6 @@ from athena.dags.reader import (
     as_dict,
     read,
     unknown_tools,
-    unlisted,
     when,
     with_tools,
 )
@@ -37,7 +37,8 @@ with Dag(
     "emails",
     prompt="Keep on top of my emails.",
     schedule=["0 8 * * *", Webhook("new-email")],
-    allowed_tools=["look", "publish"],
+    enabled=["look", "publish"],
+    automated=["publish"],
 ):
     emails = AgenticTask("emails", prompt="Which of my emails need a reply? One item for each.", return_type="list")
     with TaskGroup("each_email") as each_email:
@@ -68,7 +69,7 @@ def test_a_dag_file_is_read_into_the_engines_objects():
         ("draft", "agentic_task", "each_email", True),
         ("report", "agentic_task", None, False),
     ]
-    assert shown["tools"]["allowed_tools"] == ["look", "publish"]
+    assert shown["tools"]["enabled"] == ["look", "publish"] and shown["tools"]["automated"] == ["publish"]
     assert read(MASTER_STARTER).get("job_emails").outlets == ["job-emails"]
     assert when(read(STARTER.format(dag_id="x", purpose="p"))) == "only when it's run by hand"
 
@@ -155,15 +156,29 @@ def test_a_dag_that_wont_do_says_what_and_where(source, line, says):
 
 
 def test_a_dags_tool_lists_are_changed_where_theyre_written():
-    changed = with_tools(EMAILS, {"hidden_tools": ["news_*"], "allowed_tools": {"dag": ["look"], "report": []}})
+    changes = {"hidden_tools": ["news_*"], "enabled": {"dag": ["look"], "report": [], "group:each_email": "*"},
+               "automated": {"dag": None}}  # fmt: skip
+    changed = with_tools(EMAILS, changes)
     dag = read(changed)
-    assert dag.scope.hidden_tools == ["news_*"] and dag.scope.allowed_tools == ["look"]
-    assert dag.get("report").scope.allowed_tools == []
-    assert '    allowed_tools=["look"],\n    hidden_tools=["news_*"],\n):' in changed  # one to a line, as it's laid out
-    assert 'outlets=[Asset("drafted")], allowed_tools=[])' in changed
+    assert dag.scope.hidden_tools == ["news_*"] and dag.scope.enabled == ["look"] and dag.scope.automated is None
+    assert dag.get("report").scope.enabled == [] and dag.get("draft").group.scope.enabled == ["*"]
+    assert '    enabled=["look"],\n    hidden_tools=["news_*"],\n):' in changed  # one to a line, as it's laid out
+    assert 'outlets=[Asset("drafted")], enabled=[])' in changed and 'TaskGroup("each_email", enabled="*")' in changed
     assert unknown_tools(read(changed), ["look", "publish"]) == ["news_*"]
     with pytest.raises(DagError, match="no task called “nope”"):
-        with_tools(EMAILS, {"allowed_tools": {"nope": ["look"]}})
+        with_tools(EMAILS, {"enabled": {"nope": ["look"]}})
+
+
+def test_tools_are_enabled_and_automated_and_the_old_lists_say_so():
+    dag = read(THREE.replace('enabled=["look"]', 'enabled="*", automated=["pub*"]'))
+    assert dag.scope.enabled == ["*"] and dag.scope.automated == ["pub*"]
+    assert read(THREE.replace('enabled=["look"]', "")).scope.enabled == []  # none, unless it says
+    for bad, says in [
+        ('allowed_tools=["look"]', "allowed_tools is now enabled, the tools a task can use, and automated"),
+        ('enabled="look"', 'enabled is a list of tools, such as ["fetch", "news_*"], or "*" for every tool.'),
+    ]:
+        with pytest.raises(DagError, match=re.escape(says)):
+            read(THREE.replace('enabled=["look"]', bad))
 
 
 # -- running them ----------------------------------------------------------------------------------------
@@ -303,7 +318,7 @@ def went(run):
 THREE = """from agentic_airflow import AgenticTask, Dag
 from athena.dags import alert
 
-with Dag("jobs", prompt="Find me jobs.", allowed_tools=["look"]):
+with Dag("jobs", prompt="Find me jobs.", enabled=["look"]):
     find = AgenticTask("find_jobs", prompt="Find new jobs that fit my CV.")
     apply = AgenticTask("apply", prompt="Apply to them.", on_complete=alert)
     report = AgenticTask("report", prompt="Say what was applied for.")
@@ -375,7 +390,7 @@ async def test_lists_run_whats_after_them_for_each_item_and_branches_pick(athena
 
 @pytest.mark.asyncio
 async def test_a_tool_that_asks_first_asks_you_and_runs_once_you_allow_it(athena):
-    source = THREE.replace('allowed_tools=["look"]', "").replace("Apply to them.", "Apply, then publish it.")
+    source = THREE.replace('enabled=["look"]', 'enabled="*"').replace("Apply to them.", "Apply, then publish it.")
     a = athena(
         {
             "Find new jobs": "Acme.",
@@ -395,7 +410,7 @@ async def test_a_tool_that_asks_first_asks_you_and_runs_once_you_allow_it(athena
 
 @pytest.mark.asyncio
 async def test_a_tool_you_decline_isnt_run(athena):
-    source = THREE.replace('allowed_tools=["look"]', "").replace("Apply to them.", "Apply, then publish it.")
+    source = THREE.replace('enabled=["look"]', 'enabled="*"').replace("Apply to them.", "Apply, then publish it.")
     a = athena(
         {"Apply, then publish it.": [calls(("publish", {"what": "Acme"})), "I couldn't publish it."]},
         channel=FakeChannel(allow=False),
@@ -517,7 +532,17 @@ async def test_the_review_proposes_its_changes_as_one_file_you_approve(athena):
     a = athena(
         {
             "run's own tasks have finished": [
-                calls(("set_task_tools", {"task": "apply", "tools": ["look", "publish"], "why": "It publishes."})),
+                calls(
+                    (
+                        "set_task_tools",
+                        {
+                            "task": "apply",
+                            "enabled": ["look", "publish"],
+                            "automated": ["publish"],
+                            "why": "It publishes.",
+                        },
+                    )
+                ),
                 calls(("propose_dag", {"source": better, "why": "The report should link each job."})),
                 "Changed the report, and apply's tools.",
             ],
@@ -531,27 +556,30 @@ async def test_the_review_proposes_its_changes_as_one_file_you_approve(athena):
     try:
         run = await run_once(a, a["jobs"])
         (proposal,) = proposals.waiting(a["jobs"])  # one file, with all of it
-        expected = with_tools(better, {"allowed_tools": {"apply": ["look", "publish"]}})
+        expected = with_tools(better, {"enabled": {"apply": ["look", "publish"]}, "automated": {"apply": ["publish"]}})
         assert proposal["payload"]["what"] == "workflow" and proposal["payload"]["definition"] == expected
         assert proposal["run_id"] == run.run_id
         review = next(t for t in a["model"].asked if "run's own tasks have finished" in t)
-        assert "- find_jobs: given look; used look ×1" in review and "- apply: given look; used none" in review
+        assert "- find_jobs: enabled look; automated none; used look ×1" in review
+        assert "- apply: enabled look; automated none; used none" in review
         assert "Tools there are: look, publish, wait_here" in review and "3. Skills" not in review
         said = {m["content"] for body in a["server"].requests for m in body["messages"] if m["role"] == "tool"}
-        assert "Noted: apply would be given look, publish, once George approves it." in said
+        assert "Noted: apply would have look, publish enabled, and publish automated, once George approves it." in said
         summary = next(t for t in a["model"].asked if "Now tell George what this run found" in t)
         assert "A change to the DAG: It publishes. The report should link each job." in summary
         assert "⚠️ It would let these run without asking you: publish (in apply)." in summary
         await proposals.decide(proposal["id"], True)
         dag = read(a["store"].get(a["jobs"]).dag)
-        assert dag.get("apply").scope.allowed_tools == ["look", "publish"] and "with links" in dag.get("report").prompt
+        assert dag.get("apply").scope.enabled == ["look", "publish"] and "with links" in dag.get("report").prompt
     finally:
         await a["dags"].stop()
 
 
 @pytest.mark.asyncio
 async def test_a_review_that_only_changes_tools_proposes_them_for_the_file_as_it_is(athena):
-    a = athena({"run's own tasks have finished": [calls(("set_task_tools", {"task": "report", "tools": []})), "Done."]})
+    a = athena(
+        {"run's own tasks have finished": [calls(("set_task_tools", {"task": "report", "enabled": []})), "Done."]}
+    )
     a["dags"].save(a["jobs"], THREE)
     await a["dags"].start()
     try:
@@ -559,11 +587,9 @@ async def test_a_review_that_only_changes_tools_proposes_them_for_the_file_as_it
         (proposal,) = a["dags"].proposals.waiting(a["jobs"])
     finally:
         await a["dags"].stop()
-    assert proposal["payload"]["what"] == "tools" and proposal["payload"]["changes"] == {
-        "allowed_tools": {"report": []}
-    }
+    assert proposal["payload"]["what"] == "tools" and proposal["payload"]["changes"] == {"enabled": {"report": []}}
     summary = next(t for t in a["model"].asked if "Now tell George what this run found" in t)
-    assert "Tools: Tools for report: [] (none)" in summary
+    assert "Tools: Tools for report: none" in summary
 
 
 @pytest.mark.asyncio
@@ -571,9 +597,9 @@ async def test_the_reviews_tools_say_whats_wrong_so_it_can_put_it_right(athena):
     a = athena(
         {
             "run's own tasks have finished": [
-                calls(("set_task_tools", {"task": "apply", "tools": ["nope"]})),
-                calls(("set_task_tools", {"task": "other", "tools": ["look"]})),
-                calls(("set_task_tools", {"task": "apply", "tools": "look"})),
+                calls(("set_task_tools", {"task": "apply", "enabled": ["nope"]})),
+                calls(("set_task_tools", {"task": "other", "enabled": ["look"]})),
+                calls(("set_task_tools", {"task": "apply", "enabled": "look"})),
                 calls(("propose_dag", {"source": "with Dag('jobs'):\n    pass\n"})),
                 "NO CHANGES",
             ]
@@ -591,7 +617,7 @@ async def test_the_reviews_tools_say_whats_wrong_so_it_can_put_it_right(athena):
         s.startswith("Error: no tool is called nope. The tools there are: look, publish, wait_here") for s in said
     )
     assert "Error: there's no task called 'other': give one of find_jobs, apply, report, or \"dag\"." in said
-    assert "Error: Invalid arguments for set_task_tools: $.tools: expected type array, got str" in said
+    assert "Error: Invalid arguments for set_task_tools: $.enabled: expected type array, got str" in said
     assert any(s.startswith("Error: that DAG file won't do: Line 1: Dag needs id, prompt") for s in said)
     assert waiting == [] and went(run)["end.review"] == "success"
 
@@ -618,7 +644,7 @@ def test_the_reviews_tools_act_only_for_a_runs_review(athena):
     run = DagRun("r", "jobs", RunStatus.RUNNING, {})
     task = ToolContext("r", "jobs", "find_jobs", "find_jobs", run=run)  # say a task given every tool, with "*"
     assert tools["propose_dag"].fn(task, source=THREE) == "Error: Only the review at the end of a run can do that."
-    assert tools["set_task_tools"].fn(task, task="dag", tools=[]).startswith("Error: Only the review")
+    assert tools["set_task_tools"].fn(task, task="dag", enabled=[]).startswith("Error: Only the review")
 
 
 @pytest.mark.asyncio
@@ -641,43 +667,59 @@ async def test_what_a_run_tells_you_is_what_the_next_starts_with_unless_it_had_n
 
 
 @pytest.mark.asyncio
-async def test_a_task_is_given_only_the_tools_its_list_names(athena):
-    a = athena({"Find new jobs": "Acme."})
-    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', ""))  # no list: no tools
+async def test_a_task_can_use_only_the_tools_enabled_for_it_and_others_fail_without_asking(athena):
+    a = athena({"Find new jobs": [calls(("publish", {"what": "x"})), "Acme."]})
     await a["dags"].start()
     try:
-        await run_once(a, a["jobs"])
-        a["dags"].save(a["jobs"], THREE)
-        await run_once(a, a["jobs"])
+        for enabled in ("", 'enabled=["look"]', 'enabled="*"'):
+            a["dags"].save(a["jobs"], THREE.replace('enabled=["look"]', enabled))
+            a["model"].turns.clear()
+            await run_once(a, a["jobs"])
+            if enabled == 'enabled=["look"]':
+                run = a["dags"].runs(a["jobs"])[0]
+                [call] = run.instances["find_jobs"].tool_calls
+                assert (
+                    call["status"] == "error" and "publish isn't one of the tools this task can use" in call["result"]
+                )
+                assert a["channel"].asked == []  # no one's asked about a tool the task can't use
     finally:
         await a["dags"].stop()
     finds = [b for b in a["server"].requests if b["messages"][-1]["content"].endswith("Find new jobs that fit my CV.")]
     offered = [sorted(t["function"]["name"] for t in b.get("tools") or []) for b in finds]
-    assert offered[0] == ["search_tools"]  # publish asks first: found when it's needed, and it asks
-    assert offered[1] == ["look", "search_tools"]
+    assert offered == [[], ["look"], ["agent_runs", "look", "publish", "wait_here"]]  # "*" is every tool a run can use
+    assert [asked[0] for asked in a["channel"].asked] == ["publish"]  # enabled, it asks first
 
 
 @pytest.mark.asyncio
-async def test_a_dag_from_before_lists_the_tools_each_task_used(athena):
+async def test_a_dag_from_before_gets_enabled_and_automated(athena):
     a = athena({"Find new jobs": [calls(("look", {"what": "boards"})), "Acme."]})
     assert a["store"].once("test-upgrade") and not a["store"].once("test-upgrade")
     a["dags"].save(a["jobs"], THREE)
     await a["dags"].start()
     try:
         await run_once(a, a["jobs"])
-        before = THREE.replace(', allowed_tools=["look"]', "")  # as it was written before: every tool, unlisted
-        a["store"].update(a["jobs"], dag=before)
-        a["dags"]._list_tools()
+        a["dags"].proposals.propose(a["jobs"], None, "workflow", "w", THREE.replace("Apply to them.", "Apply."))
+        listed = THREE.replace('enabled=["look"]', 'allowed_tools=["look", "publish"], denied_tools=["wait_here"]')
+        unlisted = THREE.replace(', enabled=["look"]', "")  # every tool, as it was
+        found = {}
+        for name, before in (("listed", listed), ("unlisted", unlisted)):
+            a["store"].update(a["jobs"], dag=before)
+            a["dags"]._enable_tools()
+            found[name] = read(a["store"].get(a["jobs"]).dag)
+        waiting = a["dags"].proposals.waiting(a["jobs"])
     finally:
         await a["dags"].stop()
-    dag = read(a["store"].get(a["jobs"]).dag)
-    assert dag.scope.allowed_tools == [] and dag.get("find_jobs").scope.allowed_tools == ["look"]
-    assert dag.get("apply").scope.allowed_tools == [] and unlisted(a["store"].get(a["jobs"]).dag) == []
+    dag = found["listed"]
+    assert dag.scope.enabled == ["look", "publish"] and dag.scope.automated == ["publish"]  # as it ran: unasked
+    assert dag.scope.denied_tools is None and dag.get("find_jobs").scope.enabled is None
+    dag = found["unlisted"]
+    assert dag.scope.enabled == [] and dag.get("find_jobs").scope.enabled == ["look"]  # what it used
+    assert dag.get("apply").scope.enabled == [] and waiting == []  # what was proposed before is withdrawn
 
 
 @pytest.mark.asyncio
 async def test_your_message_waits_for_the_task_then_goes_before_the_next(athena):
-    source = THREE.replace('allowed_tools=["look"]', 'allowed_tools=["wait_here"]')
+    source = THREE.replace('enabled=["look"]', 'enabled=["wait_here"]')
     a = athena({"Find new jobs": [calls(("wait_here", {})), "Found Acme."]})
     a["dags"].save(a["jobs"], source)
     await a["dags"].start()
@@ -702,7 +744,7 @@ async def test_your_message_waits_for_the_task_then_goes_before_the_next(athena)
 
 @pytest.mark.asyncio
 async def test_pausing_stops_it_starting_by_itself_and_stopping_stops_it(athena):
-    source = THREE.replace('allowed_tools=["look"]', 'allowed_tools=["wait_here"]').replace(
+    source = THREE.replace('enabled=["look"]', 'enabled=["wait_here"]').replace(
         'prompt="Find me jobs."', 'prompt="Find me jobs.", schedule=["0 9 * * *"]'
     )
     a = athena({"Find new jobs": [calls(("wait_here", {})), "Found."]})
@@ -790,7 +832,7 @@ async def test_change_dag_shows_what_changes_and_checks_the_file(athena):
     assert said.startswith("A new DAG for Job hunting, which runs only when it's run by hand. Fewer, better")
     assert '+    apply = AgenticTask("apply", prompt="Apply to the best one.", on_complete=alert)' in said
     assert "without asking" not in said
-    wider = THREE.replace('allowed_tools=["look"]', 'allowed_tools=["look", "pub*"]')  # publish asks first
+    wider = THREE.replace('enabled=["look"]', 'enabled=["look", "pub*"], automated=["pub*"]')  # publish asks
     said = await change.preview({"source": wider, "agent": "Job hunting"})
     assert "⚠️ It would let these run without asking you: publish (in find_jobs, apply, report)." in said
     with pytest.raises(Exception, match="That DAG file won't do"):
@@ -938,7 +980,7 @@ async def test_what_an_agent_keeps_can_be_changed_by_chatting_but_not_by_a_run(a
 def test_dags_are_written_with_a_job_for_each_task_and_you_are_told_what_s_new_plainly():
     from athena.dags.reader import REFERENCE
 
-    assert "Give each task one job" in REFERENCE and "a task is given only those its allowed_tools lists" in REFERENCE
+    assert "Give each task one job" in REFERENCE and "enabled is what a task can use at all" in REFERENCE
     told = ends.summarising("George", [], [])
     assert "no title, heading, date or time" in told and "the next run starts with what you say" in told
 
@@ -1129,7 +1171,7 @@ async def test_a_skill_read_in_a_run_is_looked_back_on_at_its_end(athena):
     skills.save(None, "Applying", "When applying for jobs", "Use the CV.", by="you")
     for tool in skills.tools():
         a["tools"].add(tool)
-    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', 'allowed_tools=["read_skill"]'))
+    a["dags"].save(a["jobs"], THREE.replace('enabled=["look"]', 'enabled=["read_skill"]'))
     await a["dags"].start()
     try:
         run = await run_once(a, a["jobs"])
@@ -1143,7 +1185,7 @@ async def test_a_skill_read_in_a_run_is_looked_back_on_at_its_end(athena):
 @pytest.mark.asyncio
 async def test_a_task_that_runs_out_of_time_fails_and_the_run_goes_on(athena):
     a = athena({"Find new jobs": [calls(("wait_here", {})), "Done."]}, max_minutes=0.1 / 60, retries=0)  # 0.1 s
-    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', 'allowed_tools=["wait_here"]'))
+    a["dags"].save(a["jobs"], THREE.replace('enabled=["look"]', 'enabled=["wait_here"]'))
     await a["dags"].start()
     try:
         asyncio.get_running_loop().call_later(0.3, a["let_go"].set)  # the tool takes longer than the task may
@@ -1205,7 +1247,7 @@ async def test_while_a_task_waits_for_your_ok_your_messages_go_ahead(athena):
 
     channel = Slow()
     a = athena({"Quick question": "Yes?", "Find new jobs": [calls(("publish", {})), "Published."]}, channel)
-    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', ""))
+    a["dags"].save(a["jobs"], THREE.replace('enabled=["look"]', 'enabled="*"'))
     await a["dags"].start()
     try:
         run = await a["dags"].run_now(a["jobs"])
@@ -1231,7 +1273,7 @@ async def test_athena_restarting_asks_again_about_a_tool_waiting_for_your_ok(ath
             await asyncio.Event().wait()
 
     a = athena({"Find new jobs": [calls(("publish", {})), "Published."]}, Never())
-    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', ""))
+    a["dags"].save(a["jobs"], THREE.replace('enabled=["look"]', 'enabled="*"'))
     await a["dags"].start()
     run = await a["dags"].run_now(a["jobs"])
     while not a["channel"].asked:
@@ -1481,7 +1523,7 @@ async def test_a_failed_task_is_tried_again_and_the_dags_file_says_how_often(ath
         run = await run_once(a, a["jobs"])
         assert run.status == RunStatus.SUCCESS and run.instances["find_jobs"].attempt == 2  # [tasks] retries = 1
         assert "### Attempt 1 failed\nRuntimeError: the model fell over" in a["model"].asked[0]  # it never got far
-        a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', 'allowed_tools=["look"], retries=0'))
+        a["dags"].save(a["jobs"], THREE.replace('enabled=["look"]', 'enabled=["look"], retries=0'))
         failures["left"] = 1
         run = await run_once(a, a["jobs"])
         assert run.instances["find_jobs"].attempt == 1 and went(run)["find_jobs"] == "failed"
@@ -1491,6 +1533,6 @@ async def test_a_failed_task_is_tried_again_and_the_dags_file_says_how_often(ath
 
 def test_a_dag_catches_up_unless_it_says_not_to():
     assert read(THREE).catchup is True
-    assert read(THREE.replace('allowed_tools=["look"]', 'allowed_tools=["look"], catchup=False')).catchup is False
+    assert read(THREE.replace('enabled=["look"]', 'enabled=["look"], catchup=False')).catchup is False
     run = DagRun("run_x", "jobs", RunStatus.SUCCESS, {"source": "cron", "catchup": True})
     assert runs.started_by(run) == "on its schedule, late: it was missed while Athena was off"

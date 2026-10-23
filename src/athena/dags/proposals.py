@@ -14,8 +14,8 @@ Approving one saves its file (Dags.save). One proposed against a file that's cha
 where they can be. Athena takes no other kind: the engine's overrides would make what runs differ from the file,
 and Athena's skills are its own (skills.py).
 
-Each says which tools that ask first it would let run without asking, so a change to allowed_tools is plain to
-see, not only in the diff.
+Each says which tools that ask first it would let run without asking, so a change to automated is plain to see,
+not only in the diff.
 """
 
 from __future__ import annotations
@@ -265,10 +265,11 @@ def describe_tools(changes: dict[str, Any]) -> str:
     parts = []
     if "hidden_tools" in changes:
         parts.append(f"Find when needed: {listed(changes['hidden_tools'])}")
-    for where, names in (changes.get("allowed_tools") or {}).items():
-        parts.append(f"Tools for {'every task' if where == 'dag' else where}: {listed(names)}")
+    for key, said in (("enabled", "Tools for"), ("automated", "Without asking, in")):
+        for where, names in (changes.get(key) or {}).items():
+            parts.append(f"{said} {'every task' if where == 'dag' else where}: {listed(names)}")
     return "; ".join(parts)
 
 
 def listed(names: Any) -> str:
-    return "None" if names is None else ", ".join(names) or "[] (none)"
+    return "None" if names is None else "all" if names in ("*", ["*"]) else ", ".join(names) or "none"

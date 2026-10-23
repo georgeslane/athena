@@ -1,6 +1,7 @@
 """The tasks every DAG ends with: Athena's own, in place of agentic-airflow's DagEvaluator.
 
-  review   looks back at the run, with tools: set_task_tools gives a task the tools it needs and no others,
+  review   looks back at the run, with tools: set_task_tools gives a task the tools it can use, and which of them
+           run without asking,
            propose_dag proposes a new DAG file, and read_skill and save_skill improve a skill the run read. What it
            changes is proposed as one new file, for you to approve (proposals.py); a skill it saves waits for you too
   summary  tells you what's new, if anything, as a message in the agent's chat: you're notified only when there's
@@ -23,6 +24,7 @@ from typing import Any, Protocol
 
 from agentic_airflow import AgenticTask, DagRun, TaskGroup, TaskStatus, ToolContext, found_nothing
 from agentic_airflow import Tool as EngineTool
+from agentic_airflow.tools import EXPLICIT
 
 from athena.dags.proposals import TOOLS, WORKFLOW, Proposals, describe_tools, listed, same
 from athena.dags.reader import END_GROUP, REFERENCE, DagError, read, with_tools
@@ -47,7 +49,7 @@ class RunNotes:
     recommendations: list[str] = field(default_factory=list)  # what the review proposed, for the summary
     draft: str | None = None  # the DAG file the review would make it, as it goes
     rewritten: bool = False  # by propose_dag: more than tool lists
-    tools: dict[str, list[str]] = field(default_factory=dict)  # set_task_tools': where -> its whole list
+    tools: dict[str, dict[str, list[str]]] = field(default_factory=dict)  # set_task_tools': where -> its lists
     why: list[str] = field(default_factory=list)  # what the review said of each change
 
 
@@ -75,7 +77,7 @@ class Ends(Protocol):
 def group(source: str, task_ids: Sequence[str], ends: Ends) -> TaskGroup:
     """The end tasks for a DAG with this file and these tasks of its own, as the engine attaches them
     (Engine.register's evaluator)."""
-    tasks = TaskGroup(END_GROUP, allowed_tools=[], max_tool_steps=0, dag=None, parent=None)
+    tasks = TaskGroup(END_GROUP, enabled=[], max_tool_steps=0, dag=None, parent=None)
     tasks.dag = None
     common: dict[str, Any] = {
         "context": [],
@@ -87,7 +89,8 @@ def group(source: str, task_ids: Sequence[str], ends: Ends) -> TaskGroup:
     review = AgenticTask(
         REVIEW,
         prompt=lambda engine, run: reviewing(ends, run, engine.dag_for(run), source),
-        allowed_tools=[SET_TOOLS, PROPOSE_DAG, READ_SKILL, SAVE_SKILL],
+        enabled=[SET_TOOLS, PROPOSE_DAG, READ_SKILL, SAVE_SKILL],
+        automated=[SET_TOOLS, PROPOSE_DAG, READ_SKILL, SAVE_SKILL],  # what it saves waits for you anyway
         max_tool_steps=REVIEW_STEPS,
         on_complete=lambda engine, run, inst: _reviewed(ends, run, source, str(inst.output or "")),
         **common,
@@ -142,14 +145,15 @@ def reviewing(ends: Ends, run: DagRun, dag: Any, source: str) -> str:
     uses = _uses(run)
     lines = []
     for task in dag.own_tasks():
-        given = task.scope.allowed_tools if task.scope.allowed_tools is not None else dag.scope.allowed_tools
+        enabled, automated = (_nearest(dag, task, key) for key in ("enabled", "automated"))
         used = []
         for name, use in uses.items():
             if n := use.tasks.get(task.id):
                 notes = [said for count, said in ((use.failed, "failed"), (use.declined, f"{user} declined it"),
                                                  (use.asked, f"{user} allowed it")) if count]  # fmt: skip
                 used.append(f"{name} ×{n}" + (f" ({', '.join(notes)})" if notes else ""))
-        lines.append(f"- {task.id}: given {listed(given)}; used {', '.join(used) or 'none'}")
+        lines.append(f"- {task.id}: enabled {listed(enabled)}; automated {listed(automated)}; used "
+                     f"{', '.join(used) or 'none'}")  # fmt: skip
     skills = ends.notes(run).skills
     read_skills = (
         f"\n\n3. Skills. It read {' and '.join(f'“{s}”' for s in skills)}. If a change would make one go better "
@@ -161,13 +165,14 @@ def reviewing(ends: Ends, run: DagRun, dag: Any, source: str) -> str:
     return (
         "The run's own tasks have finished: its log is above. Review it, to make the next run better, with the "
         "tools you have here. Most runs need no change: change only what clearly helps.\n\n"
-        "1. Each task's tools. A task is given only the tools its list names: its own, or the DAG's. Others that "
-        f"ask first it can find, and they ask {user}; others it can't use.\n"
+        "1. Each task's tools. A task can use only the tools enabled for it (its own list, or the DAG's), and of "
+        f"those, the ones that ask first ask {user} unless they're automated.\n"
         + "\n".join(lines)
-        + f"\nTools there are: {', '.join(known)}. These ask first, and on a list run without asking, so list one "
-        f"only if {user} allowed it here and it only reads or changes little: {', '.join(asks) or 'none'}. These "
-        f"always ask: {', '.join(always) or 'none'}.\nIf a task used a tool it didn't need, or needed one it "
-        f"wasn't given, call {SET_TOOLS} with its whole new list.\n\n"
+        + f"\nTools there are: {', '.join(known)}. These ask first: {', '.join(asks) or 'none'}; automate one only "
+        f"if {user} allowed it here and it only reads or changes little. These always ask: "
+        f"{', '.join(always) or 'none'}.\nIf a task called a tool it shouldn't have, such as one for what a task "
+        f"before it did, or needed one it didn't have, call {SET_TOOLS} with its whole new enabled list. A task that "
+        'works from what came before needs none; "*" is for one that\'s open-ended.\n\n'
         f"2. Its tasks. This is the DAG file now:\n```python\n{source.strip()}\n```\nIf a task did more than one "
         "job, did another's work again, or had an unclear prompt, or one's missing or not needed, call "
         f"{PROPOSE_DAG} with the whole new file, keeping what works and its layout.\n{REFERENCE}"
@@ -191,7 +196,7 @@ def review_tools(ends: Ends) -> list[EngineTool]:
             new = str(source).strip() + "\n"
             ends.check(agent_id, new)
             if notes.tools:  # what set_task_tools said, kept
-                new = with_tools(new, {"allowed_tools": notes.tools})
+                new = with_tools(new, _changes(notes.tools))
                 ends.check(agent_id, new)
         except _Refused as exc:
             return f"Error: {exc}"
@@ -201,49 +206,63 @@ def review_tools(ends: Ends) -> list[EngineTool]:
         notes.why.append(" ".join(str(why).split()))
         return f"Noted: it'll be proposed to {ends.user}, who decides, once you're done."
 
-    def set_task_tools(ctx: ToolContext, task: str = "", tools: Any = None, why: str = "") -> str:
+    def set_task_tools(
+        ctx: ToolContext, task: str = "", enabled: Any = None, automated: Any = None, why: str = ""
+    ) -> str:
         try:
             notes, agent_id, file = notes_of(ctx)
         except _Refused as exc:
             return f"Error: {exc}"
-        names = tools if isinstance(tools, list) else []
-        if not isinstance(tools, list) or not all(isinstance(n, str) for n in names):
-            return 'Error: tools is a list of tool names, such as ["fetch"].'
         known = ends.tool_names()[0]
-        if unknown := [n for n in names if not fnmatch.filter(known, n)]:
-            return f"Error: no tool is called {', '.join(unknown)}. The tools there are: {', '.join(known)}."
+        lists = {}
+        for key, value in (("enabled", enabled), ("automated", automated)):
+            if value is None and key == "automated":
+                continue
+            if value == "*" or value == ["*"]:
+                lists[key] = "*"
+                continue
+            if not isinstance(value, list) or not all(isinstance(n, str) for n in value):
+                return f'Error: {key} is a list of tool names, such as ["fetch"], or "*" for every tool.'
+            if unknown := [n for n in value if not fnmatch.filter(known, n)]:
+                return f"Error: no tool is called {', '.join(unknown)}. The tools there are: {', '.join(known)}."
+            lists[key] = list(dict.fromkeys(value))
         task_ids = [t.id for t in read(file, timezone=ends.timezone).own_tasks()]
         where = str(task).strip()
         if where not in ("dag", *task_ids):
             return f'Error: there\'s no task called {where!r}: give one of {", ".join(task_ids)}, or "dag".'
-        names = list(dict.fromkeys(names))
         try:
-            new = with_tools(file, {"allowed_tools": {where: names}})
+            new = with_tools(file, {key: {where: names} for key, names in lists.items()})
             ends.check(agent_id, new)
         except (DagError, SyntaxError) as exc:
             return f"Error: {exc}"
         notes.draft = new
-        notes.tools[where] = names
+        notes.tools.setdefault(where, {}).update(lists)
         notes.why.append(" ".join(str(why).split()))
         which = "every task" if where == "dag" else where
-        return f"Noted: {which} would be given {listed(names)}, once {ends.user} approves it."
+        said = f"{which} would have {listed(lists['enabled'])} enabled"
+        if "automated" in lists:
+            said += f", and {listed(lists['automated'])} automated"
+        return f"Noted: {said}, once {ends.user} approves it."
 
     text = {"type": "string"}
+    explicit = (EXPLICIT,)  # enabled only by name: never for a task given "*"
     return [
         EngineTool(
             SET_TOOLS,
             set_task_tools,
-            "Give a task (or the DAG, for every task without its own list) a new list of the tools it's given, "
-            "replacing its list: the review proposes it to the user.",
+            "Set the tools a task (or the DAG, for every task without its own list) can use, replacing its list, and "
+            "optionally which of them run without asking: the review proposes it to the user.",
             {
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": 'A task\'s id, or "dag"'},
-                    "tools": {"type": "array", "items": text, "description": "Its whole list of tools"},
+                    "enabled": {"type": "array", "items": text, "description": 'Its whole list of tools, or ["*"]'},
+                    "automated": {"type": "array", "items": text, "description": "Those that run without asking"},
                     "why": {"type": "string", "description": "Why, in a sentence"},
                 },
-                "required": ["task", "tools"],
+                "required": ["task", "enabled"],
             },
+            tags=explicit,
         ),
         EngineTool(
             PROPOSE_DAG,
@@ -257,12 +276,30 @@ def review_tools(ends: Ends) -> list[EngineTool]:
                 },
                 "required": ["source"],
             },
+            tags=explicit,
         ),
     ]
 
 
 class _Refused(Exception):
     pass
+
+
+def _changes(tools: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """set_task_tools' lists, by where, as with_tools takes them: by list, then where."""
+    changes: dict[str, dict[str, Any]] = {}
+    for where, lists in tools.items():
+        for key, names in lists.items():
+            changes.setdefault(key, {})[where] = names
+    return changes
+
+
+def _nearest(dag: Any, task: Any, key: str) -> Any:
+    """A task's tool list, as the nearest of it, its groups and the DAG says it."""
+    for scope in reversed(dag.scopes_for(task)):
+        if getattr(scope, key, None) is not None:
+            return getattr(scope, key)
+    return []
 
 
 def written_out(answer: str) -> str | None:
@@ -281,7 +318,7 @@ def _reviewed(ends: Ends, run: DagRun, source: str, answer: str) -> None:
     if not notes.rewritten and (file := written_out(answer)):  # written out, not proposed
         try:
             ends.check(agent_id, file)
-            notes.draft = with_tools(file, {"allowed_tools": notes.tools}) if notes.tools else file
+            notes.draft = with_tools(file, _changes(notes.tools)) if notes.tools else file
             notes.rewritten = True
             notes.why.append(_FENCE.sub("", answer).strip())
         except (DagError, SyntaxError):
@@ -293,7 +330,7 @@ def _reviewed(ends: Ends, run: DagRun, source: str, answer: str) -> None:
         if p := ends.proposals.propose(agent_id, run.run_id, WORKFLOW, why, notes.draft):
             _recommend(ends, run, p, f"A change to the DAG: {_short(why or 'see the dashboard', 300)}")
     else:
-        changes = {"allowed_tools": dict(notes.tools)}
+        changes = _changes(notes.tools)
         if p := ends.proposals.propose(agent_id, run.run_id, TOOLS, why, with_tools(current, changes), changes):
             _recommend(ends, run, p, f"Tools: {describe_tools(changes)}")
 

@@ -16,7 +16,7 @@ Make one with **New agent**, and name, mute or delete it from the top of it: del
 The master agent is always there, first on the Agents tab, and can't be deleted.
 
 - **Telegram, Siri and the terminal talk to it**, and only to it: it's your conversation with Athena, wherever you are. `/new` starts it afresh.
-- **It hears your other agents' news**: when a run of another agent's DAG has news, or a task with `alert=True` finds something, it's told to the master agent as well as to you, so you can ask about it there. It knows what each agent is for and when it runs, and its `agent_runs` tool reads what any of their runs did, task by task.
+- **It hears your other agents' news**: when a run of another agent's DAG has news, or a task with `alert=True` finds something, it comes to you in Telegram, after the agent's name, and to the master agent, so you have the overall picture there and can ask about it. Requests for your OK from any agent's tasks come to Telegram too. It knows what each agent is for and when it runs, and its `agent_runs` tool reads what any of their runs did, task by task. For more about one agent's work than that, ask the agent itself, in its own chat on the Agents tab: the master agent says so. Muting an agent, with the bell, stops its news coming to you and the master agent.
 - **It can act on them**: ask it to change another agent's DAG, or run it now, by name. A change still shows you exactly what changes, and asks first.
 - **Its DAG keeps an eye on things**: say, your inbox every hour, for new emails about jobs, with an asset in its outlets that starts the DAG of the agent that applies for them. See [Assets](dags.md#other-agents-dags-assets).
 
@@ -70,7 +70,7 @@ The History view shows each agent's last 10 runs: what started each, and what ca
 
 ## What it may do
 
-- **A task is given only the tools its list names** (`allowed_tools`, on the DAG, a task group or a task), and they run without asking. A tool that asks first and isn't on its list, it can find when it needs one, and it asks you, in Telegram and in the agent's chat, saying which task wants it. Unanswered after `[tasks] confirm_minutes` (60), it's declined. What you've allowed when talking to the agent doesn't count for its DAG.
+- **A task can use only the tools enabled for it** (`enabled`, on the DAG, a task group or a task), and of those, the ones that ask first ask you, in Telegram and in the agent's chat, saying which task wants it, unless they're `automated`. Unanswered after `[tasks] confirm_minutes` (60), it's declined. What you've allowed when talking to the agent doesn't count for its DAG. See [Tools](dags.md#tools).
 - **Some always ask**, whatever the DAG says: changing a DAG (`change_dag`), and handing work to Claude.
 - **Athena changes an agent's DAG** with `change_dag`, which shows you exactly what changes, and asks first. A run can't change its own DAG: its reviews propose changes instead.
 - **If Athena writes out a DAG file in its answer without saving it,** as a model may while saying it has, it's saved anyway, asking you first like any change. It goes to the agent whose DAG has that id, or the one you're talking to. The answer ends by saying whether it was saved.

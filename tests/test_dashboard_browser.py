@@ -136,7 +136,7 @@ def seed(services):
     dags.engine.state.save_run(run.to_dict())
     better = JOBS.replace("Say what was applied for.", "List what was applied for, with links.")
     dags.proposals.propose(jobs, run.run_id, "workflow", "The report should link to each job.", better)
-    tools = {"hidden_tools": ["read_news"], "allowed_tools": {"report": ["forget_memory"]}}  # which asks first
+    tools = {"enabled": {"report": ["forget_memory"]}, "automated": {"report": ["forget_memory"]}}  # it asks first
     dags.proposals.propose(jobs, run.run_id, "tools", "fetch timed out.", with_tools(JOBS, tools), tools)
     other = history.new_session("Briefing").id
     dags.save(
@@ -203,7 +203,8 @@ async def test_writing_a_dag_and_seeing_it_drawn(athena, browser):  # noqa: F811
     await page.click("text=How to write it")
     for argument in (
         "schedule",
-        "allowed_tools",
+        "enabled",
+        "automated",
         "hidden_tools",
         "follow_mapping=True",
         "on_complete=alert",

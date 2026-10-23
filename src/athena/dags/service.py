@@ -18,6 +18,7 @@ with, and what its DAG's doing now (intros.py). What's proposed for agents' DAGs
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import logging
@@ -42,6 +43,7 @@ from agentic_airflow import (
     TriggerError,
 )
 from agentic_airflow import ToolRegistry as EngineTools
+from agentic_airflow import proposals as queue
 
 from athena.dags import ends, intros, runs
 from athena.dags import files as agent_files
@@ -57,11 +59,11 @@ from athena.dags.reader import (
     as_dict,
     assets,
     read,
-    unlisted,
+    upgraded,
     webhooks,
-    with_tools,
 )
 from athena.dags.store import AgentStore
+from athena.dags.tools import CHAT_ONLY
 from athena.files import SENT
 from athena.history import session_of
 from athena.privacy import refusal, warning
@@ -75,7 +77,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 KEEP_RUNS = 10  # of each DAG's
-LISTED_TOOLS = "dags-list-tools"  # the upgrade that gives each task of a DAG from before the tools it used
+ENABLED_TOOLS = "dags-enabled-tools"  # the upgrade that writes enabled and automated into DAGs from before
 CONTEXT_CHARS = 12_000  # of a task's data, as the engine renders it: each upstream output, the run log
 RETRY_SECONDS = 60.0  # before a failed task's tried again, unless its DAG says otherwise
 EVENT_GAP = 60.0  # seconds: the same webhook again sooner doesn't start its DAGs again
@@ -160,8 +162,8 @@ class Dags:
     async def start(self) -> None:
         """Register each agent's DAG, start the engine, carry on with runs Athena stopped during, and ask again
         about tools that were waiting for your OK."""
-        if self.store.once(LISTED_TOOLS):
-            self._list_tools()
+        if self.store.once(ENABLED_TOOLS):
+            self._enable_tools()
         for config in self.store.all():
             if config.dag.strip():
                 try:
@@ -179,31 +181,34 @@ class Dags:
         for approval in self.engine.list_approvals():
             self._spawn(self._ask(approval.to_dict()))
 
-    def _list_tools(self) -> None:
-        """Once, for DAG files written before a task was given only the tools a list names: each task no list
-        covers is given the tools it used in its kept runs that don't ask first, so it carries on as it did. Those
-        that ask, it can find when it needs one, and they ask."""
+    def _enable_tools(self) -> None:
+        """Once, for DAG files written before enabled and automated: what allowed_tools said becomes them, and a task
+        no list covered, which could use any tool, can use those it used in its last runs (reader.upgraded), so it
+        carries on as it did. What was proposed for it, written as it was, is withdrawn."""
         asks = {t.name for t in self.agent.tools.all() if t.needs_confirmation}
         for config in self.store.all():
             try:
-                tasks = unlisted(config.dag) if config.dag.strip() else []
-                if not tasks:
-                    continue
-                dag_id = read(config.dag, timezone=self.timezone, hooks=self.hooks).id
-                used: dict[str, list[str]] = {task: [] for task in tasks}
-                for run in self.engine.list_runs(dag_id, limit=KEEP_RUNS):
+                dag_id = _written_dag_id(config.dag)
+                used: dict[str, list[str]] = {}
+                for run in self.engine.list_runs(dag_id, limit=KEEP_RUNS) if dag_id else []:
                     for inst in run.instances.values():
-                        for call in inst.tool_calls if inst.task_id in used else []:
+                        for call in inst.tool_calls:
                             name = str(call.get("name"))
-                            if call.get("status") == "ok" and name not in asks and name not in used[inst.task_id]:
-                                used[inst.task_id].append(name)
-                file = with_tools(config.dag, {"allowed_tools": {"dag": [], **{t: sorted(n) for t, n in used.items()}}})
+                            if call.get("status") in ("ok", "approved") and name not in ("search_tools", "ask_user"):
+                                used.setdefault(inst.task_id, [])
+                                if name not in used[inst.task_id]:
+                                    used[inst.task_id].append(name)
+                file = upgraded(config.dag, asks, used) if config.dag.strip() else None
+                if file is None:
+                    continue
                 self.check(config.id, file)
             except (DagError, SyntaxError) as exc:
-                log.warning("Couldn't list the tools of agent %d's DAG: %s", config.id, exc)
+                log.warning("Couldn't write enabled and automated into agent %d's DAG: %s", config.id, exc)
                 continue
             self.store.update(config.id, dag=file)
-            log.info("Listed the tools each task of agent %d's DAG uses: %s", config.id, used)
+            for rec in self.proposals.waiting(config.id):
+                queue.withdraw_proposal(self.engine, rec["id"], reason="Written before enabled and automated.")
+            log.info("Wrote enabled and automated into agent %d's DAG", config.id)
 
     async def stop(self) -> None:
         for task in list(self._background):
@@ -447,7 +452,7 @@ class Dags:
 
     def tool_names(self) -> tuple[list[str], list[str], list[str]]:
         """For the tool review: every tool, those that ask first, and those that always do."""
-        tools = self.agent.tools.all()
+        tools = [t for t in self.agent.tools.all() if t.name not in CHAT_ONLY]  # as the engine has them
         asks = [t.name for t in tools if t.needs_confirmation and t.name not in NEVER_UNASKED]
         return [t.name for t in tools], asks, [t.name for t in tools if t.name in NEVER_UNASKED]
 
@@ -718,3 +723,13 @@ class Dags:
         from athena.dags.tools import dag_tools
 
         return dag_tools(self)
+
+
+def _written_dag_id(source: str) -> str | None:
+    """The id a DAG file gives its DAG, whether or not the file reads as DAGs are written now."""
+    with contextlib.suppress(SyntaxError):
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Dag" and node.args:
+                first = node.args[0]
+                return first.value if isinstance(first, ast.Constant) and isinstance(first.value, str) else None
+    return None

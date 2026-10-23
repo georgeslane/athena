@@ -106,8 +106,10 @@ def roster(dags: Dags) -> list[str]:
     return [
         "Their other agents:",
         *lines,
-        "When a run of one of their DAGs has news, it's told to you here too. agent_runs reads what any of them "
-        "did; change_dag and run_dag act on this agent, or on one of them by name.",
+        "When a run of one of their DAGs has news, it's told to you here too, so you have the overall picture. "
+        "agent_runs reads what any of them did; change_dag and run_dag act on this agent, or on one of them by "
+        f"name. For more about one agent's work than its runs say, {dags.user} can ask it in its own chat, on the "
+        "dashboard's Agents tab.",
     ]
 
 

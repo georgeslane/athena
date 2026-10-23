@@ -7,7 +7,7 @@
         "job_hunting",
         prompt="Apply for data engineering jobs that fit my CV.",
         schedule=["0 9 * * 1-5", Asset("job-emails")],  # cron, in your time zone, and what starts it
-        allowed_tools=["read_file", "fetch"],
+        enabled=["read_file", "fetch"],  # the tools its tasks can use: a task's own list replaces it
     ):
         jobs = Task("jobs", fn=trigger_items, fan_out=True)  # one for each job that came with the run
         fits = AgenticBranch("fits", prompt="Does this job fit my CV?", allow_none=True)
@@ -30,7 +30,7 @@ import contextlib
 import fnmatch
 import operator
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from typing import Any
 
 from agentic_airflow import (
@@ -67,6 +67,7 @@ MAX_GROUPS = 10
 MAX_PROMPT = 4000  # characters
 MAX_ITEMS = 20  # a list mapped over: the most tasks it starts
 MAX_RETRIES = 3  # a task's retries
+TOOL_LISTS = ("enabled", "automated", "hidden_tools")  # what a DAG, a group or a task says of its tools
 MAX_RETRY_DELAY = 3600  # seconds
 
 # Athena's own functions for a DAG: what `on_complete=alert` and the like name. The service gives the real ones
@@ -76,7 +77,7 @@ HOOKS = ("alert",)
 # What a DAG file can call, and the arguments each takes: positional, then by name.
 _TASK_ARGS = {"context", "fan_out", "follow_mapping", "trigger_rule", "on_complete", "outlets", "skip_if", "retries",
               "retry_delay"}  # fmt: skip
-_SCOPE_ARGS = {"model", "allowed_tools", "denied_tools", "hidden_tools", "skills", "inherit_skills", "thinking",
+_SCOPE_ARGS = {"model", "enabled", "automated", "hidden_tools", "skills", "inherit_skills", "thinking",
                "max_tool_steps", "retries", "retry_delay", "ask_user"}  # fmt: skip
 _AGENTIC_ARGS = _TASK_ARGS | _SCOPE_ARGS | {"return_type", "json_schema", "verbosity", "include_run_log",
                                             "include_dag_definition", "system_prompt"}  # fmt: skip
@@ -111,23 +112,26 @@ REFERENCE = """DAG files are agentic-airflow Python, read and never run (docs/da
 from agentic_airflow import AgenticBranch, AgenticTask, Asset, Dag, Task, TaskGroup, Webhook, trigger_items
 from athena.dags import alert
 with Dag("dag_id", prompt="What it's for", schedule=["30 7 * * 1-5", Asset("job-emails"), Webhook("arrive-home")],
-         allowed_tools=["fetch"]):  # the tools its tasks are given: a task's own list replaces it
+         enabled=["fetch"]):  # the tools its tasks can use: a task's own list replaces it
     jobs = AgenticTask("jobs", prompt="List new jobs: one item each.", return_type="list")  # fan_out: one each
-    fits = AgenticBranch("fits", prompt="Does it fit my CV?", allow_none=True, allowed_tools=["read_file"])
-    apply = AgenticTask("apply", prompt="Apply.", follow_mapping=True, on_complete=alert)  # per item; tells user
+    fits = AgenticBranch("fits", prompt="Does it fit my CV?", allow_none=True, enabled=["read_file"])
+    apply = AgenticTask("apply", prompt="Apply.", follow_mapping=True, on_complete=alert,  # per item; tells user
+                        enabled=["send_email"], automated=["send_email"])
     report = AgenticTask("report", prompt="Say what was applied for.", outlets=[Asset("applied")])
     jobs >> fits >> apply >> report  # report joins: it gets every item's output
     # Task("items", fn=trigger_items, fan_out=True): one lane for each item that came with what started the run.
-    # with TaskGroup("each", allowed_tools=[...]) as each: ... tasks ...  then a >> each >> b
+    # with TaskGroup("each", enabled=[...]) as each: ... tasks ...  then a >> each >> b
 Schedule: cron strings (your time zone, at most every 15 min), Asset(name): when a task with it in outlets
 produces something, Webhook(name): POST /hooks/<name>, DagTrigger("dag_id"): when that DAG's run ends. Asset
 "claude-done": when Claude finishes a project. A run missed while Athena was off runs when it's back
 (catchup=False on the Dag to skip it).
 On the Dag, a TaskGroup or a task: retries=1 tries a failed task again after retry_delay seconds (default 60);
 ask_user=True lets its tasks ask the user something only they can decide, and wait for the answer.
-Tools: a task is given only those its allowed_tools lists (patterns such as "news_*" work), and they run without
-asking, apart from those that always ask. Others that ask first it can find when it needs one, and they ask; others
-it never has. So list each task's own, and only what it needs.
+Tools: enabled is what a task can use at all, and nothing else; automated, which of those that ask first run
+without asking (others that don't ask first never do; a few always ask). Both are empty unless set, "*" is every
+tool, patterns such as "news_*" work, and a task's or group's own list replaces the DAG's. Automating a tool
+doesn't enable it. Give each task its own enabled list of only what it needs: a task that works from what came
+before needs none. "*" is for a task that's open-ended.
 Give each task one job, and a prompt that says exactly what to look at and with what, as "Read today's calendar
 events.", not "Look for events.": a task sees only its prompt and what came before it, so a vague one does other
 tasks' work again."""
@@ -135,8 +139,8 @@ tasks' work again."""
 STARTER = """from agentic_airflow import AgenticTask, Dag
 
 # What this agent does by itself. Give it a schedule, such as ["0 9 * * *"], to run on its own, and press Run
-# now to try it. allowed_tools are the tools its tasks are given, such as ["fetch", "read_file"].
-with Dag("{dag_id}", prompt="{purpose}", schedule=[], allowed_tools=[]):
+# now to try it. enabled are the tools a task can use, such as ["fetch", "read_file"], or "*" for all of them.
+with Dag("{dag_id}", prompt="{purpose}", schedule=[], enabled=[]):
     check = AgenticTask("check", prompt="Check on what this agent is for, and say what's new.")
 """
 
@@ -144,12 +148,12 @@ MASTER_STARTER = """from agentic_airflow import AgenticTask, Asset, Dag
 
 # What the master agent keeps an eye on for you. What a task with outlets finds starts the DAGs of your other
 # agents with that asset in their schedule. Give it a schedule, such as ["@hourly"], to check by itself, and each
-# task the tools it uses, in allowed_tools.
+# task the tools it uses, in enabled.
 with Dag("master", prompt="Keep an eye on things for the user's other agents.", schedule=[]):
     job_emails = AgenticTask(
         "job_emails",
         prompt="Look through my emails since the last run for new ones about jobs: one item for each.",
-        allowed_tools=[],  # the email server's tools that read mail
+        enabled=[],  # the email server's tools that read mail
         return_type="list",
         fan_out=False,
         outlets=[Asset("job-emails")],  # starts the DAGs with Asset("job-emails") in their schedule
@@ -370,6 +374,12 @@ class _Reader:
         for param, node in zip(positional, call.args, strict=False):
             args[param] = self.argument(name, param, node)
         for keyword in call.keywords:
+            if keyword.arg in ("allowed_tools", "denied_tools") and keyword.arg not in by_name:
+                raise _error(
+                    keyword.value,
+                    f"{keyword.arg} is now enabled, the tools a task can use, and automated, those of them that ask "
+                    "first which run without asking.",
+                )
             if keyword.arg is None or keyword.arg not in by_name | set(positional):
                 known = ", ".join(sorted(by_name | set(positional)))
                 raise _error(keyword.value, f"{written} takes {known}, not {keyword.arg or '**'}.")
@@ -379,7 +389,7 @@ class _Reader:
         if name == "Dag":  # a run missed while the Pi was off runs when it's back
             args.setdefault("catchup", True)
             if not self.as_written:
-                args.setdefault("allowed_tools", [])  # its tasks are given only the tools their lists name
+                args.setdefault("enabled", [])  # its tasks can use only the tools their lists name
         if name == "Cron":
             args.setdefault("timezone", self.timezone)
             self.cron(args.get("expression"), call)
@@ -419,6 +429,10 @@ class _Reader:
             isinstance(value, int | float) and not isinstance(value, bool) and 0 <= value <= MAX_RETRY_DELAY
         ):
             raise _error(node, f"retry_delay is a number of seconds, up to {MAX_RETRY_DELAY}.")
+        if param in ("enabled", "automated") and not (
+            value == "*" or (isinstance(value, list) and all(isinstance(v, str) for v in value))
+        ):
+            raise _error(node, f'{param} is a list of tools, such as ["fetch", "news_*"], or "*" for every tool.')
         if param in ("ask_user", "catchup") and not isinstance(value, bool):
             raise _error(node, f"{param} is True or False.")
         if param in ("context", "target") and not _is_nodes(value) and value is not None:
@@ -481,7 +495,7 @@ def as_dict(dag: Dag) -> dict[str, Any]:
         "prompt": dag.prompt,
         "when": when(dag),
         "schedule": [t.to_dict() for t in dag.schedule],
-        "tools": {k: dag.scope.to_dict()[k] for k in ("allowed_tools", "hidden_tools", "denied_tools")},
+        "tools": {k: dag.scope.to_dict()[k] for k in TOOL_LISTS},
         "groups": [
             {"id": g.id, "parent": g.parent.id if g.parent else None, "tasks": [t.id for t in g.all_tasks()]}
             for g in groups
@@ -507,7 +521,7 @@ def _task(t: BaseOperator) -> dict[str, Any]:
         "upstream": t.upstream_ids,
         "outlets": list(t.outlets),
         "alert": getattr(t.on_complete, "name", "") == "alert",
-        "tools": {k: v for k, v in t.scope.to_dict().items() if k.endswith("_tools") and v is not None},
+        "tools": {k: v for k, v in t.scope.to_dict().items() if k in TOOL_LISTS and v is not None},
     }
     return out
 
@@ -515,8 +529,7 @@ def _task(t: BaseOperator) -> dict[str, Any]:
 def unknown_tools(dag: Dag, known: list[str]) -> list[str]:
     """Tools a DAG names, at any level, that no tool is called now: say because its MCP server is off."""
     scopes = [dag.scope, *(g.scope for g in dag.groups), *(t.scope for t in dag.tasks.values())]
-    lists = ("allowed_tools", "denied_tools", "hidden_tools")
-    named = {n for s in scopes for key in lists for n in (getattr(s, key) or [])}
+    named = {n for s in scopes for key in TOOL_LISTS for n in (getattr(s, key) or [])}
     return sorted(n for n in named if not fnmatch.filter(known, n))
 
 
@@ -524,19 +537,13 @@ def unknown_tools(dag: Dag, known: list[str]) -> list[str]:
 
 
 def with_tools(source: str, changes: dict[str, Any]) -> str:
-    """A DAG file with the tool lists ``changes`` sets: {"hidden_tools": [...], "allowed_tools": {where: [...]}},
-    where is "dag" or a task's id. Each list's written where the file says it now, or added to the call; the rest
-    of the file stays as it's written. DagError if the file won't read, or a task it names isn't in it."""
+    """A DAG file with the tool lists ``changes`` sets: {"enabled": {where: [...]}, "automated": {where: [...]},
+    "hidden_tools": [...]}, where is "dag", a task's id or "group:" and a group's id; a list that's None is taken
+    out. Each is written where the file says it now, or added to the call; the rest of the file stays as it's
+    written. DagError if the file won't read, or a task it names isn't in it."""
     module = ast.parse(source)
-    calls: dict[str, ast.Call] = {}
-    for node in ast.walk(module):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            name = ALIASES.get(node.func.id, node.func.id)
-            if name == "Dag":
-                calls["dag"] = node
-            elif name in _OPERATORS and (task_id := _written_id(node)):
-                calls[task_id] = node
-    edits: list[tuple[int, int, str]] = []  # (start, end, text) in the source, as offsets
+    calls = _calls(module)
+    edits: list[tuple[int, int, int, str]] = []  # (start, order, end, text) in the source, as offsets
     lines = source.splitlines(keepends=True)
     starts = [0]
     for line in lines:
@@ -545,36 +552,119 @@ def with_tools(source: str, changes: dict[str, Any]) -> str:
     def at(line: int, column: int) -> int:
         return starts[line - 1] + len(lines[line - 1].encode()[:column].decode(errors="ignore"))
 
-    def put(where: str, key: str, value: list[str]) -> None:
+    def edit(start: int, end: int, text: str) -> None:
+        edits.append((start, len(edits), end, text))
+
+    def put(where: str, key: str, value: Any) -> None:
         call = calls.get(where)
         if call is None:
             raise DagError(f"There's no task called “{where}” in the DAG now.")
-        written = repr(list(value)).replace("'", '"')
-        for keyword in call.keywords:
-            if keyword.arg == key:
-                v = keyword.value
-                edits.append((at(v.lineno, v.col_offset), at(v.end_lineno or v.lineno, v.end_col_offset or 0), written))
-                return
-        last = [*call.args, *call.keywords][-1] if call.args or call.keywords else None
+        parts = [*call.args, *call.keywords]
+        for i, keyword in enumerate(call.keywords, len(call.args)):
+            if keyword.arg != key:
+                continue
+            v = keyword.value
+            if value is not None:
+                edit(at(v.lineno, v.col_offset), at(v.end_lineno or v.lineno, v.end_col_offset or 0), _written(value))
+            elif i:  # taken out, with the comma before it
+                before = parts[i - 1].value if isinstance(parts[i - 1], ast.keyword) else parts[i - 1]
+                edit(at(before.end_lineno or before.lineno, before.end_col_offset or 0),
+                     at(v.end_lineno or v.lineno, v.end_col_offset or 0), "")  # fmt: skip
+            else:
+                after = parts[1] if len(parts) > 1 else None
+                end = (at(after.lineno, after.col_offset) if after is not None
+                       else at(v.end_lineno or v.lineno, v.end_col_offset or 0))  # fmt: skip
+                edit(at(keyword.lineno, keyword.col_offset), end, "")
+            return
+        if value is None:
+            return
+        last = parts[-1] if parts else None
         if last is None:
             end = at(call.end_lineno or call.lineno, (call.end_col_offset or 1) - 1)
-            edits.append((end, end, f"{key}={written}"))
+            edit(end, end, f"{key}={_written(value)}")
         else:
             node = last.value if isinstance(last, ast.keyword) else last
             end = at(node.end_lineno or node.lineno, node.end_col_offset or 0)
             start = last if isinstance(last, ast.keyword) else node
             if start.lineno != call.lineno:  # one argument to a line: so is this one
-                edits.append((end, end, f",\n{' ' * start.col_offset}{key}={written}"))
+                edit(end, end, f",\n{' ' * start.col_offset}{key}={_written(value)}")
             else:
-                edits.append((end, end, f", {key}={written}"))
+                edit(end, end, f", {key}={_written(value)}")
 
-    if "hidden_tools" in changes:
-        put("dag", "hidden_tools", changes["hidden_tools"])
-    for where, names in (changes.get("allowed_tools") or {}).items():
-        put(where, "allowed_tools", names)
-    for start, end, text in sorted(edits, reverse=True):
+    for key, value in changes.items():
+        if key == "hidden_tools":
+            put("dag", key, value)
+        else:
+            for where, names in value.items():
+                put(where, key, names)
+    for start, _, end, text in sorted(edits, reverse=True):
         source = source[:start] + text + source[end:]
     return source
+
+
+def _calls(module: ast.Module) -> dict[str, ast.Call]:
+    """The DAG's, its groups' and its tasks' calls in a file, by "dag", "group:" and its id, or a task's id."""
+    calls: dict[str, ast.Call] = {}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name = ALIASES.get(node.func.id, node.func.id)
+            if name == "Dag":
+                calls["dag"] = node
+            elif name == "TaskGroup" and (group_id := _written_id(node)):
+                calls[f"group:{group_id}"] = node
+            elif name in _OPERATORS and (task_id := _written_id(node)):
+                calls[task_id] = node
+    return calls
+
+
+def _written(value: Any) -> str:
+    return '"*"' if value == "*" else repr(list(value)).replace("'", '"')
+
+
+def upgraded(source: str, asks: Collection[str], used: Mapping[str, Sequence[str]]) -> str | None:
+    """A file written before enabled and automated, with them; None if it has them already, or won't read. What
+    allowed_tools named, a task could use without asking: they're enabled, and those that ask first (``asks``)
+    automated. denied_tools goes: enabled says it all. A task no allowed_tools covered could use any tool: it's
+    enabled for those it used in its runs (``used``, by task), asking for those that ask, as it did."""
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return None
+    calls = _calls(module)
+    if "dag" not in calls or any(k.arg in ("enabled", "automated") for c in calls.values() for k in c.keywords):
+        return None
+    changes: dict[str, dict[str, Any]] = {"enabled": {}, "automated": {}, "allowed_tools": {}, "denied_tools": {}}
+    listed: set[str] = set()
+    for where, call in calls.items():
+        for keyword in call.keywords:
+            if keyword.arg == "denied_tools":
+                changes["denied_tools"][where] = None
+            if keyword.arg != "allowed_tools":
+                continue
+            listed.add(where)
+            with contextlib.suppress(ValueError):
+                names = [str(n) for n in ast.literal_eval(keyword.value) or []]
+                changes["enabled"][where] = names
+                if automated := [n for n in names if fnmatch.filter(list(asks), n)]:
+                    changes["automated"][where] = automated
+            changes["allowed_tools"][where] = None
+
+    def covered(body: list[ast.stmt], inside: bool) -> None:
+        for statement in body:
+            if isinstance(statement, ast.With) and (call := _with_call(statement, "TaskGroup")):
+                covered(statement.body, inside or f"group:{_written_id(call)}" in listed)
+                continue
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    task_id = _written_id(node) if ALIASES.get(node.func.id, node.func.id) in _OPERATORS else None
+                    if task_id and not inside and task_id not in listed:
+                        changes["enabled"][task_id] = list(used.get(task_id, []))
+
+    block = next((s for s in module.body if isinstance(s, ast.With) and _with_call(s, "Dag")), None)
+    if block is not None:
+        covered(block.body, "dag" in listed)
+    changes["enabled"].setdefault("dag", [])
+    return with_tools(source, {k: v for k, v in changes.items() if v})
 
 
 def _written_id(call: ast.Call) -> str | None:
@@ -616,18 +706,3 @@ def _said(exc: Exception) -> str:
 
 def _error(node: ast.AST, message: str) -> DagError:
     return DagError(message, getattr(node, "lineno", 0), getattr(node, "col_offset", 0) + 1)
-
-
-def unlisted(source: str) -> list[str]:
-    """The DAG's own tasks that no list of tools covers, as it's written: not their own, a group's or the DAG's."""
-    dag = read(source, as_written=True)
-    found = []
-    for task in dag.own_tasks():
-        scopes = [task.scope, dag.scope]
-        group = task.group
-        while group is not None and not getattr(group, "is_dag", False):
-            scopes.append(group.scope)
-            group = group.parent
-        if all(scope.allowed_tools is None for scope in scopes):
-            found.append(task.id)
-    return found
