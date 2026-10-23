@@ -142,7 +142,8 @@ def group(source: str, task_ids: Sequence[str], ends: Ends) -> TaskGroup:
 def workflow(source: str) -> str:
     return (
         "The run's own tasks have finished: its log is above. Look back at how well this DAG did what it's for: a "
-        "task that's missing, unnecessary or in the wrong place, prompts that were unclear, work that should run "
+        "task that's missing, unnecessary or in the wrong place, prompts that were unclear, a task that did more "
+        "than one thing or did another's work again, work that should run "
         "once for each item of a list, or only when a branch says so, or anything that made the run slower or "
         f"worse than it needed to be. This is the DAG file now:\n```python\n{source.strip()}\n```\n{REFERENCE}\n\n"
         "If changing it would make it clearly more effective, reply with what you'd change and why, in a few "
@@ -346,7 +347,8 @@ def save_context(kept: str, user: str) -> str:
         "Decide what this DAG's next run should know, which starts afresh with only what you keep now and the "
         f"agent's guidance. Keep what will matter again, such as what {user} wants and has told you, what's been "
         "found or done already so it isn't done twice, and links or details the next run will need; not what was "
-        "only needed on the way, such as searches and pages read. This is what's kept now:\n"
+        "only needed on the way, such as searches and pages read, nor what the DAG says already, such as when it "
+        "runs or what its tasks do. This is what's kept now:\n"
         f"<<<\n{kept.strip() or '(nothing yet)'}\n>>>\n"
         f"Reply with everything to keep, as the next run should read it (it replaces what's kept now), in at most "
         f"{CONTEXT_WORDS} words. If nothing should change, reply with just: {UNCHANGED}"

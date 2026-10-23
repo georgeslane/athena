@@ -68,7 +68,9 @@ async def test_running_one_by_hand_says_so(athena):  # noqa: F811
         await a["dags"].engine.wait(run.run_id, timeout=10, stop_on_pause=False)
     finally:
         await a["dags"].stop()
-    assert "it started because George asked for it to run now" in a["server"].requests[0]["messages"][0]["content"]
+    told = a["server"].requests[0]["messages"][0]["content"]
+    assert "it started because George ran it by hand, now, not on a schedule" in told
+    assert "AgenticTask(" not in told and "arrive-home" not in told  # its DAG's file is what's running it
 
 
 # -- the endpoint ---------------------------------------------------------------------------------------

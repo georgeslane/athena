@@ -127,7 +127,10 @@ produces something, Webhook(name): POST /hooks/<name>, DagTrigger("dag_id"): whe
 "claude-done": when Claude finishes a project. A run missed while Athena was off runs when it's back
 (catchup=False on the Dag to skip it).
 On the Dag, a TaskGroup or a task: retries=1 tries a failed task again after retry_delay seconds (default 60);
-ask_user=True lets its tasks ask the user something only they can decide, and wait for the answer."""
+ask_user=True lets its tasks ask the user something only they can decide, and wait for the answer.
+Give each task one job, and a prompt that says exactly what to look at and with what, as "Read today's calendar
+events.", not "Look for events.": a task sees only its prompt and what came before it, so a vague one does other
+tasks' work again. denied_tools=["*mail*"] on a task keeps tools it shouldn't use from it."""
 
 STARTER = """from agentic_airflow import AgenticTask, Dag
 
