@@ -266,7 +266,7 @@ def describe_tools(changes: dict[str, Any]) -> str:
     if "hidden_tools" in changes:
         parts.append(f"Find when needed: {listed(changes['hidden_tools'])}")
     for where, names in (changes.get("allowed_tools") or {}).items():
-        parts.append(f"Use without asking {'in every task' if where == 'dag' else f'in {where}'}: {listed(names)}")
+        parts.append(f"Tools for {'every task' if where == 'dag' else where}: {listed(names)}")
     return "; ".join(parts)
 
 

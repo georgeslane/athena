@@ -76,6 +76,14 @@ class AgentStore:
             rows = self._conn.execute(f"SELECT {self._AGENT} FROM agents ORDER BY id").fetchall()
         return [_agent(row) for row in rows]
 
+    def once(self, name: str) -> bool:
+        """Whether the upgrade ``name`` is still to be made, noting that it's made now, so it's only made once
+        (migrate.py keeps the others)."""
+        with self._lock, self._conn:
+            self._conn.execute("CREATE TABLE IF NOT EXISTS athena_upgrades (name TEXT PRIMARY KEY, made REAL NOT NULL)")
+            added = self._conn.execute("INSERT OR IGNORE INTO athena_upgrades VALUES (?, ?)", (name, self.clock()))
+        return added.rowcount == 1
+
     def update(self, agent_id: int, **values: Any) -> AgentConfig:
         """Change some of an agent's settings: model, guidance, context or dag."""
         allowed = {"model", "guidance", "context", "dag"}

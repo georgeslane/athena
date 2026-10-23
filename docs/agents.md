@@ -6,7 +6,7 @@ Athena revolves around agents. Each agent is something you want Athena to keep a
 - **Its DAG:** the tasks it does by itself, on a schedule or when something happens, written in [agentic-airflow](https://github.com/georgeslane/agentic-airflow)'s Python and run by its engine. See [Writing DAGs](dags.md).
 - **Its guidance:** how Athena acts in it, at a high level: what it's for, what matters, what to avoid. It's at the start of the agent's chat and of each run of its DAG.
 - **Its files:** your CV, notes, or anything else it should know, added with its guidance: PDFs and text files. Its chat and its runs are told they're there, and read them when they'd help.
-- **Its context:** what its DAG's last run kept for the next: say, the jobs it's applied for, rather than the searches it made on the way, or what its DAG says already. Each run's `save_context` task writes it. You can change it on the dashboard, or tell the agent in its chat, such as "that call isn't important", and it changes it with `change_context`.
+- **Its context:** what its DAG's runs last told you, which the next run starts with, together with what you and the agent have said in its chat since. A run with nothing new leaves it as it is. You can change it on the dashboard, or tell the agent in its chat, such as "that call isn't important", and it changes it with `change_context`.
 - **Its model:** any of the model server's models, chosen in **⋯**. Otherwise it uses `[llm] model`.
 
 Make one with **New agent**, and name, mute or delete it from the top of it: deleting it deletes what was said to it, here and in memory, its DAG, the history of its runs and its files.
@@ -48,13 +48,15 @@ You can ask the agent anything while its DAG runs: your message waits for the ta
 
 ### The end of each run
 
-Every DAG ends with five tasks of its own, which aren't in its file, each given the run's log:
+Every DAG ends with two tasks of its own, which aren't in its file, each given the run's log:
 
-1. **review_workflow** looks back at how well the run did what it's for, and can propose a new version of the DAG file: new tasks, changed prompts, work that should run for each item of a list, or only when a yes or no says so.
-2. **review_tools** looks at the tools the run used, and which task used each, and can propose which to hide from the DAG's prompts, to be found when needed, and the tools to let run without asking next time, in one task or in every task. It's skipped if no tools were used.
-3. **review_skills** looks at the skills the run used, and can suggest improvements, for you to approve on the Skills tab. It's skipped if no skills were used.
-4. **save_context** decides what the next run should know, and keeps it as the agent's context.
-5. **summary** tells you what the run did and found, and what it recommends. It always goes into the agent's chat, but only notifies you (in Telegram and on your devices), and tells the master agent, when there's news, or something to approve.
+1. **review** looks back at the run, with tools of its own, which check what they're given and say what's wrong, so the model can put it right there and then:
+   - `set_task_tools` gives a task the tools it needed and no others, from how each task used its tools;
+   - `propose_dag` proposes a new DAG file: a task that did more than one job, or another's work again, an unclear prompt, or a task that's missing or not needed;
+   - `read_skill` and `save_skill` improve a skill the run read, for you to approve on the Skills tab.
+
+   What it changes is proposed as one new file. A file it writes out in its answer, rather than proposing, is proposed all the same.
+2. **summary** tells you what's new, if anything, as a short message: in the agent's chat, and, when there's news or something to approve, in Telegram and on your devices, and to the master agent. What it says is what the next run starts with.
 
 A run that finds nothing, with every list its tasks returned empty and every branch picking none, ends without them: it has nothing to look back on, and checking for something often should cost little. One of them failing doesn't make the run a failure.
 
@@ -68,7 +70,7 @@ The History view shows each agent's last 10 runs: what started each, and what ca
 
 ## What it may do
 
-- **Tools that ask first** still ask you, in Telegram and in the agent's chat, saying which task wants it, unless the DAG allows it (`allowed_tools`, on the DAG, a task group or a task: the whole list of tools that may run without asking). Unanswered after `[tasks] confirm_minutes` (60), it's declined. What you've allowed when talking to the agent doesn't count for its DAG.
+- **A task is given only the tools its list names** (`allowed_tools`, on the DAG, a task group or a task), and they run without asking. A tool that asks first and isn't on its list, it can find when it needs one, and it asks you, in Telegram and in the agent's chat, saying which task wants it. Unanswered after `[tasks] confirm_minutes` (60), it's declined. What you've allowed when talking to the agent doesn't count for its DAG.
 - **Some always ask**, whatever the DAG says: changing a DAG (`change_dag`), and handing work to Claude.
 - **Athena changes an agent's DAG** with `change_dag`, which shows you exactly what changes, and asks first. A run can't change its own DAG: its reviews propose changes instead.
 - **If Athena writes out a DAG file in its answer without saving it,** as a model may while saying it has, it's saved anyway, asking you first like any change. It goes to the agent whose DAG has that id, or the one you're talking to. The answer ends by saying whether it was saved.

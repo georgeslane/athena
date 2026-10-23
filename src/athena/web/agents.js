@@ -245,7 +245,7 @@ function mountView(id) {
 const TEXTS = {
   context: {
     title: "What its last run kept",
-    help: "What its DAG's last run kept for the next one: its save_context task writes it at the end of each run, and the next run starts with it. You can change it too.",
+    help: "What its runs last told you, which the next run starts with, with what you've said in its chat since. A run with nothing new leaves it as it is. You can change it here, or tell the agent in its chat.",
     empty: "Nothing yet: its first run keeps what's worth keeping.",
     placeholder: "The CV, what's been applied for already…",
   },

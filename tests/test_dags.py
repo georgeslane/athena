@@ -3,7 +3,6 @@ model and tools; tools that ask first; alerts and summaries; webhooks, assets an
 with and what they propose; your messages and their tasks taking turns with the model; and the master agent."""
 
 import asyncio
-import json
 
 import pytest
 from agentic_airflow import DagRun, RunStatus
@@ -20,6 +19,7 @@ from athena.dags.reader import (
     as_dict,
     read,
     unknown_tools,
+    unlisted,
     when,
     with_tools,
 )
@@ -197,9 +197,7 @@ class FakeChannel:
 
 END = {
     "run's own tasks have finished": "NO CHANGES",
-    "Look at the tools this run used": "NO CHANGES",
-    "Decide what this DAG's next run should know": "UNCHANGED",
-    "Write George a short summary": "All done: nothing much.",
+    "Now tell George what this run found": "All done: nothing much.",
 }
 
 
@@ -320,7 +318,7 @@ async def test_a_dag_runs_its_tasks_in_order_with_athenas_model_and_tools(athena
             "Find new jobs": [calls(("look", {"what": "the job boards"})), "Two jobs: Acme and Globex."],
             "Apply to them.": "Applied to Acme and Globex.",
             "Say what was applied for": "Acme and Globex.",
-            "Write George a short summary": "Applied to two jobs: Acme and Globex.",
+            "Now tell George what this run found": "Applied to two jobs: Acme and Globex.",
         }
     )
     a["dags"].save(a["jobs"], THREE)
@@ -340,8 +338,8 @@ async def test_a_dag_runs_its_tasks_in_order_with_athenas_model_and_tools(athena
     assert "This is George's agent “Job hunting”." in system and "This is run #1 of your agent's DAG jobs" in system
     # What apply found was told, as it alerts; then the summary, here and in the master agent's chat.
     said = [text for text, _ in a["channel"].said]
-    assert said[0].startswith("📋 **Job hunting** · task “apply”") and "Applied to Acme" in said[0]
-    assert said[-1] == "📋 **Job hunting**\n\nApplied to two jobs: Acme and Globex."
+    assert said[0] == "**Job hunting:** Applied to Acme and Globex."  # as a message, named for whose it is
+    assert said[-1] == "**Job hunting:** Applied to two jobs: Acme and Globex."
     assert run.summary == "Applied to two jobs: Acme and Globex."
     master = [m.text for m in a["history"].messages(a["dags"].master)[0]]
     assert "(From your agent “Job hunting”, its DAG run #1: summary)" in master
@@ -514,17 +512,17 @@ with Dag("review", prompt="Review what Claude did.", schedule=[Asset("claude-don
 
 
 @pytest.mark.asyncio
-async def test_the_reviews_propose_changes_you_approve_or_reject(athena):
+async def test_the_review_proposes_its_changes_as_one_file_you_approve(athena):
     better = THREE.replace("Say what was applied for.", "List what was applied for, with links.")
     a = athena(
         {
+            "run's own tasks have finished": [
+                calls(("set_task_tools", {"task": "apply", "tools": ["look", "publish"], "why": "It publishes."})),
+                calls(("propose_dag", {"source": better, "why": "The report should link each job."})),
+                "Changed the report, and apply's tools.",
+            ],
             "Find new jobs": [calls(("look", {"what": "boards"})), "Acme."],
-            "run's own tasks have finished": f"The report should link each job.\n```python\n{better}```",
-            "Look at the tools this run used": (
-                'Hide publish, and let apply publish.\n```json\n{"hidden_tools": ["publish"], '
-                '"allowed_tools": {"apply": ["look", "publish"]}, "why": "unused"}\n```'
-            ),
-            "Write George a short summary": "Applied to Acme. I've proposed two changes.",
+            "Now tell George what this run found": "Applied to Acme. I've proposed a change.",
         }
     )
     a["dags"].save(a["jobs"], THREE)
@@ -532,65 +530,149 @@ async def test_the_reviews_propose_changes_you_approve_or_reject(athena):
     await a["dags"].start()
     try:
         run = await run_once(a, a["jobs"])
-        shown = a["dags"].describe(a["jobs"])["proposals"]
-        workflow, tools = proposals.waiting(a["jobs"])
-        assert workflow["payload"]["what"] == "workflow" and workflow["payload"]["definition"] == better
-        assert workflow["kind"] == "definition" and workflow["run_id"] == run.run_id
-        changes = {"hidden_tools": ["publish"], "allowed_tools": {"apply": ["look", "publish"]}}
-        assert tools["payload"]["what"] == "tools" and tools["payload"]["changes"] == changes
-        summary = next(t for t in a["model"].asked if "Write George a short summary" in t)
-        assert "A change to the DAG: The report should link each job." in summary
-        assert "Tools: Find when needed: publish; Use without asking in apply: look, publish" in summary
+        (proposal,) = proposals.waiting(a["jobs"])  # one file, with all of it
+        expected = with_tools(better, {"allowed_tools": {"apply": ["look", "publish"]}})
+        assert proposal["payload"]["what"] == "workflow" and proposal["payload"]["definition"] == expected
+        assert proposal["run_id"] == run.run_id
+        review = next(t for t in a["model"].asked if "run's own tasks have finished" in t)
+        assert "- find_jobs: given look; used look ×1" in review and "- apply: given look; used none" in review
+        assert "Tools there are: look, publish, wait_here" in review and "3. Skills" not in review
+        said = {m["content"] for body in a["server"].requests for m in body["messages"] if m["role"] == "tool"}
+        assert "Noted: apply would be given look, publish, once George approves it." in said
+        summary = next(t for t in a["model"].asked if "Now tell George what this run found" in t)
+        assert "A change to the DAG: It publishes. The report should link each job." in summary
         assert "⚠️ It would let these run without asking you: publish (in apply)." in summary
-        assert '+    report = AgenticTask("report", prompt="List what was applied for' in shown[0]["diff"]
-        assert shown[0]["unasked"] == [] and shown[1]["unasked"] == ["publish (in apply)"]
-        assert shown[1]["summary"].startswith("Find when needed: publish") and shown[1]["by"] == "a run"
-        # Approving the tools change changes the file where it's written, and the workflow change still applies.
-        assert await proposals.decide(tools["id"], True) == a["jobs"]
-        assert read(a["store"].get(a["jobs"]).dag).scope.hidden_tools == ["publish"]
-        waiting = proposals.waiting(a["jobs"])[0]
-        assert waiting["id"] == workflow["id"] and 'hidden_tools=["publish"]' in waiting["payload"]["definition"]
-        await proposals.decide(workflow["id"], True)
+        await proposals.decide(proposal["id"], True)
         dag = read(a["store"].get(a["jobs"]).dag)
-        assert dag.scope.hidden_tools == ["publish"] and "with links" in dag.get("report").prompt
-        with pytest.raises(ValueError, match="isn't waiting"):
-            await proposals.decide(workflow["id"], False)
-        assert [p["state"] for p in map(proposals.show, proposals.of_run(run.run_id))] == ["approved", "approved"]
+        assert dag.get("apply").scope.allowed_tools == ["look", "publish"] and "with links" in dag.get("report").prompt
     finally:
         await a["dags"].stop()
 
 
 @pytest.mark.asyncio
-async def test_a_proposed_dag_that_wont_read_is_sent_back_once(athena):
+async def test_a_review_that_only_changes_tools_proposes_them_for_the_file_as_it_is(athena):
+    a = athena({"run's own tasks have finished": [calls(("set_task_tools", {"task": "report", "tools": []})), "Done."]})
+    a["dags"].save(a["jobs"], THREE)
+    await a["dags"].start()
+    try:
+        await run_once(a, a["jobs"])
+        (proposal,) = a["dags"].proposals.waiting(a["jobs"])
+    finally:
+        await a["dags"].stop()
+    assert proposal["payload"]["what"] == "tools" and proposal["payload"]["changes"] == {
+        "allowed_tools": {"report": []}
+    }
+    summary = next(t for t in a["model"].asked if "Now tell George what this run found" in t)
+    assert "Tools: Tools for report: [] (none)" in summary
+
+
+@pytest.mark.asyncio
+async def test_the_reviews_tools_say_whats_wrong_so_it_can_put_it_right(athena):
     a = athena(
         {
-            "run's own tasks have finished": "Change it.\n```python\nwith Dag('jobs'):\n    pass\n```",
-            "That DAG file won't do": "NO CHANGES",
+            "run's own tasks have finished": [
+                calls(("set_task_tools", {"task": "apply", "tools": ["nope"]})),
+                calls(("set_task_tools", {"task": "other", "tools": ["look"]})),
+                calls(("set_task_tools", {"task": "apply", "tools": "look"})),
+                calls(("propose_dag", {"source": "with Dag('jobs'):\n    pass\n"})),
+                "NO CHANGES",
+            ]
         }
     )
     a["dags"].save(a["jobs"], THREE)
     await a["dags"].start()
     try:
         run = await run_once(a, a["jobs"])
-        assert a["dags"].proposals.waiting(a["jobs"]) == [] and run.status == RunStatus.SUCCESS
+        waiting = a["dags"].proposals.waiting(a["jobs"])
     finally:
         await a["dags"].stop()
-    assert any("That DAG file won't do: Line 1: Dag needs id, prompt" in t for t in a["model"].asked)
+    said = {m["content"] for body in a["server"].requests for m in body["messages"] if m["role"] == "tool"}
+    assert any(
+        s.startswith("Error: no tool is called nope. The tools there are: look, publish, wait_here") for s in said
+    )
+    assert "Error: there's no task called 'other': give one of find_jobs, apply, report, or \"dag\"." in said
+    assert "Error: Invalid arguments for set_task_tools: $.tools: expected type array, got str" in said
+    assert any(s.startswith("Error: that DAG file won't do: Line 1: Dag needs id, prompt") for s in said)
+    assert waiting == [] and went(run)["end.review"] == "success"
 
 
 @pytest.mark.asyncio
-async def test_saving_context_keeps_what_the_next_run_should_know(athena):
-    a = athena({"Decide what this DAG's next run should know": "Applied: Acme (22 Oct)."})
+async def test_a_dag_the_review_writes_out_rather_than_proposes_is_proposed(athena):
+    better = THREE.replace("Say what was applied for.", "List what was applied for, with links.")
+    a = athena({"run's own tasks have finished": f"The report should link each job.\n```python\n{better}```"})
     a["dags"].save(a["jobs"], THREE)
     await a["dags"].start()
     try:
         await run_once(a, a["jobs"])
-        assert a["store"].get(a["jobs"]).context == "Applied: Acme (22 Oct)."
+        (proposal,) = a["dags"].proposals.waiting(a["jobs"])
+    finally:
+        await a["dags"].stop()
+    assert proposal["payload"]["definition"] == better and proposal["rationale"] == "The report should link each job."
+
+
+def test_the_reviews_tools_act_only_for_a_runs_review(athena):
+    from agentic_airflow import ToolContext
+
+    a = athena()
+    tools = {t.name: t for t in ends.review_tools(a["dags"])}
+    run = DagRun("r", "jobs", RunStatus.RUNNING, {})
+    task = ToolContext("r", "jobs", "find_jobs", "find_jobs", run=run)  # say a task given every tool, with "*"
+    assert tools["propose_dag"].fn(task, source=THREE) == "Error: Only the review at the end of a run can do that."
+    assert tools["set_task_tools"].fn(task, task="dag", tools=[]).startswith("Error: Only the review")
+
+
+@pytest.mark.asyncio
+async def test_what_a_run_tells_you_is_what_the_next_starts_with_unless_it_had_nothing_new(athena):
+    a = athena({"Now tell George what this run found": ["Acme's hiring: I applied.", "[quiet]", "Nothing [QUIET]"]})
+    a["dags"].save(a["jobs"], THREE)
+    await a["dags"].start()
+    try:
+        await run_once(a, a["jobs"])
+        assert a["store"].get(a["jobs"]).context == "Acme's hiring: I applied."
+        await run_once(a, a["jobs"])  # nothing new: it's kept as it was
+        assert a["store"].get(a["jobs"]).context == "Acme's hiring: I applied."
         await run_once(a, a["jobs"])
     finally:
         await a["dags"].stop()
-    second = [b for b in a["server"].requests if "This is run #2" in b["messages"][0]["content"]]
-    assert second and "Applied: Acme (22 Oct)." in second[0]["messages"][0]["content"]
+    second = next(b for b in a["server"].requests if "This is run #2" in b["messages"][0]["content"])
+    assert "Acme's hiring: I applied." in second["messages"][0]["content"]
+    summaries = [said for said, _ in a["channel"].said if not said.endswith("Done.")]  # not apply's alerts
+    assert summaries == ["**Job hunting:** Acme's hiring: I applied."]  # nothing new: you're not told
+
+
+@pytest.mark.asyncio
+async def test_a_task_is_given_only_the_tools_its_list_names(athena):
+    a = athena({"Find new jobs": "Acme."})
+    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', ""))  # no list: no tools
+    await a["dags"].start()
+    try:
+        await run_once(a, a["jobs"])
+        a["dags"].save(a["jobs"], THREE)
+        await run_once(a, a["jobs"])
+    finally:
+        await a["dags"].stop()
+    finds = [b for b in a["server"].requests if b["messages"][-1]["content"].endswith("Find new jobs that fit my CV.")]
+    offered = [sorted(t["function"]["name"] for t in b.get("tools") or []) for b in finds]
+    assert offered[0] == ["search_tools"]  # publish asks first: found when it's needed, and it asks
+    assert offered[1] == ["look", "search_tools"]
+
+
+@pytest.mark.asyncio
+async def test_a_dag_from_before_lists_the_tools_each_task_used(athena):
+    a = athena({"Find new jobs": [calls(("look", {"what": "boards"})), "Acme."]})
+    assert a["store"].once("test-upgrade") and not a["store"].once("test-upgrade")
+    a["dags"].save(a["jobs"], THREE)
+    await a["dags"].start()
+    try:
+        await run_once(a, a["jobs"])
+        before = THREE.replace(', allowed_tools=["look"]', "")  # as it was written before: every tool, unlisted
+        a["store"].update(a["jobs"], dag=before)
+        a["dags"]._list_tools()
+    finally:
+        await a["dags"].stop()
+    dag = read(a["store"].get(a["jobs"]).dag)
+    assert dag.scope.allowed_tools == [] and dag.get("find_jobs").scope.allowed_tools == ["look"]
+    assert dag.get("apply").scope.allowed_tools == [] and unlisted(a["store"].get(a["jobs"]).dag) == []
 
 
 @pytest.mark.asyncio
@@ -853,13 +935,12 @@ async def test_what_an_agent_keeps_can_be_changed_by_chatting_but_not_by_a_run(a
     )
 
 
-def test_dags_are_written_with_a_job_for_each_task_and_what_runs_keep_isnt_the_dag():
-    from athena.dags.ends import save_context, workflow
+def test_dags_are_written_with_a_job_for_each_task_and_you_are_told_what_s_new_plainly():
     from athena.dags.reader import REFERENCE
 
-    assert "Give each task one job" in REFERENCE and 'denied_tools=["*mail*"]' in REFERENCE
-    assert "did more than one thing or did another's work again" in workflow(THREE)
-    assert "nor what the DAG says already, such as when it runs or what its tasks do" in save_context("", "George")
+    assert "Give each task one job" in REFERENCE and "a task is given only those its allowed_tools lists" in REFERENCE
+    told = ends.summarising("George", [], [])
+    assert "no title, heading, date or time" in told and "the next run starts with what you say" in told
 
 
 def test_agents_files_are_listed_in_what_their_conversations_start_with(athena):
@@ -873,28 +954,6 @@ def test_a_new_agents_dag_starts_with_its_name(athena):
     starter = a["dags"].starter(a["jobs"])
     assert 'Dag("job_hunting", prompt="What Job hunting is for."' in starter
     assert read(starter).id == "job_hunting" and a["dags"].starter(a["dags"].master) == MASTER_STARTER
-
-
-def test_the_tool_reviews_answer_is_checked():
-    known, always, tasks = ["look", "publish", "change_dag"], ["change_dag"], ["find"]
-    assert ends.proposed_tools("NO CHANGES", known, always, tasks) is None
-    changes, why = ends.proposed_tools(
-        '```json\n{"allowed_tools": {"find": ["look", "change_dag"]}, "hidden_tools": ["pub*"], "why": "w"}\n```',
-        known,
-        always,
-        tasks,
-    )
-    assert changes == {"hidden_tools": ["pub*"], "allowed_tools": {"find": ["look"]}} and why == "w"
-    for bad, says in [
-        ('```json\n{"hidden_tools": ["nope"]}\n```', "No tool is called nope"),
-        ('```json\n{"allowed_tools": {"other": ["look"]}}\n```', "There's no task called 'other'"),
-        ("```json\nnot json\n```", "isn't valid JSON"),
-    ]:
-        with pytest.raises(ValueError, match=says):
-            ends.proposed_tools(bad, known, always, tasks)
-    assert json.dumps(ends.describe_tools(changes)) == json.dumps(
-        "Find when needed: pub*; Use without asking in find: look"
-    )
 
 
 @pytest.mark.asyncio
@@ -918,8 +977,11 @@ async def test_failures_are_skipped_after_and_said_in_the_summary(athena):
     assert states["urgent_1"] == "failed" and states["draft_1"] == "upstream_failed"  # Bob's answer was no choice
     assert states["draft_0"] == "success" and states["report"] == "upstream_failed"
     assert run.status == RunStatus.FAILED
-    summary = next(t for t in a["model"].asked if "Write George a short summary" in t)
-    assert "These tasks didn't finish: urgent (for 1 of its 2 items), draft (for 1 of its 2 items), report." in summary
+    summary = next(t for t in a["model"].asked if "Now tell George what this run found" in t)
+    assert (
+        "These tasks didn't finish, so say so: urgent (for 1 of its 2 items), draft (for 1 of its 2 items), report."
+        in summary
+    )
 
 
 @pytest.mark.asyncio
@@ -935,7 +997,7 @@ async def test_when_the_model_breaks_the_run_says_its_summary_couldnt_be_written
         await a["dags"].stop()
     states = went(run)
     assert states["find_jobs"] == "failed" and states["apply"] == "upstream_failed"
-    assert states["end.review_workflow"] == "failed" and states["end.summary"] == "failed"  # the end tasks try
+    assert states["end.review"] == "failed" and states["end.summary"] == "failed"  # the end tasks try
     assert run.summary == "The run finished, but its summary couldn't be written." and run.status == RunStatus.FAILED
     assert a["channel"].said[-1][0].endswith("its summary couldn't be written.")
 
@@ -943,7 +1005,7 @@ async def test_when_the_model_breaks_the_run_says_its_summary_couldnt_be_written
 @pytest.mark.asyncio
 async def test_a_quiet_summary_doesnt_disturb_you_and_nor_does_a_muted_agent(athena):
     for muted, said in ((False, "[quiet] Nothing new: no jobs today."), (True, "Found a job!")):
-        a = athena({"Write George a short summary": said})
+        a = athena({"Now tell George what this run found": said})
         a["history"].set_muted(a["jobs"], muted)
         a["dags"].save(a["jobs"], THREE.replace(", on_complete=alert", ""))
         await a["dags"].start()
@@ -1061,20 +1123,21 @@ async def test_a_skill_read_in_a_run_is_looked_back_on_at_its_end(athena):
     a = athena(
         {
             "Find new jobs": [calls(("read_skill", {"name": "Applying"})), "Found."],
-            "You used your skill “Applying”": "NO CHANGE",
         }
     )
     skills = Skills(SkillStore(a["db"]), a["history"], timezone="UTC")
     skills.save(None, "Applying", "When applying for jobs", "Use the CV.", by="you")
     for tool in skills.tools():
         a["tools"].add(tool)
-    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', ""))
+    a["dags"].save(a["jobs"], THREE.replace('allowed_tools=["look"]', 'allowed_tools=["read_skill"]'))
     await a["dags"].start()
     try:
         run = await run_once(a, a["jobs"])
     finally:
         await a["dags"].stop()
-    assert went(run)["end.review_skills"] == "success" and run.outputs()["end.review_skills"] == "NO CHANGE"
+    review = next(t for t in a["model"].asked if "run's own tasks have finished" in t)
+    assert "3. Skills. It read “Applying”. If a change would make one go better" in review
+    assert went(run)["end.review"] == "success"
 
 
 @pytest.mark.asyncio
@@ -1201,7 +1264,7 @@ async def test_agent_runs_reads_what_agents_runs_did(athena):
             "Find new jobs": "Acme.",
             "Apply to them.": "Applied to Acme.",
             "Say what was applied for": "Acme.",
-            "Write George a short summary": "Applied to Acme.",
+            "Now tell George what this run found": "Applied to Acme.",
         }
     )
     dags, jobs = a["dags"], a["jobs"]

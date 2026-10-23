@@ -58,11 +58,8 @@ CLAUDE_DONE = "claude-done"  # the asset Claude finishing a project updates (cla
 END_GROUP = "end"  # the id of the tasks every DAG ends with (ends.py), which a file's ids can't start with
 # Those tasks, in order: (id, what it does).
 END_TASKS = (
-    ("review_workflow", "Looks back at how well the run did what it's for, and proposes changes to its tasks"),
-    ("review_tools", "Proposes which tools to keep out of the prompt, and which may run without asking"),
-    ("review_skills", "Proposes improvements to the skills the run used"),
-    ("save_context", "Keeps what the next run should know"),
-    ("summary", "Tells you what the run did and found, and what it recommends"),
+    ("review", "Looks back at the run: proposes changes to its tasks and their tools, and improves skills it used"),
+    ("summary", "Tells you what's new, if anything, which the next run starts with"),
 )
 MAX_SOURCE = 40_000  # characters
 MAX_TASKS = 30
@@ -114,9 +111,9 @@ REFERENCE = """DAG files are agentic-airflow Python, read and never run (docs/da
 from agentic_airflow import AgenticBranch, AgenticTask, Asset, Dag, Task, TaskGroup, Webhook, trigger_items
 from athena.dags import alert
 with Dag("dag_id", prompt="What it's for", schedule=["30 7 * * 1-5", Asset("job-emails"), Webhook("arrive-home")],
-         allowed_tools=["fetch", "read_file"]):  # allowed_tools: ALL the tools its tasks may use without asking
+         allowed_tools=["fetch"]):  # the tools its tasks are given: a task's own list replaces it
     jobs = AgenticTask("jobs", prompt="List new jobs: one item each.", return_type="list")  # fan_out: one each
-    fits = AgenticBranch("fits", prompt="Does it fit my CV?", allow_none=True)  # picks a next task, or "none"
+    fits = AgenticBranch("fits", prompt="Does it fit my CV?", allow_none=True, allowed_tools=["read_file"])
     apply = AgenticTask("apply", prompt="Apply.", follow_mapping=True, on_complete=alert)  # per item; tells user
     report = AgenticTask("report", prompt="Say what was applied for.", outlets=[Asset("applied")])
     jobs >> fits >> apply >> report  # report joins: it gets every item's output
@@ -128,26 +125,31 @@ produces something, Webhook(name): POST /hooks/<name>, DagTrigger("dag_id"): whe
 (catchup=False on the Dag to skip it).
 On the Dag, a TaskGroup or a task: retries=1 tries a failed task again after retry_delay seconds (default 60);
 ask_user=True lets its tasks ask the user something only they can decide, and wait for the answer.
+Tools: a task is given only those its allowed_tools lists (patterns such as "news_*" work), and they run without
+asking, apart from those that always ask. Others that ask first it can find when it needs one, and they ask; others
+it never has. So list each task's own, and only what it needs.
 Give each task one job, and a prompt that says exactly what to look at and with what, as "Read today's calendar
 events.", not "Look for events.": a task sees only its prompt and what came before it, so a vague one does other
-tasks' work again. denied_tools=["*mail*"] on a task keeps tools it shouldn't use from it."""
+tasks' work again."""
 
 STARTER = """from agentic_airflow import AgenticTask, Dag
 
 # What this agent does by itself. Give it a schedule, such as ["0 9 * * *"], to run on its own, and press Run
-# now to try it.
-with Dag("{dag_id}", prompt="{purpose}", schedule=[]):
+# now to try it. allowed_tools are the tools its tasks are given, such as ["fetch", "read_file"].
+with Dag("{dag_id}", prompt="{purpose}", schedule=[], allowed_tools=[]):
     check = AgenticTask("check", prompt="Check on what this agent is for, and say what's new.")
 """
 
 MASTER_STARTER = """from agentic_airflow import AgenticTask, Asset, Dag
 
 # What the master agent keeps an eye on for you. What a task with outlets finds starts the DAGs of your other
-# agents with that asset in their schedule. Give it a schedule, such as ["@hourly"], to check by itself.
+# agents with that asset in their schedule. Give it a schedule, such as ["@hourly"], to check by itself, and each
+# task the tools it uses, in allowed_tools.
 with Dag("master", prompt="Keep an eye on things for the user's other agents.", schedule=[]):
     job_emails = AgenticTask(
         "job_emails",
         prompt="Look through my emails since the last run for new ones about jobs: one item for each.",
+        allowed_tools=[],  # the email server's tools that read mail
         return_type="list",
         fan_out=False,
         outlets=[Asset("job-emails")],  # starts the DAGs with Asset("job-emails") in their schedule
@@ -179,9 +181,16 @@ class Hook:
         return self.name
 
 
-def read(source: str, *, timezone: str = "UTC", hooks: Mapping[str, Callable[..., Any]] | None = None) -> Dag:
+def read(
+    source: str,
+    *,
+    timezone: str = "UTC",
+    hooks: Mapping[str, Callable[..., Any]] | None = None,
+    as_written: bool = False,
+) -> Dag:
     """The DAG a file describes, validated. ``hooks`` are Athena's functions (HOOKS) its operators can name.
-    DagError, saying what and where, if it won't do."""
+    ``as_written``: without what Athena gives a DAG that doesn't say, such as an empty list of tools. DagError,
+    saying what and where, if it won't do."""
     if len(source) > MAX_SOURCE:
         raise DagError(f"That's over {MAX_SOURCE:,} characters: a DAG should be much shorter.")
     try:
@@ -204,7 +213,7 @@ def read(source: str, *, timezone: str = "UTC", hooks: Mapping[str, Callable[...
         raise _error(statement, "Outside the DAG, only imports go here: put everything in one `with Dag(...):` block.")
     if block is None:
         raise DagError('There\'s no `with Dag("dag_id", prompt="..."):` block.', 1)
-    reader = _Reader(timezone, {name: Hook(name, (hooks or {}).get(name)) for name in HOOKS})
+    reader = _Reader(timezone, {name: Hook(name, (hooks or {}).get(name)) for name in HOOKS}, as_written)
     dag = reader.dag(block)
     dag.definition = source  # what a proposal for it replaces (proposals.py)
     return dag
@@ -223,8 +232,9 @@ class _Reader:
     they're assigned; the package's operators and triggers, and the functions a DAG can use, are known from the
     start."""
 
-    def __init__(self, timezone: str, hooks: dict[str, Callable[..., Any]]):
+    def __init__(self, timezone: str, hooks: dict[str, Callable[..., Any]], as_written: bool = False):
         self.timezone = timezone
+        self.as_written = as_written
         self.functions: dict[str, Callable[..., Any]] = {
             "trigger_items": trigger_items,
             "found_nothing": found_nothing,
@@ -368,6 +378,8 @@ class _Reader:
             args[keyword.arg] = self.argument(name, keyword.arg, keyword.value)
         if name == "Dag":  # a run missed while the Pi was off runs when it's back
             args.setdefault("catchup", True)
+            if not self.as_written:
+                args.setdefault("allowed_tools", [])  # its tasks are given only the tools their lists name
         if name == "Cron":
             args.setdefault("timezone", self.timezone)
             self.cron(args.get("expression"), call)
@@ -604,3 +616,18 @@ def _said(exc: Exception) -> str:
 
 def _error(node: ast.AST, message: str) -> DagError:
     return DagError(message, getattr(node, "lineno", 0), getattr(node, "col_offset", 0) + 1)
+
+
+def unlisted(source: str) -> list[str]:
+    """The DAG's own tasks that no list of tools covers, as it's written: not their own, a group's or the DAG's."""
+    dag = read(source, as_written=True)
+    found = []
+    for task in dag.own_tasks():
+        scopes = [task.scope, dag.scope]
+        group = task.group
+        while group is not None and not getattr(group, "is_dag", False):
+            scopes.append(group.scope)
+            group = group.parent
+        if all(scope.allowed_tools is None for scope in scopes):
+            found.append(task.id)
+    return found

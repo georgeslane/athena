@@ -390,7 +390,7 @@ async def test_an_agents_dag_from_the_dashboard(chat):
         runs = (await http.get("/api/agents/1/runs")).json()["runs"]
         assert [(r["number"], r["state"]) for r in runs] == [(1, "success")] and "tasks" not in runs[0]
         detail = (await http.get(f"/api/runs/{run.run_id}")).json()
-        assert [t["task"] for t in detail["tasks"]][:2] == ["find", "end.review_workflow"]
+        assert [t["task"] for t in detail["tasks"]][:2] == ["find", "end.review"]
         assert detail["dag"]["id"] == "jobs" and detail["agent"] == 1
         assert (await http.get("/api/runs/run_nope")).status_code == 404
 
