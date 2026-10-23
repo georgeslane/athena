@@ -917,6 +917,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .approval-args { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); font: 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
 .approval-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .approval-time { flex: 1 1 auto; }
+.question-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.question-choices { display: flex; flex-wrap: wrap; gap: 6px; }
+.question-form { display: flex; gap: 8px; }
+.question-reply { flex: 1 1 auto; min-width: 0; font-size: 16px; }
 
 .composer { position: relative; display: grid; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); }
 .composer-row { display: flex; align-items: flex-end; gap: 8px; }
@@ -1036,6 +1040,22 @@ dl.reference dd { margin: 0; color: var(--muted); }
 .code-problem[data-kind="error"] { color: var(--failed); }
 .code-problem[data-kind="warning"] { color: var(--approval); }
 .dag-drawing.stale { opacity: 0.45; }
+/* "Full page": the file and its drawing fill the window, side by side, or one above the other on a phone. */
+body.no-scroll { overflow: hidden; }
+.dag-full-bar { display: none; }
+.dag-view.full { position: fixed; inset: 0; z-index: 20; padding: max(12px, env(safe-area-inset-top)) var(--gutter) max(12px, env(safe-area-inset-bottom)); background: var(--bg); grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); grid-template-rows: auto minmax(0, 1fr); align-content: stretch; overflow: hidden; }
+.dag-view.full > .dag-full-bar { display: flex; grid-column: 1 / -1; align-items: baseline; gap: 10px; min-width: 0; }
+.dag-full-bar h2 { font-size: 17px; }
+.dag-full-bar .aside { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; }
+.dag-view.full > .dag-summary, .dag-view.full > .proposals, .dag-view.full .full-toggle { display: none; }
+.dag-view.full > .dag-editor { grid-column: 1; grid-row: 2; display: flex; flex-direction: column; min-height: 0; }
+.dag-view.full .code { flex: 1; min-height: 0; max-height: none; }
+.dag-view.full > .dag-graph { grid-column: 2; grid-row: 2; min-height: 0; overflow: auto; }
+@media (max-width: 899px) {
+  .dag-view.full { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 3fr) minmax(0, 2fr); }
+  .dag-view.full > .dag-graph { grid-column: 1; grid-row: 3; }
+}
+.full-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
 .code-sample { margin: 8px 0; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); font: 12.5px/1.5 var(--font-mono); white-space: pre; overflow-x: auto; }
 .help-list { display: grid; gap: 6px; margin: 8px 0; padding-left: 20px; font-size: 14px; }
 .dialog h3 { margin-top: 12px; font-size: 15px; }
@@ -1072,6 +1092,7 @@ button.graph-node:hover { border-color: var(--divider); }
 .graph-node[data-state] { border-left-width: 4px; }
 .graph-node[data-state="success"], .graph-chip[data-state="success"] { border-color: var(--idle); }
 .graph-node[data-state="running"], .graph-chip[data-state="running"] { border-color: var(--working); }
+.graph-node[data-state="awaiting_tool_approval"], .graph-node[data-state="awaiting_user"] { border-color: var(--approval); }
 .graph-node[data-state="failed"], .graph-chip[data-state="failed"], .graph-node[data-state="upstream_failed"] { border-color: var(--failed); }
 .graph-node[data-state="skipped"], .graph-node[data-state="stopped"], .graph-chip[data-state="skipped"], .graph-chip[data-state="stopped"] { opacity: 0.55; }
 .graph-end { display: grid; gap: 6px; width: fit-content; max-width: min(100%, 440px); margin: 0 auto; padding: 8px 10px; border-radius: 12px; border: 1px dashed var(--divider); background: var(--surface-2); }
@@ -1116,6 +1137,7 @@ button.graph-chip { cursor: pointer; }
 .run-task { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); border-left-width: 4px; }
 .run-task[data-state="success"] { border-left-color: var(--idle); }
 .run-task[data-state="running"] { border-left-color: var(--working); }
+.run-task[data-state="awaiting_tool_approval"], .run-task[data-state="awaiting_user"] { border-left-color: var(--approval); }
 .run-task[data-state="failed"], .run-task[data-state="upstream_failed"] { border-left-color: var(--failed); }
 .run-task summary { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .run-task summary code { font-weight: 700; }

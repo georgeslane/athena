@@ -18,7 +18,7 @@ resolution-markers = [
 [[package]]
 name = "agentic-airflow"
 version = "0.1.0"
-source = { git = "https://github.com/georgeslane/agentic-airflow?rev=cd04226f7a11450d63a6d6c4c865be574e7358ff#cd04226f7a11450d63a6d6c4c865be574e7358ff" }
+source = { git = "https://github.com/georgeslane/agentic-airflow?rev=e88793a80d2739fce2e9ef1da6b10f9cd7ed5f6b#e88793a80d2739fce2e9ef1da6b10f9cd7ed5f6b" }
 
 [[package]]
 name = "annotated-types"
@@ -79,7 +79,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentic-airflow", git = "https://github.com/georgeslane/agentic-airflow?rev=cd04226f7a11450d63a6d6c4c865be574e7358ff" },
+    { name = "agentic-airflow", git = "https://github.com/georgeslane/agentic-airflow?rev=e88793a80d2739fce2e9ef1da6b10f9cd7ed5f6b" },
     { name = "fpdf2", specifier = ">=2.8" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "markdown-it-py", specifier = ">=3" },

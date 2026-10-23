@@ -26,6 +26,8 @@ def started_by(run: DagRun, user: str = "you") -> str:
     """Why a run started, in words: "on its schedule", "when arrive-home came in"..."""
     trigger = run.trigger
     source = trigger.get("source")
+    if source == "cron" and trigger.get("catchup"):
+        return "on its schedule, late: it was missed while Athena was off"
     if source == "cron":
         return "on its schedule"
     if source == "manual":
@@ -121,7 +123,9 @@ def _step(call: dict[str, Any]) -> dict[str, Any]:
     step = {
         "tool": call.get("name"),
         "given": short(json.dumps(call.get("arguments") or {}, ensure_ascii=False), STEP_CHARS),
-        "outcome": {"ok": "ran", "approved": "ran", "error": "failed", "rejected": "declined"}.get(status, status),
+        "outcome": {"ok": "ran", "approved": "ran", "answered": "ran", "error": "failed", "rejected": "declined"}.get(
+            status, status
+        ),
         "said": short(str(call.get("result") or ""), STEP_CHARS),
     }
     if status == "approved":

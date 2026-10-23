@@ -153,6 +153,8 @@ class TasksConfig(_Section):
     max_tool_rounds: int = 25
     thinking: Literal["on", "short", "off"] | None = "on"  # tasks aren't in a hurry: None follows [llm]
     confirm_minutes: float = 60.0  # how long a task waits for you to allow a tool that asks first
+    ask_minutes: float = 240.0  # how long a task with ask_user waits for your answer, then decides for itself
+    retries: int = Field(default=1, ge=0, le=3)  # times a failed task's tried again, unless its DAG says otherwise
 
 
 class TriggersConfig(_Section):

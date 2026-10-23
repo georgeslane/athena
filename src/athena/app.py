@@ -260,13 +260,17 @@ class Services:
         self._later(self._notify_about(reply.session, result.text))
 
     def _asking(self, approval: Approval) -> None:
-        """Your devices hear when Athena's waiting for your OK."""
+        """Your devices hear when Athena's waiting for your OK, or a task's asked you something."""
         if approval.verdict:  # answered
             return
-        said = f"{approval.why}: allow {approval.tool}?" if approval.why else f"Allow {approval.tool}?"
-        if approval.summary:
-            said += f" {approval.summary}"
-        title = f"{self.config.agent.assistant_name} needs your OK"
+        if approval.question is not None:
+            said = f"{approval.why}: {approval.question}" if approval.why else approval.question
+            title = f"{self.config.agent.assistant_name} has a question"
+        else:
+            said = f"{approval.why}: allow {approval.tool}?" if approval.why else f"Allow {approval.tool}?"
+            if approval.summary:
+                said += f" {approval.summary}"
+            title = f"{self.config.agent.assistant_name} needs your OK"
         url = f"#agents/{approval.session}" if approval.session is not None else "#agents"
         self._later(self.notify_devices(title, said, url=url, tag=f"ask-{approval.id}", urgent=True))
 

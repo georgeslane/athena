@@ -255,6 +255,7 @@ function failedMessage(failed) {
 }
 
 function approvalCard(a) {
+  if (a.question !== null && a.question !== undefined) return questionCard(a);
   return h(
     "li.approval",
     {},
@@ -275,6 +276,30 @@ function approvalCard(a) {
   );
 }
 
+// A question one of its DAG's tasks asks you: a choice, or your own words. Skipping it, or not answering in time,
+// leaves the task to decide for itself.
+function questionCard(a) {
+  const box = h("input.question-reply", { type: "text", placeholder: "Your answer", maxlength: 2000, "aria-label": "Your answer" });
+  const send = (event, reply) => {
+    event.preventDefault();
+    if (reply.trim()) respond(event, a, { reply });
+  };
+  return h(
+    "li.approval.question",
+    {},
+    h("p.approval-title", { text: a.why ? `${a.why}:` : "A question:" }),
+    h("p.question-text", { text: a.question }),
+    a.choices.length ? h("div.question-choices", {}, a.choices.map((c) => h("button.button.small", { type: "button", text: c, onclick: (event) => send(event, c) }))) : null,
+    h("form.question-form", { onsubmit: (event) => send(event, box.value) }, box, h("button.button.small.primary", { type: "submit", text: "Answer" })),
+    h(
+      "div.approval-foot",
+      {},
+      h("span.hint.approval-time", { "data-deadline": a.deadline, "data-question": "" }),
+      h("div.msg-actions", {}, h("button.button.small", { type: "button", text: "Skip", onclick: (event) => respond(event, a, { allow: false }) }))
+    )
+  );
+}
+
 // How long each request for your OK has left, every second while there are any.
 function countDown() {
   clearInterval(chat_.timer);
@@ -282,7 +307,8 @@ function countDown() {
     const left = [...document.querySelectorAll(".approval-time")];
     for (const el of left) {
       const s = Math.max(0, Math.round(Number(el.dataset.deadline) - now()));
-      el.textContent = `Denied in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} without an answer`;
+      const left_ = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+      el.textContent = "question" in el.dataset ? `It decides for itself in ${left_} without an answer` : `Denied in ${left_} without an answer`;
     }
     if (!left.length) clearInterval(chat_.timer);
   };
@@ -379,9 +405,13 @@ async function stop() {
 }
 
 async function answer(event, approval, allow) {
-  for (const button of event.target.parentElement.querySelectorAll("button")) button.disabled = true;
+  await respond(event, approval, { allow });
+}
+
+async function respond(event, approval, body) {
+  for (const button of event.target.closest("li").querySelectorAll("button")) button.disabled = true;
   try {
-    agents().data = await call("POST", `/api/approvals/${approval.id}`, { allow });
+    agents().data = await call("POST", `/api/approvals/${approval.id}`, body);
     agents().render();
   } catch (err) {
     toast(err.message, true);

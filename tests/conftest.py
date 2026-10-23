@@ -202,3 +202,9 @@ def embeddings_server():
     server = FakeEmbeddingsServer()
     yield server
     server.close()
+
+
+@pytest.fixture(autouse=True)
+def quick_retries(monkeypatch):
+    """A failed DAG task is tried again at once, not a minute later (dags/service.py)."""
+    monkeypatch.setattr("athena.dags.service.RETRY_SECONDS", 0.01)

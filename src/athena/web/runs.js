@@ -13,14 +13,14 @@ const STATES = {
   running: "Running",
   paused: "Waiting for your OK",
   awaiting_tool_approval: "Waiting for your OK",
-  awaiting_user: "Waiting for you",
+  awaiting_user: "Waiting for your answer",
   success: "Done",
   failed: "Failed",
   skipped: "Skipped",
   upstream_failed: "Not run: a task before it failed",
   cancelled: "Stopped",
 };
-const SHORT = { running: "running", success: "done", failed: "failed", skipped: "skipped", upstream_failed: "not run", awaiting_tool_approval: "waiting" };
+const SHORT = { running: "running", queued: "waiting", success: "done", failed: "failed", skipped: "skipped", upstream_failed: "not run", awaiting_tool_approval: "waiting", awaiting_user: "waiting" };
 const runs_ = { id: null, runs: [], run: null, selected: null, shown: "", els: null };
 
 export async function runsView(box, id, runId, fresh) {
@@ -89,7 +89,7 @@ function detail(run) {
   for (const t of run.tasks) (states[t.task] ||= { all: [] }).all.push(t.state);
   for (const s of Object.values(states)) {
     s.count = s.all.length;
-    const first = ["running", "awaiting_tool_approval", "success", "failed"].find((state) => s.all.includes(state));
+    const first = ["running", "awaiting_tool_approval", "awaiting_user", "queued", "success", "failed"].find((state) => s.all.includes(state));
     s.state = first || s.all[0];
     if (s.count > 1) {
       const counted = {};

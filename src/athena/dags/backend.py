@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import openai
-from agentic_airflow import GenerationRequest, GenerationResponse, Message, ToolCall, ToolContext
+from agentic_airflow import GenerationRequest, GenerationResponse, Message, PermanentError, ToolCall, ToolContext
 from agentic_airflow import Tool as EngineTool
 
 from athena.stats import QueryRecord
@@ -43,8 +43,8 @@ RETRIES = (30.0, 120.0)  # the model server can't be reached: try again after th
 UNREACHABLE = (openai.APIConnectionError, openai.APITimeoutError)
 
 
-class Unreachable(Exception):
-    """The model server couldn't be reached, even after trying again."""
+class Unreachable(PermanentError):
+    """The model server couldn't be reached, even after trying again: the task isn't retried (retries)."""
 
     def __str__(self) -> str:
         return "the model server couldn't be reached, even after trying again"

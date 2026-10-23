@@ -1,5 +1,6 @@
-"""Requests for your OK before a tool that asks first runs, wherever you answer them: Telegram's buttons, or the
-dashboard. Each is open until one of them answers it, or it times out and counts as declined."""
+"""Requests for your OK before a tool that asks first runs, and questions a DAG's task asks you (ask_user), wherever
+you answer them: Telegram, or the dashboard. Each is open until one of them answers it, or it times out: a request
+then counts as declined, and a question as unanswered."""
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 ALLOWED, DENIED, NO_ANSWER, STOPPED = "Allowed", "Denied", "No answer, so denied", "Stopped"
+ANSWERED, SKIPPED, UNANSWERED = "Answered", "Skipped", "No answer"
+MAX_REPLY = 2000  # characters of an answer to a question
 
 
 @dataclass
@@ -23,7 +26,10 @@ class Approval:
     session: int | None  # the session of the message it's for, if it's one of yours
     asked: float  # Unix time
     deadline: float
-    verdict: str = ""  # once answered: ALLOWED, DENIED, NO_ANSWER or STOPPED
+    question: str | None = None  # a question for you, rather than a tool to allow
+    choices: list[str] = field(default_factory=list)  # answers it offers, for a question
+    reply: str | None = None  # your answer to a question
+    verdict: str = ""  # once answered: ALLOWED, DENIED, NO_ANSWER or STOPPED; ANSWERED, SKIPPED or UNANSWERED
     _answer: asyncio.Future[bool] = field(default=None, repr=False)  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, Any]:
@@ -36,6 +42,8 @@ class Approval:
             "session": self.session,
             "asked": self.asked,
             "deadline": self.deadline,
+            "question": self.question,
+            "choices": self.choices,
         }
 
 
@@ -58,10 +66,29 @@ class Approvals:
         """Ask: it's open until it's answered, and wait() waits for that."""
         now = self.clock()
         approval = Approval(secrets.token_hex(6), tool, args, summary, why, session, now, now + timeout)
+        return self._opened(approval)
+
+    def ask(
+        self, question: str, choices: list[str], *, timeout: float, why: str = "", session: int | None = None
+    ) -> Approval:
+        """Ask you a question: it's open until it's answered, and wait_reply() waits for the answer."""
+        now = self.clock()
+        approval = Approval(secrets.token_hex(6), "ask_user", {}, None, why, session, now, now + timeout, question)
+        approval.choices = list(choices)
+        return self._opened(approval)
+
+    def _opened(self, approval: Approval) -> Approval:
         approval._answer = asyncio.get_running_loop().create_future()
         self._open[approval.id] = approval
         self._changed(approval)
         return approval
+
+    async def wait_reply(self, approval: Approval) -> str | None:
+        """Your answer to a question: None if you skipped it or didn't answer in time."""
+        await self.wait(approval)
+        if approval.verdict == NO_ANSWER:
+            approval.verdict = UNANSWERED
+        return approval.reply
 
     async def wait(self, approval: Approval) -> bool:
         """Whether you allowed it: False if you declined it or didn't answer in time. If whatever's waiting is
@@ -79,11 +106,22 @@ class Approvals:
         return allowed
 
     def answer(self, approval_id: str, allow: bool) -> bool:
-        """Allow or decline an open request. False if there's no such request open, as when it's been answered."""
+        """Allow or decline an open request, or skip a question with allow=False. False if there's no such request
+        open, as when it's been answered."""
         approval = self._open.get(approval_id)
-        if approval is None:
+        if approval is None or (approval.question is not None and allow):
             return False
-        self._close(approval, ALLOWED if allow else DENIED)
+        self._close(approval, (SKIPPED if approval.question is not None else DENIED) if not allow else ALLOWED)
+        return True
+
+    def reply(self, approval_id: str, text: str) -> bool:
+        """Answer an open question. False if there's no such question open, or the answer's empty."""
+        approval = self._open.get(approval_id)
+        text = text.strip()[:MAX_REPLY]
+        if approval is None or approval.question is None or not text:
+            return False
+        approval.reply = text
+        self._close(approval, ANSWERED)
         return True
 
     def pending(self) -> list[Approval]:

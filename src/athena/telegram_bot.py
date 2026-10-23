@@ -83,6 +83,7 @@ class _NotAPhoto(Exception):
 ALBUM_SECONDS = 1.5  # after an album's last photo arrives, how long to wait for more
 MAX_SIDE = 2048  # of the copies Telegram keeps of a photo, the largest up to this many pixels is used
 DOWNLOAD_MB = 20  # the largest file a Telegram bot can download
+QUESTION_CHARS = 1500  # of a task's question, as it's asked
 
 
 class TelegramBot:
@@ -97,6 +98,7 @@ class TelegramBot:
         self._last: dict[int, _Asked] = {}
         self._albums: dict[str, _Album] = {}  # by Telegram's media group id
         self._replying: set[asyncio.Task[None]] = set()  # albums being answered
+        self._questions: dict[int, str] = {}  # a task's question, by the message that asks it: replying answers it
         self._bot: Bot | None = None
 
     # -- setup ----------------------------------------------------------------------------
@@ -133,6 +135,7 @@ class TelegramBot:
             app.add_handler(MessageHandler(me & (filters.PHOTO | filters.Document.IMAGE), self.on_photo))
             app.add_handler(MessageHandler(me & filters.Document.ALL & ~filters.Document.IMAGE, self.on_file))
             app.add_handler(CallbackQueryHandler(self.on_button, pattern=r"^confirm:"))
+            app.add_handler(CallbackQueryHandler(self.on_ask_button, pattern=r"^ask:"))
             app.add_handler(CallbackQueryHandler(self.on_think_button, pattern=r"^think:"))
             app.add_handler(CallbackQueryHandler(self.on_dag_button, pattern=r"^dag:"))
         app.add_handler(MessageHandler(filters.ALL, self.on_stranger))
@@ -305,6 +308,58 @@ class TelegramBot:
         await self._settle(msg, f"{approval.verdict}: <b>{html.escape(tool)}</b>")
         return approved
 
+    async def question(
+        self, text: str, choices: list[str], *, why: str, timeout: float, session: int | None = None
+    ) -> str | None:
+        """Ask you a task's question (Channel): a button for each choice, or reply to it in your own words. It can
+        be answered on the dashboard too."""
+        assert self._bot is not None
+        bot, chat_id = self._bot, self.cfg.allowed_user_ids[0]
+        approval = self.s.approvals.ask(text, choices, timeout=timeout, why=why, session=session)
+        key = approval.id
+        rows = [[InlineKeyboardButton(c[:60], callback_data=f"ask:{key}:{i}")] for i, c in enumerate(choices)]
+        rows.append([InlineKeyboardButton("Skip", callback_data=f"ask:{key}:skip")])
+        asked = (
+            f"❓ {html.escape(why)}:\n<b>{html.escape(text[:QUESTION_CHARS])}</b>\n\n"
+            "<i>Reply to this message to answer in your own words.</i>"
+        )
+        try:
+            msg = await bot.send_message(
+                chat_id,
+                asked,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(rows),
+                link_preview_options=NO_PREVIEW,
+            )
+        except BaseException:
+            self.s.approvals.answer(key, False)  # it can't be answered here: it mustn't wait on the dashboard
+            raise
+        self._questions[msg.message_id] = key
+        try:
+            reply = await self.s.approvals.wait_reply(approval)  # answered here, or on the dashboard
+        finally:
+            self._questions.pop(msg.message_id, None)
+        answered = f"\n→ {html.escape(reply)}" if reply else ""
+        await self._settle(msg, f"{approval.verdict}: <b>{html.escape(text[:QUESTION_CHARS])}</b>{answered}")
+        return reply
+
+    async def on_ask_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A choice, or Skip, pressed under a task's question."""
+        query = update.callback_query
+        assert query is not None
+        if not update.effective_user or update.effective_user.id not in self.allowed:
+            await query.answer("Not allowed.")
+            return
+        _, key, choice = (query.data or "::").split(":", 2)
+        asked = next((a for a in self.s.approvals.pending() if a.id == key), None)
+        if asked is not None and choice == "skip":
+            done = self.s.approvals.answer(key, False)
+        elif asked is not None and choice.isdigit() and int(choice) < len(asked.choices):
+            done = self.s.approvals.reply(key, asked.choices[int(choice)])
+        else:
+            done = False
+        await query.answer() if done else await query.answer("This question has expired.")
+
     async def _settle(self, msg: Any, text: str) -> None:
         """Replace an approval's buttons with what became of it."""
         try:
@@ -337,6 +392,11 @@ class TelegramBot:
 
     async def on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         assert update.effective_chat and update.message and update.message.text
+        replied = update.message.reply_to_message
+        if replied is not None and replied.message_id in self._questions:  # an answer to a task's question
+            if not self.s.approvals.reply(self._questions[replied.message_id], update.message.text):
+                await update.message.reply_text("That question's been answered already, or it's expired.")
+            return
         chat_id = update.effective_chat.id
         await self._deliver(ctx.bot, chat_id, await self._reply(ctx.bot, chat_id, update.message.text))
 

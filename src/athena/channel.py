@@ -1,5 +1,6 @@
 """How any part of Athena reaches you when you haven't just asked it something: to tell you what a
-task found, or that a server's tools changed, and to ask before a task uses a tool that asks first.
+task found, or that a server's tools changed, to ask before a task uses a tool that asks first, and to ask you
+what a task wants to know.
 
 The Telegram bot is a channel, and sets itself as Services.channel when it starts. Reach is how Athena reaches
 you through everything it has: Telegram, if it's set up, and notifications on your devices (push.py). What it
@@ -40,6 +41,13 @@ class Channel(Protocol):
         False if you deny it or don't answer in time."""
         ...
 
+    async def question(
+        self, text: str, choices: list[str], *, why: str, timeout: float, session: int | None = None
+    ) -> str | None:
+        """Ask you a question a task has, offering ``choices`` if it has any, for ``session``: your answer, or None
+        if you skip it or don't answer in time."""
+        ...
+
 
 class Reach:
     """A Channel that's everything Athena has: Telegram if it's set up, and your devices' notifications. Without
@@ -71,3 +79,11 @@ class Reach:
             return await self.s.channel.ask(tool, args, summary, why=why, timeout=timeout, session=session)
         approvals = self.s.approvals
         return await approvals.wait(approvals.open(tool, args, summary, timeout=timeout, why=why, session=session))
+
+    async def question(
+        self, text: str, choices: list[str], *, why: str, timeout: float, session: int | None = None
+    ) -> str | None:
+        if self.s.channel is not None:  # in Telegram, and on the dashboard
+            return await self.s.channel.question(text, choices, why=why, timeout=timeout, session=session)
+        approvals = self.s.approvals
+        return await approvals.wait_reply(approvals.ask(text, choices, timeout=timeout, why=why, session=session))

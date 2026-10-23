@@ -69,15 +69,18 @@ MAX_TASKS = 30
 MAX_GROUPS = 10
 MAX_PROMPT = 4000  # characters
 MAX_ITEMS = 20  # a list mapped over: the most tasks it starts
+MAX_RETRIES = 3  # a task's retries
+MAX_RETRY_DELAY = 3600  # seconds
 
 # Athena's own functions for a DAG: what `on_complete=alert` and the like name. The service gives the real ones
 # (Dags.functions); these stand in when a file's only being checked.
 HOOKS = ("alert",)
 
 # What a DAG file can call, and the arguments each takes: positional, then by name.
-_TASK_ARGS = {"context", "fan_out", "follow_mapping", "trigger_rule", "on_complete", "outlets", "skip_if"}
+_TASK_ARGS = {"context", "fan_out", "follow_mapping", "trigger_rule", "on_complete", "outlets", "skip_if", "retries",
+              "retry_delay"}  # fmt: skip
 _SCOPE_ARGS = {"model", "allowed_tools", "denied_tools", "hidden_tools", "skills", "inherit_skills", "thinking",
-               "max_tool_steps"}  # fmt: skip
+               "max_tool_steps", "retries", "retry_delay", "ask_user"}  # fmt: skip
 _AGENTIC_ARGS = _TASK_ARGS | _SCOPE_ARGS | {"return_type", "json_schema", "verbosity", "include_run_log",
                                             "include_dag_definition", "system_prompt"}  # fmt: skip
 CALLS: dict[str, tuple[Any, tuple[str, ...], frozenset[str]]] = {
@@ -86,7 +89,7 @@ CALLS: dict[str, tuple[Any, tuple[str, ...], frozenset[str]]] = {
         ("id", "prompt"),
         frozenset(
             _SCOPE_ARGS
-            | {"schedule", "context", "auto_evaluate", "description", "tags", "verbosity", "max_active_runs"}
+            | {"schedule", "context", "auto_evaluate", "description", "tags", "verbosity", "max_active_runs", "catchup"}
         ),
     ),  # fmt: skip
     "TaskGroup": (TaskGroup, ("id",), frozenset(_SCOPE_ARGS)),
@@ -121,7 +124,10 @@ with Dag("dag_id", prompt="What it's for", schedule=["30 7 * * 1-5", Asset("job-
     # with TaskGroup("each", allowed_tools=[...]) as each: ... tasks ...  then a >> each >> b
 Schedule: cron strings (your time zone, at most every 15 min), Asset(name): when a task with it in outlets
 produces something, Webhook(name): POST /hooks/<name>, DagTrigger("dag_id"): when that DAG's run ends. Asset
-"claude-done": when Claude finishes a project."""
+"claude-done": when Claude finishes a project. A run missed while Athena was off runs when it's back
+(catchup=False on the Dag to skip it).
+On the Dag, a TaskGroup or a task: retries=1 tries a failed task again after retry_delay seconds (default 60);
+ask_user=True lets its tasks ask the user something only they can decide, and wait for the answer."""
 
 STARTER = """from agentic_airflow import AgenticTask, Dag
 
@@ -357,6 +363,8 @@ class _Reader:
             if keyword.arg in args:
                 raise _error(keyword.value, f"{keyword.arg} is given twice.")
             args[keyword.arg] = self.argument(name, keyword.arg, keyword.value)
+        if name == "Dag":  # a run missed while the Pi was off runs when it's back
+            args.setdefault("catchup", True)
         if name == "Cron":
             args.setdefault("timezone", self.timezone)
             self.cron(args.get("expression"), call)
@@ -388,6 +396,16 @@ class _Reader:
             raise _error(node, f"on_complete is one of {', '.join(HOOKS)}.")
         if param == "skip_if" and value is not found_nothing:
             raise _error(node, "skip_if is found_nothing.")
+        if param == "retries" and not (
+            isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_RETRIES
+        ):
+            raise _error(node, f"retries is a whole number from 0 to {MAX_RETRIES}.")
+        if param == "retry_delay" and not (
+            isinstance(value, int | float) and not isinstance(value, bool) and 0 <= value <= MAX_RETRY_DELAY
+        ):
+            raise _error(node, f"retry_delay is a number of seconds, up to {MAX_RETRY_DELAY}.")
+        if param in ("ask_user", "catchup") and not isinstance(value, bool):
+            raise _error(node, f"{param} is True or False.")
         if param in ("context", "target") and not _is_nodes(value) and value is not None:
             raise _error(node, f"{param} names tasks before this one.")
         if param == "schedule":

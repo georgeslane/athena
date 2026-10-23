@@ -52,6 +52,7 @@ const ICONS = {
   bolt: "M13 3L5 14h6l-1 7 8-11h-6z",
   copy: "M9 9h10v10H9zM5 15V5h10",
   download: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  expand: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
 };
 
 export function icon(name, cls) {
