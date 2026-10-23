@@ -74,6 +74,8 @@ Athena has a folder of its own, `~/.athena/data/workspace`, shared with the code
 - `write_file` writes Markdown, text, CSV and the like. A `.pdf` is laid out from Markdown, with headings, lists, tables and code, on A4.
 - `send_file` sends one to you in Telegram, after the answer. A task can send files with what it found.
 
+You can't open the folder, so where a file is would be no use to you. If Athena makes a file while answering you, with `write_file` or with code, and its answer names the file without having sent it, the file's sent anyway.
+
 **Sending Athena a file:** send a PDF, or a text file such as Markdown, CSV or JSON, up to 20 MB, with your question as its caption. It's kept in the folder's `inbox/`.
 
 **Safety:** code can put anything in the folder, including a link to Athena's `.env`. So Athena opens what's there one folder at a time without following links, and only ordinary files. PDFs are read and made in the code's sandbox, so a PDF made to trouble a PDF reader can do no harm. Forgetting everything empties the folder.

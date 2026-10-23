@@ -19,7 +19,7 @@ import contextlib
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
@@ -28,8 +28,8 @@ from pydantic import Field
 from athena.builtin import FAIL, OK, Builtin, Report, Section, Unavailable
 from athena.catalog import Integration
 from athena.sandbox import INSTALL_HINT, Sandbox, SandboxError
-from athena.tools import Tool, ToolError
-from athena.workspace import changes, files, workspace_of
+from athena.tools import Tool, ToolError, current_turn
+from athena.workspace import MADE, changes, files, workspace_of
 
 if TYPE_CHECKING:
     from athena.config import Config
@@ -119,6 +119,8 @@ class CodeRunner(Builtin):
     def tools(self) -> list[Tool]:
         async def run_python(args: dict[str, Any]) -> str:
             result = await self.run(str(args.get("code") or ""))
+            for name in result.made:
+                current_turn().note(MADE, name)  # sent if the answer names it (files.unsent)
             return result.describe()
 
         return [
@@ -199,8 +201,9 @@ class SandboxedPython:
         text = output.decode(errors="replace")
         if len(text) > keep:
             text, cut = text[:keep], True
-        changed = changes(before, files(self.workspace))
-        return Ran(text, proc.returncode, timed_out, cut, seconds, changed, full, self.cfg, keep)
+        after = files(self.workspace)
+        made = [name for name in sorted(after) if before.get(name) != after[name]]
+        return Ran(text, proc.returncode, timed_out, cut, seconds, changes(before, after), full, self.cfg, keep, made)
 
     def _launcher(self, writes: bool = True) -> str:
         """The launcher, with the limits filled in. ``writes``: False to let it write nothing at all."""
@@ -228,6 +231,7 @@ class Ran:
     full: bool  # the workspace was over its limit, so it could write nothing
     cfg: CodeConfig
     kept: int = 0  # characters of what it printed that are kept
+    made: list[str] = field(default_factory=list)  # files in the workspace it wrote, by path
 
     def describe(self) -> str:
         """What the model's told."""

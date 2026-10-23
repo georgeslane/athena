@@ -12,7 +12,7 @@ from test_telegram import ME, PhotoBot, asking, make_bot
 
 from athena import pdfs, workspace
 from athena.agent import AgentResult
-from athena.files import SENT, Files, FilesConfig
+from athena.files import NOT_SEEN, SENT, Files, FilesConfig, unsent
 from athena.run_code import CodeConfig, SandboxedPython
 from athena.tools import ToolError, Turn, begin_turn
 
@@ -35,7 +35,10 @@ def secret(tmp_path):
 # -- the workspace: nothing there leads outside it ------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["/etc/passwd", "../.env", "a/../../.env", "", "  ", "x\x00y"])
+@pytest.mark.parametrize(
+    "name",
+    ["/etc/passwd", "../.env", "a/../../.env", "", "  ", "x\x00y", "/workspace/../.env", "/workspace", "/workspaces/a"],
+)
 def test_only_paths_within_the_workspace_are_taken(name):
     with pytest.raises(ToolError):
         workspace.parts(name)
@@ -43,6 +46,7 @@ def test_only_paths_within_the_workspace_are_taken(name):
 
 def test_paths_are_taken_as_given_within_it():
     assert workspace.parts("./reports/march.pdf") == ("reports", "march.pdf")
+    assert workspace.parts("/workspace/reports/march.pdf") == ("reports", "march.pdf")  # where code sees it
     assert workspace.parts("inbox/a b.md") == ("inbox", "a b.md")
     assert workspace.parts("a/./b") == ("a", "b")
 
@@ -109,7 +113,7 @@ def files(ws, python=None, **settings) -> Files:
 
 async def test_reading_and_writing_text_a_part_at_a_time(ws):
     f = files(ws)
-    assert await f.write("notes/plan.md", "# Plan\n" + "x" * 6000, "") == "Wrote notes/plan.md (5.9 KB)."
+    assert await f.write("notes/plan.md", "# Plan\n" + "x" * 6000, "") == f"Wrote notes/plan.md (5.9 KB). {NOT_SEEN}"
     first = await f.read("notes/plan.md", 0)
     assert first.startswith("[notes/plan.md: characters 0-5000 of 6007; to read on, start=5000]\n# Plan\n")
     rest = await f.read("notes/plan.md", 5000)
@@ -348,3 +352,91 @@ def test_the_files_builtin_is_there_and_kept_apart_from_an_old_files_server():
 def test_its_pdf_module_needs_nothing_of_athenas():
     source = Path(pdfs.__file__).read_text()
     assert "athena" not in source  # its source is all that's in the sandbox
+
+
+# -- a file the answer names is sent, even if the model only said where it is ------------------------------
+
+
+def made(*names, sent=()):
+    return {workspace.MADE: list(names), SENT: [json.dumps({"path": n, "caption": "c"}) for n in sent]}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("I've saved it as reports/march.pdf.", ["reports/march.pdf"]),
+        ("It's in your folder, as `march.pdf`", ["reports/march.pdf"]),
+        ("At /workspace/reports/march.pdf", ["reports/march.pdf"]),
+        ("Here's the report.", []),
+        ("I've saved march.pdfx and old-march.pdf", []),
+    ],
+)
+def test_a_file_made_while_answering_that_the_answer_names_is_sent(text, expected):
+    assert [json.loads(n)["path"] for n in unsent(made("reports/march.pdf"), text)] == expected
+
+
+def test_a_file_already_sent_isnt_sent_twice_and_a_name_with_no_extension_isnt_any_word():
+    assert unsent(made("a.md", "b.md", "a.md", sent=["a.md"]), "a.md and b.md") == [
+        json.dumps({"path": "b.md", "caption": ""})
+    ]
+    assert unsent(made("out/report"), "Here's the report.") == []
+    assert unsent(made("out/report"), "It's out/report.") != []
+
+
+def agent_with_files(config, memory, replies):
+    """An agent with the Files tools, and the model's replies, as completion()'s arguments."""
+    from conftest import FakeLLMServer, completion
+
+    from athena.agent import Agent
+    from athena.history import ConversationStore
+    from athena.tools import ToolRegistry
+
+    tools = ToolRegistry()
+    for tool in Files(FilesConfig(), workspace.workspace_of(config), None).tools():
+        tools.add(tool)
+    server = FakeLLMServer([completion(*reply) for reply in replies])
+    return Agent(config.agent, server.client(config.llm), tools, ConversationStore(config.db_path), memory), server
+
+
+WRITES = (None, [("write_file", {"path": "out/notes.md", "content": "# Notes"})])
+
+
+async def test_a_file_the_answer_only_says_where_it_is_reaches_telegram(config, memory):
+    agent, server = agent_with_files(config, memory, [WRITES, ("I've written it: it's out/notes.md in my folder.",)])
+    bot = make_bot(config, agent.respond)
+    tg = FileBot({})
+    message = SimpleNamespace(text="Notes, please", reply_to_message=None)
+    await bot.on_text(SimpleNamespace(effective_chat=SimpleNamespace(id=1), message=message), SimpleNamespace(bot=tg))
+    assert tg.sent[0].text.startswith("I've written it")
+    assert tg.documents == [(1, "notes.md", b"# Notes", None)]
+    assert server.requests[1]["messages"][-1]["content"] == f"Wrote out/notes.md (7 bytes). {NOT_SEEN}"
+    send_file = next(t for t in server.requests[0]["tools"] if t["function"]["name"] == "send_file")
+    assert "rather than saying where it is" in send_file["function"]["description"]
+
+
+@pytest.mark.parametrize(
+    ("replies", "sent"),
+    [
+        (  # sent with send_file: once, as it was sent
+            [WRITES, (None, [("send_file", {"path": "out/notes.md", "caption": "Notes"})]), ("Here: out/notes.md.",)],
+            [{"path": "out/notes.md", "caption": "Notes"}],
+        ),
+        ([WRITES, ("Done.",)], []),  # not named: it may be Athena's own
+    ],
+)
+async def test_a_file_is_sent_once_and_only_if_the_answer_names_it(config, memory, replies, sent):
+    agent, _ = agent_with_files(config, memory, replies)
+    result = await agent.respond(agent.history.master.chat_id, "Notes, please", confirm=None)
+    assert [json.loads(n) for n in result.notes.get(SENT, [])] == sent
+
+
+async def test_working_by_itself_a_file_it_names_isnt_sent(config, memory):
+    from athena.agent import Background
+
+    async def step(status, call):
+        return await call()
+
+    agent, _ = agent_with_files(config, memory, [WRITES, ("Saved out/notes.md.",)])
+    background = Background(label="Testing", step=step, source="a test")
+    result = await agent.follow_up([{"role": "system", "content": "Hi"}], "Write notes", background)
+    assert result.notes[workspace.MADE] == ["out/notes.md"] and SENT not in result.notes
