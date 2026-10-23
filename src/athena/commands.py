@@ -146,30 +146,28 @@ def thinking_says(services: Services) -> str:
 def dags(services: Services) -> tuple[str, list[dict[str, Any]]]:
     """What each agent with a DAG does by itself, and each one for buttons to act on it: {"id", "name", "state"},
     where state is running, paused or waiting."""
-    scheduler = services.dags
+    service = services.dags
     if not services.config.tasks.enabled:
         return "Agents' DAGs are switched off ([tasks] enabled = false in config.toml).", []
     listed, lines = [], []
-    current = scheduler.current
-    for config in scheduler.store.all():
+    for config in service.store.all():
         if not config.dag.strip():
             continue
         name = services.history.title(config.id) or f"Agent {config.id}"
-        spec = scheduler.spec(config.dag)
-        running = current is not None and current.run.agent == config.id
-        state = "running" if running else "paused" if config.paused else "waiting"
-        if running and current:
-            when = f"running now, on {current.doing or 'its first task'}"
-        elif spec is None:
+        described = service.describe(config.id)
+        dag, running = described["dag"], described["running"]
+        state = "running" if running else "paused" if described["paused"] else "waiting"
+        if running:
+            when = f"running now, on {running['doing'] or 'its first task'}"
+        elif dag is None:
             when = "its DAG file has a problem: fix it on the dashboard"
-        elif config.paused:
+        elif described["paused"]:
             when = "paused"
-        elif config.next_run:
-            when = f"{spec.describe()} · next {datetime.fromtimestamp(config.next_run, scheduler.tz):%a %-d %b %H:%M}"
+        elif described["next_run"]:
+            when = f"{dag['when']} · next {datetime.fromtimestamp(described['next_run'], service.tz):%a %-d %b %H:%M}"
         else:
-            when = spec.describe()
-        last = scheduler.store.runs(config.id, 1)
-        went = f" · last run: {last[0].state}" if last else ""
+            when = dag["when"]
+        went = f" · last run: {described['last']['state']}" if described["last"] else ""
         mark = {"running": "⚙️", "paused": "⏸"}.get(state, "▶️")
         lines.append(f"{mark} {name}: {when}{went}")
         listed.append({"id": config.id, "name": name, "state": state})

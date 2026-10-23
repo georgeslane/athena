@@ -51,7 +51,6 @@ async def test_reloading_applies_the_tools_settings_from_config_toml(services, m
     names = lambda: {t.name for t in services.tools.all()}  # noqa: E731
     memory_and_tasks = {"remember", "search_memory", "read_document", "forget_memory"}
     tasks_and_skills = {
-        "task_result",
         "change_dag",
         "run_dag",
         "agent_runs",
@@ -148,16 +147,16 @@ async def test_what_athena_tells_you_by_itself_goes_into_the_master_agents_conve
 
 async def test_forgetting_everything_forgets_what_runs_found_but_keeps_the_dags(services):
     dags = services.dags
-    source = "with DAG(schedule='30 7 * * *'):\n    inbox = Task(prompt='Check my inbox.')\n"
+    source = "with Dag('inbox', prompt='p', schedule=['30 7 * * *']):\n    AgenticTask('inbox', prompt='Check it.')\n"
     dags.save(1, source)
     dags.store.update(1, context="The bank wrote on Monday.")
-    run = dags.store.start_run(1, "manual", "", source)
-    dags.store.finish_task(dags.store.add_task(run.id, "inbox", 0, "running"), "success", "The bank wrote.", [])
-    dags.store.finish_run(run, "success", "The bank wrote.")
+    run = await dags.run_now(1)
+    await dags.engine.wait(run.run_id, timeout=10, stop_on_pause=False)
+    assert len(dags.runs(1)) == 1
 
     await services.forget_everything()
     assert dags.store.get(1).dag == source and dags.store.get(1).context == ""
-    assert dags.store.runs(1) == []
+    assert dags.runs(1) == [] and dags.dag(1) is not None
 
 
 async def test_the_prompt_says_what_mcp_servers_are_where_their_config_does(tmp_path):

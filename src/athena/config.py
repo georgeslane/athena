@@ -147,9 +147,8 @@ class DashboardConfig(_Section):
 
 
 class TasksConfig(_Section):
-    # Agents' DAGs: the tasks Athena does by itself, on a schedule or when something happens (docs/agents.md).
+    # Agents' DAGs: the tasks Athena does by itself, on a schedule or when something happens (docs/dags.md).
     enabled: bool = True
-    quiet_minutes: float = 5.0  # a scheduled run waits until Athena's been inactive for this long
     max_minutes: float = 30.0  # the most a task works for, not counting time it waits for your OK
     max_tool_rounds: int = 25
     thinking: Literal["on", "short", "off"] | None = "on"  # tasks aren't in a hurry: None follows [llm]
@@ -157,9 +156,9 @@ class TasksConfig(_Section):
 
 
 class TriggersConfig(_Section):
-    # Events that start agents' DAGs, from iPhone Shortcuts or anything else on your tailnet that can make an
-    # HTTP request (see docs/agents.md). POST /hooks/<event> on the dashboard's address, with this token,
-    # runs the DAGs with "<event>" in their triggers. Off until the token's set.
+    # Webhooks that start agents' DAGs, from iPhone Shortcuts or anything else on your tailnet that can make an
+    # HTTP request (see docs/dags.md). POST /hooks/<name> on the dashboard's address, with this token, runs the
+    # DAGs with Webhook("<name>") in their schedule. Off until the token's set.
     token: str = ""  # TRIGGERS_TOKEN in .env: sent as "Authorization: Bearer <token>"
     max_per_hour: int = Field(default=30, ge=1)  # events taken in an hour, of every kind; more are refused
 

@@ -134,7 +134,7 @@ class Agent:
         self.privacy: Privacy | None = None
         # Each agent's model, guidance and DAG (dags/), for its conversation.
         self.directory: Directory | None = None
-        # Your messages go first, between the tasks Athena does by itself (gate.py).
+        # Your messages go first, between the tasks Athena does by itself (gate.py): agents' DAGs share it.
         self.gate = Gate()
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._compact_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -147,11 +147,9 @@ class Agent:
         self._idle.set()
         self._busy = 0
         self._pausing = asyncio.Lock()
-        # You, rather than a task: how many of your messages are being answered, when one last was, and where.
+        # You, rather than a task: how many of your messages are being answered, and where.
         self.answering_you = 0
-        self.last_answered_you = float("-inf")  # time.monotonic()
         self.last_chat: str | None = None  # which the model server's cache is kept warm for
-        self.chatting = asyncio.Event()  # set while one of your messages is being answered
 
     # -- pausing --------------------------------------------------------------------------
 
@@ -372,7 +370,7 @@ class Agent:
         only has to be read itself. Skipped while a message is being answered, which does the same.
         """
         lock = self._locks[chat_id]
-        if lock.locked() or self.gate.working:  # the model's in use, by you or by a task Athena's doing by itself
+        if lock.locked() or self.gate.busy(self.model_for(chat_id)):  # in use, by you or by something Athena's doing
             return None
         async with self._working(), lock:
             messages = [
@@ -415,7 +413,6 @@ class Agent:
                 await stack.enter_async_context(self._working())
                 self.answering_you += 1
                 self.last_chat = chat_id
-                self.chatting.set()
                 stack.callback(self._answered_you)
             shown = text or (label(len(photos)) if photos else "")  # a photo without a caption
             task = self.status.begin(background.label if background else shown)
@@ -427,9 +424,10 @@ class Agent:
             result: AgentResult | None = None
             try:
                 if background is None:
-                    if self.gate.held:
-                        task.waiting_for_task(self.gate.working or "a task")
-                    await stack.enter_async_context(self.gate.yours())
+                    model = self.model_for(chat_id)
+                    if self.gate.busy(model):
+                        task.waiting_for_task(self.gate.doing.get(model) or "a task")
+                    await stack.enter_async_context(self.gate.yours(model))
                     task.thinking()
                     await stack.enter_async_context(self._locks[chat_id])
                 result = await self._respond(
@@ -440,7 +438,7 @@ class Agent:
                 record.error = describe_error(exc)
                 raise
             finally:
-                self._record(record)
+                self.record(record)
             task.finish()
         if result.saved and self.on_saved:
             self.on_saved()
@@ -460,32 +458,50 @@ class Agent:
         messages: list[dict[str, Any]],
         background: Background,
         *,
-        confirm: ConfirmFn | None = None,
-        allowed: Collection[str] = (),
-        on_tool: ToolEventFn | None = None,
-        hidden: Sequence[str] = (),
         model: str | None = None,
-        dag: Any = None,
         session: int | None = None,
-        channel: str = "DAG",
+        channel: str = "Skills",
     ) -> AgentResult:
-        """Work by itself on the last of ``messages``, a conversation of Athena's own, such as a DAG run's (dags/):
-        nothing's kept in the history, and ``messages`` gets what the model and tools said along the way. ``hidden``
-        tools are found when they're needed, as well as [tools] on_demand; ``dag`` is the run it's for."""
+        """Work by itself on the last of ``messages``, a conversation of Athena's own: nothing's kept in the history,
+        and ``messages`` gets what the model and tools said along the way. It waits for the model behind your
+        messages, as a DAG's task does (gate.py)."""
         task = self.status.begin(background.label)
         record = QueryRecord(session=session if session is not None else self.history.master.id, channel=channel)
         try:
-            result = await self._work(
-                messages, task, confirm, on_tool, record, background, frozenset(allowed), None, hidden, model, dag
-            )
+            async with self.gate.background(model or self.llm.cfg.model, background.label):
+                result = await self._work(messages, task, None, None, record, background, model=model)
         except BaseException as exc:
             task.finish(exc)
             record.error = describe_error(exc)
             raise
         finally:
-            self._record(record)
+            self.record(record)
         task.finish()
         return result
+
+    async def run_alone(
+        self, name: str, args: dict[str, Any], task: Task, source: str, dag: Any = None
+    ) -> tuple[ToolEvent, dict[str, list[str]]]:
+        """Run a tool for something Athena does by itself that may run it, such as a DAG task's call, which the
+        engine has let it make, by its allowed_tools or your OK (dags/backend.py): with the privacy check and the
+        tool's time limit, and what it saves kept for you to approve, as ``source`` says it came from. Returns what
+        happened, and what the tool noted."""
+        turn = Turn(alone=source, dag=dag)
+        end_turn = begin_turn(turn)
+
+        async def approved(*_: Any) -> bool:  # it's been allowed already, if it asks first
+            return True
+
+        call = ToolCall(id="dag", name=name, arguments=args, raw_arguments=json.dumps(args))
+        try:
+            event = await self._run_tool(call, approved, task, allowed=frozenset({name}))
+        finally:
+            end_turn()
+        return event, turn.notes
+
+    def model_for(self, chat_id: str) -> str:
+        """The model a chat uses: its agent's, or [llm] model."""
+        return self._model(chat_id) or self.llm.cfg.model
 
     def _model(self, chat_id: str) -> str | None:
         return self.directory.model(chat_id) if self.directory else None
@@ -495,11 +511,9 @@ class Agent:
 
     def _answered_you(self) -> None:
         self.answering_you -= 1
-        self.last_answered_you = time.monotonic()
-        if not self.answering_you:
-            self.chatting.clear()
 
-    def _record(self, record: QueryRecord) -> None:
+    def record(self, record: QueryRecord) -> None:
+        """Keep what answering, or working, took, for the usage statistics."""
         record.seconds = time.time() - record.started
         if not self.stats:
             return
@@ -580,7 +594,6 @@ class Agent:
         chat_id: str | None = None,
         hidden: Sequence[str] = (),
         model: str | None = None,
-        dag: Any = None,
     ) -> AgentResult:
         """Call the model, and the tools it asks for, until it answers. Adds to ``messages`` as it goes."""
         started = time.monotonic()
@@ -588,7 +601,7 @@ class Agent:
         result = AgentResult(text="")
         thinking = background.thinking if background else None
         only = background.only_tools if background else None
-        turn = Turn(alone=(background.source or background.label) if background else None, chat=chat_id, dag=dag)
+        turn = Turn(alone=(background.source or background.label) if background else None, chat=chat_id)
         end_turn = begin_turn(turn)
 
         def step(tools: Any) -> Awaitable[LLMReply]:
@@ -631,9 +644,6 @@ class Agent:
                     if on_tool:
                         await on_tool(event)
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
-                if turn.finished is not None:  # a tool gave the answer, as task_result does in a DAG run
-                    result.text = turn.finished
-                    break
             else:
                 # Out of tool rounds: ask for a final answer with tools switched off.
                 task.thinking()

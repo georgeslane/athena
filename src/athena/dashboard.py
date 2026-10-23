@@ -165,7 +165,7 @@ ROUTES = (
     ("POST", r"/api/agents/(?P<agent>\d+)/dag/check", "_check_dag"),
     ("POST", r"/api/agents/(?P<agent>\d+)/dag/(?P<action>run|pause|resume|stop)", "_dag_action"),
     ("GET", r"/api/agents/(?P<agent>\d+)/runs", "_get_runs"),
-    ("GET", r"/api/runs/(?P<run>\d+)", "_get_run"),
+    ("GET", r"/api/runs/(?P<run>run_[0-9A-Za-z_]{1,60})", "_get_run"),
     ("POST", r"/api/proposals/(?P<proposal>\d+)", "_decide"),
     ("GET", r"/api/models", "_get_models"),
     ("POST", r"/api/thinking", "_set_thinking"),
@@ -306,7 +306,7 @@ class DashboardServer(AgentsAPI, Server):
         if path == "/health":
             return Response("ok")
         if path.startswith(HOOKS):  # events that start tasks: their own token, not the dashboard's password
-            return self.hooks.handle(request)
+            return await self.hooks.handle(request)
         if path in FILES:
             if method != "GET":
                 raise HTTPError(405, "Use GET.")

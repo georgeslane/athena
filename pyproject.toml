@@ -19,6 +19,8 @@ dependencies = [
     "pypdf>=6.21.1",
     "fpdf2>=2.8",
     "markdown-it-py>=3",
+    # Runs agents' DAGs (src/athena/dags/): pinned to a commit, as it isn't on PyPI.
+    "agentic-airflow @ git+https://github.com/georgeslane/agentic-airflow@629dd6bdcf14f1fa43b07867eed2747c53d2f25a",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +44,11 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# agentic-airflow isn't on PyPI: it's installed from its repository, at the commit pinned in dependencies, so a
+# package of the same name there can't be installed instead.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/athena"]

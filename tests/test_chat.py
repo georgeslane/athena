@@ -216,7 +216,10 @@ async def test_naming_and_deleting_agents(chat):
         assert (await http.post("/api/agents/9", json={"name": "x"})).status_code == 404
         state = (await http.get("/api/agents")).json()
         assert state["sessions"][1]["title"] == "Job hunting" and state["sessions"][1]["last"] > 0
-        chat.dags.save(agent, "with DAG(schedule='0 9 * * *'):\n    find = Task(prompt='Look for new postings.')\n")
+        chat.dags.save(
+            agent,
+            "with Dag('postings', prompt='p', schedule=['0 9 * * *']):\n    AgenticTask('find', prompt='Look.')\n",
+        )
         listed = (await http.get("/api/agents")).json()["sessions"][1]["dag"]
         assert listed["when"] == "every day at 09:00" and not listed["running"] and listed["next_run"]
 
@@ -327,22 +330,29 @@ async def test_an_agents_settings(chat):
         assert models == {"models": ["test-model"], "default": "test-model"}
 
 
-DAG = "with DAG(schedule='0 9 * * 1-5'):\n    find = Task(prompt='Find jobs.')\n"
+DAG = "with Dag('jobs', prompt='p', schedule=['0 9 * * 1-5']):\n    find = AgenticTask('find', prompt='Find jobs.')\n"
 
 
 async def test_an_agents_dag_from_the_dashboard(chat):
     async with client(chat) as http:
         fresh = (await http.get("/api/agents/1/dag")).json()
-        assert not fresh["written"] and fresh["source"].startswith("from athena import DAG, Task")
-        assert fresh["dag"]["when"] == "only when you run it" and fresh["dag"]["end"][-1]["id"] == "summary"
-        assert "send_note" in fresh["tools"] and fresh["master"] and "job_emails = Task(" in fresh["source"]
-        assert fresh["events"] == {"waiting": {}, "sources": {}, "claude": "claude-done", "hooks": False}
+        assert not fresh["written"] and fresh["source"].startswith("from agentic_airflow import")
+        assert fresh["dag"]["when"] == "only when it's run by hand" and fresh["dag"]["end"][-1]["id"] == "end.summary"
+        assert "send_note" in fresh["tools"] and fresh["master"] and "job_emails = AgenticTask(" in fresh["source"]
+        assert fresh["events"] == {
+            "assets": {},
+            "webhooks": {},
+            "sources": {},
+            "claude": "claude-done",
+            "hooks": False,
+        }
 
-        checked = (await http.post("/api/agents/1/dag/check", json={"source": "with DAG():\n    pass\n"})).json()
+        empty = "with Dag('d', prompt='p'):\n    pass\n"
+        checked = (await http.post("/api/agents/1/dag/check", json={"source": empty})).json()
         assert checked["dag"] is None and checked["error"]["line"] == 1 and "no tasks" in checked["error"]["message"]
-        unknown = "with DAG(hidden_tools=['nope_*']):\n    a = Task(prompt='x')\n"
+        unknown = "with Dag('d', prompt='p', hidden_tools=['nope_*']):\n    AgenticTask('a', prompt='x')\n"
         assert (await http.post("/api/agents/1/dag/check", json={"source": unknown})).json()["unknown"] == ["nope_*"]
-        assert (await http.post("/api/agents/1/dag", json={"source": "with DAG():\n    pass\n"})).status_code == 400
+        assert (await http.post("/api/agents/1/dag", json={"source": empty})).status_code == 400
         assert (await http.post("/api/agents/1/dag", json={"source": 3})).status_code == 400
 
         saved = (await http.post("/api/agents/1/dag", json={"source": DAG})).json()
@@ -351,20 +361,25 @@ async def test_an_agents_dag_from_the_dashboard(chat):
         assert (await http.post("/api/agents/1/dag/resume", json={})).json()["next_run"]
         assert (await http.post("/api/agents/1/dag/stop", json={})).status_code == 409  # it isn't running
         queued = (await http.post("/api/agents/1/dag/run", json={})).json()
-        assert queued["queued"] == ["manual"] or queued["running"]  # it starts as soon as Athena's free
+        assert queued["queued"] == ["manual"] or queued["running"]  # it starts when it's its turn
         assert (await http.post("/api/agents/9/dag/run", json={})).status_code == 404
-        await until(lambda: chat.dags.store.runs(1) and chat.dags.store.runs(1)[0].state != "running")
-        [run] = chat.dags.store.runs(1)
+        await until(lambda: chat.dags.runs(1) and chat.dags.runs(1)[0].is_terminal)
+        [run] = chat.dags.runs(1)
         runs = (await http.get("/api/agents/1/runs")).json()["runs"]
         assert [(r["number"], r["state"]) for r in runs] == [(1, "success")] and "tasks" not in runs[0]
-        detail = (await http.get(f"/api/runs/{run.id}")).json()
-        assert [t["task"] for t in detail["tasks"]][:2] == ["find", "review_workflow"] and detail["source"] == DAG
-        assert (await http.get("/api/runs/999")).status_code == 404
+        detail = (await http.get(f"/api/runs/{run.run_id}")).json()
+        assert [t["task"] for t in detail["tasks"]][:2] == ["find", "end.review_workflow"]
+        assert detail["dag"]["id"] == "jobs" and detail["agent"] == 1
+        assert (await http.get("/api/runs/run_nope")).status_code == 404
 
-        proposal = chat.dags.store.propose(1, run.id, "workflow", "Better.", DAG, source=DAG.replace("jobs", "roles"))
+        better = DAG.replace("Find jobs.", "Find roles.")
+        proposal = chat.dags.store.propose(1, run.run_id, "workflow", "Better.", DAG, source=better)
         shown = (await http.get("/api/agents/1/dag")).json()["proposals"]
-        assert shown[0]["id"] == proposal.id and "+    find = Task(prompt='Find roles.')" in shown[0]["diff"]
-        assert (await http.get(f"/api/runs/{run.id}")).json()["proposals"][0]["id"] == proposal.id
+        assert (
+            shown[0]["id"] == proposal.id
+            and "+    find = AgenticTask('find', prompt='Find roles.')" in shown[0]["diff"]
+        )
+        assert (await http.get(f"/api/runs/{run.run_id}")).json()["proposals"][0]["id"] == proposal.id
         assert (await http.post(f"/api/proposals/{proposal.id}", json={"approve": "yes"})).status_code == 400
         approved = (await http.post(f"/api/proposals/{proposal.id}", json={"approve": True})).json()
         assert "Find roles." in approved["source"] and approved["proposals"] == []
@@ -404,17 +419,17 @@ async def test_files_that_come_with_an_agents_guidance(chat):
 
 
 async def test_deleting_an_agent_while_its_dag_runs_stops_the_run_first(chat):
-    chat.agent.gate.grace = 0.0
     agent = chat.history.new_session("Doomed").id
-    dag = "with DAG():\n    a = Task(prompt='Please use wait_here')\n    b = Task(prompt='b')\n    a >> b\n"
+    dag = (
+        "with Dag('doomed', prompt='p', allowed_tools=['wait_here']):\n"
+        "    a = AgenticTask('a', prompt='Please use wait_here')\n    a >> AgenticTask('b', prompt='b')\n"
+    )
     chat.dags.save(agent, dag)
     chat.history.append_exchange(f"session:{agent}", "Hello", "Hi")
-    chat.dags.run_now(agent)
-    await until(lambda: chat.dags.current and chat.status.snapshot().step == "Using wait_here")
+    run = await chat.dags.run_now(agent)
+    await until(lambda: chat.status.snapshot().step == "Using wait_here")
     async with client(chat) as http:
         state = (await http.delete(f"/api/agents/{agent}")).json()
-    assert [s["id"] for s in state["sessions"]] == [1] and chat.dags.current is None
-    store = chat.dags.store
-    with store._lock:
-        left = store._conn.execute("SELECT COUNT(*) FROM dag_task_runs").fetchone()[0]
-    assert left == 0 and store.runs(agent) == []  # nothing of it left behind
+    assert [s["id"] for s in state["sessions"]] == [1]
+    assert chat.dags.engine.list_runs("doomed") == [] and chat.dags.run(run.run_id) is None  # nothing left behind
+    assert chat.dags.dag(agent) is None and "doomed" not in chat.dags.engine.dags

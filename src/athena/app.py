@@ -18,9 +18,8 @@ from athena.builtin import Builtin, Unavailable
 from athena.channel import Reach
 from athena.chat import DashboardChat
 from athena.config import THINKING, Config, parse_config
-from athena.dags.migrate import start_afresh
-from athena.dags.scheduler import Dags
-from athena.dags.spec import CLAUDE_DONE
+from athena.dags.migrate import start_afresh, upgrade
+from athena.dags.service import Dags
 from athena.dags.store import AgentStore
 from athena.dashboard import DashboardServer
 from athena.documents import DocumentIndex
@@ -120,7 +119,7 @@ class Services:
             self.agent,
             timezone=self.config.agent.timezone,
             channel=lambda: self.reach,
-            tools=self.tools,
+            state=self.config.db_path.with_name("dags.db"),  # the engine's runs and approvals
             workspace=workspace_of(self.config),  # where each agent's files are
             on_ran=self.rewarm.set,  # the master agent's conversation may have what a run found in it
         )
@@ -195,7 +194,7 @@ class Services:
             await self.dashboard.start()
         self.index_conversations()  # anything said while the embeddings server was down
         if self.config.tasks.enabled:
-            self.dags.start()
+            await self.dags.start()
         if self.alerts:
             self.alerts.start()
         self._projects = asyncio.create_task(self._watch_projects(), name="claude-projects")
@@ -294,7 +293,8 @@ class Services:
                 self.keep("(Claude's projects changed.)", text)
         for project in projects.finished:  # the DAGs waiting for Claude to finish something
             said = f"Claude has finished “{project.title}”" + (f": {project.progress}" if project.progress else ".")
-            self.dags.fire(CLAUDE_DONE, f"{said}\n{project.url}")
+            if self.config.tasks.enabled:
+                await self.dags.claude_done(f"{said}\n{project.url}")
         return projects.board()
 
     async def _watch_projects(self) -> None:
@@ -488,6 +488,7 @@ def build_memory(cfg: Config) -> MemoryService:
 def build_services(cfg: Config) -> Services:
     memory = build_memory(cfg)
     start_afresh(cfg.db_path, memory.store, cfg.db_path.parent / "photos")  # once, before the agents are read
+    upgrade(cfg.db_path)  # once: runs became agentic-airflow's
     llm = LLMClient(cfg.llm)
     history = ConversationStore(cfg.db_path, cfg.agent.max_history_messages)
     stats = UsageStats(cfg.db_path)

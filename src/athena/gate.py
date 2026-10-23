@@ -1,90 +1,43 @@
-"""Who uses the model next: your messages, before what Athena does by itself, but not in the middle of a task.
+"""Who uses the model next: your messages before what Athena does by itself, but never in the middle of a task.
 
-The model server answers one thing at a time, and what's cached is what it read last. So when you send a message
-while Athena's working through an agent's DAG, it's answered once the task that's running has finished, before
-the next one starts. The next task waits until you've been quiet for a little while, so a conversation isn't
-broken up by tasks. While a task waits for your OK to use a tool, it isn't using the model: your messages can
-go ahead, and the task carries on once they're answered.
+The model server answers one thing at a time, and what's cached is what it read last. So each model has a queue
+(agentic-airflow's, which the engine of agents' DAGs shares, dags/service.py): a DAG's task holds the model from
+its first step to its answer, and a message of yours waits for it, then goes before anything Athena's waiting to
+do by itself, in the order you sent it. A task waiting for your OK to use a tool doesn't hold the model, so your
+messages go ahead meanwhile. What else Athena does by itself, such as looking back at how a skill went, waits its
+turn as a task does.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 
-GRACE_SECONDS = 60.0  # how long you've been quiet before the next task starts
+from agentic_airflow.priority import DAG_PRIORITY, USER_PRIORITY, ModelQueueSet
 
 
 class Gate:
-    def __init__(self, grace: float = GRACE_SECONDS, clock: Callable[[], float] = time.monotonic):
-        self.grace = grace
-        self.clock = clock
-        self.working: str | None = None  # what Athena's doing by itself, while it is, such as "apply in Jobs"
-        self.users = 0  # your messages being answered, or waiting to be
-        self._yielding = 0  # Athena's waiting for your OK, so your messages can go ahead
-        self._last_yours = float("-inf")
-        self._changed = asyncio.Condition()
+    def __init__(self, queues: ModelQueueSet | None = None):
+        self.queues = queues or ModelQueueSet()
+        self.doing: dict[str, str] = {}  # what Athena's doing by itself with each model, while it is
 
-    @property
-    def held(self) -> bool:
-        """Whether a message of yours would wait now."""
-        return self.working is not None and not self._yielding
+    def busy(self, model: str) -> bool:
+        """Whether something's using the model now, so a message of yours would wait."""
+        return self.queues.get(model).active > 0
 
     @contextlib.asynccontextmanager
-    async def yours(self) -> AsyncIterator[None]:
-        """For a message of yours: waits for the task that's running, if one is, to finish."""
-        async with self._changed:
-            self.users += 1
+    async def yours(self, model: str) -> AsyncIterator[None]:
+        """For a message of yours: once the task using the model, if one is, has finished."""
+        async with self.queues.get(model).slot(USER_PRIORITY, 0.0):
+            yield
+
+    @contextlib.asynccontextmanager
+    async def background(self, model: str, what: str) -> AsyncIterator[None]:
+        """For something Athena does by itself, besides a DAG's tasks: after your messages, and those before it."""
+        async with self.queues.get(model).slot(DAG_PRIORITY, time.time()):
+            self.doing[model] = what
             try:
-                await self._changed.wait_for(lambda: not self.held)
-            except BaseException:
-                self.users -= 1
-                self._changed.notify_all()
-                raise
-        try:
-            yield
-        finally:
-            async with self._changed:
-                self.users -= 1
-                self._last_yours = self.clock()
-                self._changed.notify_all()
-
-    @contextlib.asynccontextmanager
-    async def task(self, what: str, grace: bool = True) -> AsyncIterator[None]:
-        """For something Athena does by itself: it starts once no message of yours is waiting, and you've been quiet
-        for the grace period, unless not ``grace``."""
-        async with self._changed:
-            while True:
-                if self.users or self.working is not None:
-                    await self._changed.wait()
-                    continue
-                left = self.grace - (self.clock() - self._last_yours) if grace else 0.0
-                if left <= 0:
-                    break
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._changed.wait(), left)
-            self.working = what
-        try:
-            yield
-        finally:
-            async with self._changed:
-                self.working = None
-                self._changed.notify_all()
-
-    @contextlib.asynccontextmanager
-    async def aside(self) -> AsyncIterator[None]:
-        """While the task that's running waits for something other than the model, such as your OK: your messages
-        go ahead, and it carries on once they've been answered."""
-        async with self._changed:
-            self._yielding += 1
-            self._changed.notify_all()
-        try:
-            yield
-        finally:
-            try:
-                async with self._changed:
-                    await self._changed.wait_for(lambda: self.users == 0)
+                yield
             finally:
-                self._yielding -= 1
+                self.doing.pop(model, None)

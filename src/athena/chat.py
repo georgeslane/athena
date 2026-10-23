@@ -297,7 +297,6 @@ class DashboardChat:
             elsewhere = {"session": history.master.id, "channel": snapshot.channel, "text": snapshot.task}
         dags = self.s.dags
         configs = {c.id: c for c in dags.store.all()}
-        current = dags.current
         waiting: dict[int, int] = {}
         for proposal in dags.store.proposals():
             waiting[proposal.agent] = waiting.get(proposal.agent, 0) + 1
@@ -314,7 +313,7 @@ class DashboardChat:
                     "messages": s.messages,
                     "last": s.last_message,
                     "muted": s.muted,
-                    "dag": self._dag(configs.get(s.id), current is not None and current.run.agent == s.id),
+                    "dag": self._dag(configs.get(s.id)),
                     "proposals": waiting.get(s.id, 0),
                 }
                 for s in history.sessions(also={c.id for c in configs.values() if c.dag})
@@ -334,16 +333,17 @@ class DashboardChat:
             "attach": {"photos": MAX_PER_MESSAGE, "files": MAX_FILES if self.s.config.workspace.enabled else 0},
         }
 
-    def _dag(self, config: Any, running: bool) -> dict[str, Any] | None:
+    def _dag(self, config: Any) -> dict[str, Any] | None:
         """An agent's DAG, as the list of agents shows it: when it runs, and whether it is."""
         if config is None or not config.dag:
             return None
-        spec = self.s.dags.spec(config.dag)
+        described = self.s.dags.describe(config.id)
+        dag = described["dag"]
         return {
-            "when": spec.describe() if spec else "its file has a problem",
-            "running": running,
-            "paused": config.paused,
-            "next_run": config.next_run if not config.paused else None,
+            "when": dag["when"] if dag else "its file has a problem",
+            "running": described["running"] is not None,
+            "paused": described["paused"],
+            "next_run": described["next_run"],
         }
 
     def session(self, session_id: int, before: int | None = None) -> dict[str, Any]:

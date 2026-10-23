@@ -44,7 +44,7 @@ def make_bot(config, respond, allowed=(ME,)):
     config.telegram = TelegramConfig(bot_token="123456:TEST", allowed_user_ids=list(allowed))
     services = SimpleNamespace(
         config=config,
-        agent=SimpleNamespace(respond=respond, gate=Gate(), last_chat=None),
+        agent=SimpleNamespace(respond=respond, gate=Gate(), last_chat=None, model_for=lambda chat: "m"),
         rewarm=asyncio.Event(),
         history=ConversationStore(config.db_path),
         approvals=Approvals(),
@@ -512,20 +512,28 @@ async def test_retry_takes_back_the_last_answer_and_asks_again(config):
     assert replies[-1].text == "There's nothing to try again."
 
 
-def dag_scheduler(config, history):
+def dag_service(config, history):
+    from conftest import FakeLLMServer, completion
+
+    from athena.agent import Agent
     from athena.config import TasksConfig
-    from athena.dags.scheduler import Dags
+    from athena.dags.service import Dags
     from athena.dags.store import AgentStore
     from athena.tools import ToolRegistry
 
-    agent = SimpleNamespace(answering_you=0, last_answered_you=float("-inf"), history=history, gate=Gate())
-    return Dags(TasksConfig(), AgentStore(config.db_path), agent, timezone="Europe/London",
-                channel=lambda: None, tools=ToolRegistry())  # fmt: skip
+    llm = FakeLLMServer(lambda body: completion("Done.")).client(config.llm)
+    agent = Agent(config.agent, llm, ToolRegistry(), history)
+    return Dags(TasksConfig(), AgentStore(config.db_path), agent, timezone="Europe/London", channel=lambda: None,
+                state=config.db_path.with_name("dags.db"))  # fmt: skip
+
+
+def dag_file(dag_id, schedule, prompt):
+    return f"with Dag({dag_id!r}, prompt='p', schedule=[{schedule!r}]):\n    AgenticTask('t', prompt={prompt!r})\n"
 
 
 async def test_dags_lists_them_with_buttons_to_run_pause_and_resume(config):
     bot = make_bot(config, None)
-    bot.s.dags = dags = dag_scheduler(config, bot.s.history)
+    bot.s.dags = dags = dag_service(config, bot.s.history)
     ctx = SimpleNamespace(bot=FakeBot(), args=[])
     update, replies = command_update()
     await bot.cmd_dags(update, ctx)
@@ -533,41 +541,46 @@ async def test_dags_lists_them_with_buttons_to_run_pause_and_resume(config):
 
     history = bot.s.history
     history.rename(1, "Briefing")
-    dags.save(1, "with DAG(schedule='30 7 * * 1-5'):\n    brief = Task(prompt='Brief me.')\n")
+    dags.save(1, dag_file("briefing", "30 7 * * 1-5", "Brief me."))
     servers = history.new_session("Servers").id
-    dags.save(servers, "with DAG(schedule='0 10 * * sun'):\n    look = Task(prompt='Find servers.')\n")
-    dags.pause(servers)
-    await bot.cmd_dags(update, ctx)
-    lines = replies[-1].text.split("\n")
-    assert lines[0] == "What each agent does by itself:"
-    assert lines[1].startswith("▶️ Briefing: every weekday at 07:30 · next ")
-    assert lines[2] == "⏸ Servers: paused"
-    rows = replies[-1].kwargs["reply_markup"].inline_keyboard
-    assert [[b.text for b in row] for row in rows] == [["▶ Run Briefing", "⏸ Pause"], ["▶ Run Servers", "⏯ Resume"]]
+    dags.save(servers, dag_file("servers", "0 10 * * sun", "Find servers."))
+    await dags.engine.start()  # for when they're next due
+    try:
+        dags.pause(servers)
+        await bot.cmd_dags(update, ctx)
+        lines = replies[-1].text.split("\n")
+        assert lines[0] == "What each agent does by itself:"
+        assert lines[1].startswith("▶️ Briefing: every weekday at 07:30 · next ")
+        assert lines[2] == "⏸ Servers: paused"
+        rows = replies[-1].kwargs["reply_markup"].inline_keyboard
+        assert [[b.text for b in row] for row in rows] == [
+            ["▶ Run Briefing", "⏸ Pause"],
+            ["▶ Run Servers", "⏯ Resume"],
+        ]
 
-    edits, answers = [], []
+        edits, answers = [], []
 
-    async def answer(text=None):
-        answers.append(text)
+        async def answer(text=None):
+            answers.append(text)
 
-    async def edit_message_text(text, **kwargs):
-        edits.append(text)
+        async def edit_message_text(text, **kwargs):
+            edits.append(text)
 
-    def press(button, user=ME):
-        query = SimpleNamespace(data=button.callback_data, answer=answer, edit_message_text=edit_message_text)
-        return SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=user))
+        def press(button, user=ME):
+            query = SimpleNamespace(data=button.callback_data, answer=answer, edit_message_text=edit_message_text)
+            return SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=user))
 
-    await bot.on_dag_button(press(rows[0][1], user=STRANGER), ctx)
-    assert answers == ["Not allowed."] and not dags.store.get(1).paused
-    await bot.on_dag_button(press(rows[0][1]), ctx)  # pause Briefing
-    assert answers[-1] == "Paused" and dags.store.get(1).paused
-    assert edits[-1].split("\n")[1] == "⏸ Briefing: paused"
-    await bot.on_dag_button(press(rows[1][1]), ctx)  # resume Servers
-    assert not dags.store.get(servers).paused
-    await bot.on_dag_button(press(rows[1][0]), ctx)  # run it
-    assert answers[-1] == "It'll run as soon as I'm free" and dags.queue[0].agent == servers
-    await bot.on_dag_button(press(rows[1][0]), ctx)  # again, while it waits
-    assert answers[-1] == "It's already waiting to run."
+        await bot.on_dag_button(press(rows[0][1], user=STRANGER), ctx)
+        assert answers == ["Not allowed."] and not dags.paused(1)
+        await bot.on_dag_button(press(rows[0][1]), ctx)  # pause Briefing
+        assert answers[-1] == "Paused" and dags.paused(1)
+        assert edits[-1].split("\n")[1] == "⏸ Briefing: paused"
+        await bot.on_dag_button(press(rows[1][1]), ctx)  # resume Servers
+        assert not dags.paused(servers)
+        await bot.on_dag_button(press(rows[1][0]), ctx)  # run it
+        assert answers[-1] == "It'll run when it's its turn" and dags.runs(servers)
+    finally:
+        await dags.stop()
 
     bot.s.config.tasks.enabled = False
     await bot.cmd_dags(update, ctx)
