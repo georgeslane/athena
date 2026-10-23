@@ -331,7 +331,7 @@ async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills
             return completion(None, calls)
         if last["role"] == "tool":
             return completion("The 7:52 is on time.")
-        if "Write George a short summary" in text:
+        if "Now tell George what this run found" in text:
             return completion("The 7:52 is on time. I suggested a memory and a skill.")
         return completion("NO CHANGES")
 
@@ -349,7 +349,7 @@ async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills
     assert (fact.text, fact.source) == ("George's train to work is the 7:52.", "the DAG of your agent “Commute”")
     assert memory.store.count().get("fact", 0) == 0  # not remembered until you approve it
     assert skills.store.named("Commute") is None and len(skills.store.suggestions()) == 1
-    summary = next(b for b in server.requests if "Write George a short summary" in json.dumps(b["messages"][-1]))
+    summary = next(b for b in server.requests if "Now tell George what this run found" in json.dumps(b["messages"][-1]))
     assert "It suggested a memory and a skill, to approve or not" in summary["messages"][-1]["content"]
 
 

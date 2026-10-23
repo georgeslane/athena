@@ -200,7 +200,7 @@ async def test_a_shortcut_starts_a_dag_through_the_dashboards_address(tmp_path, 
             async with asyncio.timeout(5):
                 while not said:
                     await asyncio.sleep(0.05)
-            assert said[0].startswith("📋 **Home** · ") or said[0].startswith("📋 **Home**\n\n")
+            assert not said[0].startswith(("📋", "**"))  # the master agent's own: just what it says
             dag = (
                 await http.get(
                     url.replace("/hooks/arrive-home", "/api/agents/1/dag"),

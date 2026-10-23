@@ -131,8 +131,8 @@ def seed(services):
     add("apply_0", "apply", "success", "**Applied** to A.", [0], given={"jobs": "Job A"})
     add("apply_1", "apply", "skipped", path=[1])
     add("report", "report", "success", "Applied to A.")
-    for end in ("review_workflow", "review_tools", "review_skills", "save_context", "summary"):
-        add(f"end.{end}", f"end.{end}", "skipped" if end == "review_skills" else "success", f"{end} said.")
+    for end in ("review", "summary"):
+        add(f"end.{end}", f"end.{end}", "skipped" if end == "review" else "success", f"{end} said.")
     dags.engine.state.save_run(run.to_dict())
     better = JOBS.replace("Say what was applied for.", "List what was applied for, with links.")
     dags.proposals.propose(jobs, run.run_id, "workflow", "The report should link to each job.", better)
@@ -175,7 +175,7 @@ async def test_writing_a_dag_and_seeing_it_drawn(athena, browser):  # noqa: F811
     await page.wait_for_selector(".dag-graph .graph-node >> text=fits")
     assert await page.locator(".dag-graph .graph-node").count() == 4  # with jobs, what started it, for each item
     assert await page.locator(".dag-graph .graph-start").count() == 1
-    assert await page.locator(".dag-graph .graph-chip").count() == 5  # the tasks every DAG ends with
+    assert await page.locator(".dag-graph .graph-chip").count() == 2  # the tasks every DAG ends with
     assert await page.inner_text(".dag-graph .graph-group-label") == "each_job"
     assert await page.locator(".dag-graph .graph-node[data-each]").count() == 2  # fits and apply, for each item
     assert await page.inner_text(".dag-graph .graph-edge-label.each") == "each"
@@ -295,7 +295,7 @@ async def test_a_runs_history(athena, browser):  # noqa: F811
     assert await page.get_attribute(".graph-node[aria-label^='fits']", "data-state") == "success"
     assert "×2" in await page.inner_text(".graph-node[aria-label^='fits']")  # once for each
     assert "1 done, 1 skipped" in await page.get_attribute(".graph-node[aria-label^='apply']", "aria-label")
-    assert await page.get_attribute(".graph-chip:text-is('review skills')", "data-state") == "skipped"
+    assert await page.get_attribute(".graph-chip:text-is('review')", "data-state") == "skipped"
     await page.click(".graph-node[aria-label^='fits']")
     fits = page.locator(".run-task[data-task='fits']")
     assert await fits.count() == 2
@@ -683,7 +683,7 @@ async def test_what_a_run_says_arrives_in_the_agents_chat_and_the_masters(talkin
     talking.llm = talking.agent.llm = FakeLLMServer(
         lambda body: completion(
             "Two new jobs at Acme."
-            if "Write George a short summary" in json.dumps(body["messages"][-1])
+            if "Now tell George what this run found" in json.dumps(body["messages"][-1])
             else "NO CHANGES"
         )
     ).client(talking.config.llm)

@@ -52,7 +52,7 @@ Values are written out as they are: strings, numbers, `True`, `False`, `None`, a
 | `id` | Its id, such as `"emails"`: unique among your agents' DAGs. Its runs are kept by it, so renaming it starts its history afresh. |
 | `prompt` | What it's for. Every task is told it, with the agent's guidance. |
 | `schedule` | What starts it, a list of any of: cron, such as `"30 7 * * 1-5"` (see [Schedules](#schedules)); `Webhook("arrive-home")`; `Asset("job-emails")`; `DagTrigger("other_dag")`. Empty, or left out, runs it only when you do. See [What starts a DAG](#what-starts-a-dag). |
-| `allowed_tools` | The tools its tasks may use without asking: see [Tools](#tools). |
+| `allowed_tools` | The tools its tasks are given, and may use without asking: see [Tools](#tools). Left out, they're given none. |
 | `hidden_tools` | Tools its tasks find when they need them, rather than having them in every prompt, which keeps prompts shorter. |
 | `denied_tools` | Tools its tasks are never offered: calling one waits for your OK. |
 | `model` | The model its tasks use: the agent's, unless it says. |
@@ -157,11 +157,12 @@ A group's tasks share its settings: `allowed_tools`, `hidden_tools`, `denied_too
 
 ## Tools
 
-- **Asking first**: a tool that asks you first, such as one that sends an email, is offered to every task, and asks in Telegram and in the agent's chat, saying which task wants it, when a task calls it. The task waits, without holding the model, for up to `[tasks] confirm_minutes` (60), and then it's declined. What you've allowed in the agent's chat doesn't count for its DAG.
-- **`allowed_tools`** is the whole list of tools the tasks may use without asking. Left out, they may use any tool, asking first for those that do. Naming a tool that asks first lets it run without asking; any tool that isn't named, when there's a list, waits for your OK when it's called. A group's or a task's own list replaces the DAG's.
+- **`allowed_tools`** is the whole list of tools a task is given: the DAG's, or a group's or the task's own, which replaces it. Left out, it's given none. They run without asking, so naming a tool that asks first lets it run without asking. List each task's own, and only what it needs, so it doesn't reach for others: an email task given only the email tools can't go looking through your messages.
+- **Asking first**: a tool that asks you first, such as one that sends an email, and isn't on the task's list, isn't in its prompt: the task can find it with `search_tools` when it needs one, and it asks in Telegram and in the agent's chat, saying which task wants it. The task waits, without holding the model, for up to `[tasks] confirm_minutes` (60), and then it's declined. What you've allowed in the agent's chat doesn't count for its DAG. A tool that doesn't ask first and isn't on the list, the task never has.
 - **Always asking**: changing a DAG (`change_dag`) and handing work to Claude always ask, whatever `allowed_tools` says.
 - **Hidden**: a tool in `hidden_tools`, or `[tools] on_demand`, isn't in the prompt: the model finds it with `search_tools` when it needs it.
-- **The tool review**, at the end of each run, can propose the lists, for one task or for the DAG, from what the run used and what you allowed: you approve or reject it, and the file's changed where it's written. A change that would let a tool that asks first run without asking says so, plainly, wherever you're asked: in the run's summary, on the dashboard, and when Athena asks to change the file with `change_dag`.
+- **The review**, at the end of each run, can propose each task's list from what it used and needed, and what you allowed: you approve or reject it, and the file's changed where it's written.
+- **DAGs from before** tasks were given only what their lists name have each task's list written in once, as the tools it used in its last runs that don't ask first, so they carry on as they did. Check them on the DAG view, and take out what a task shouldn't use. A change that would let a tool that asks first run without asking says so, plainly, wherever you're asked: in the run's summary, on the dashboard, and when Athena asks to change the file with `change_dag`.
 
 Allowing a task to fetch or search without asking lets it send what it's read to those sites unseen, so allow only what it needs, where it needs it.
 
@@ -271,7 +272,7 @@ fits = AgenticTask("fits", prompt="Should I apply for this job? Ask me if it's b
 - **Runs take turns**: one at a time on each model, first come first served. A task holds the model from its first step to its answer, so it's never interrupted; your messages go before the next task, in the order you sent them. A task waiting for your OK doesn't hold the model, so your messages go ahead meanwhile.
 - **Each task** is a request to the model, starting as the agent's chat does, with its guidance, files and what its last run kept, then what the run is and how it started: by hand, or on its schedule, with the time it's for. Then what the tasks before it found, then the task. It isn't given the DAG file, which is what's running it. A task gets up to `[tasks] max_tool_rounds` (25) steps and `max_minutes` (30), not counting time it waits for your OK. If the model server can't be reached, it tries again after 30 seconds, then 2 minutes, and if it still can't, the rest of the run's tasks don't try.
 - **A run that finds nothing**, with every task that ran returning nothing or an empty list, and every branch picking none, ends there, so checking for something often costs one task.
-- **Otherwise it ends** with five tasks of its own: reviewing the workflow, the tools and the skills it used, which can propose changes for you to approve; keeping what the next run should know; and a summary, in the agent's chat, which tells you, and the master agent, when there's news. Each is given the run's log, a line for each task. See [Agents](agents.md#the-end-of-each-run).
+- **Otherwise it ends** with two tasks of its own: a review of its tasks, their tools and the skills it used, which can propose changes for you to approve; and a short message saying what's new, in the agent's chat, which tells you, and the master agent, when there's news, and which the next run starts with. Each is given the run's log, a line for each task. See [Agents](agents.md#the-end-of-each-run).
 - **A run's status** is how the DAG's own tasks went: one of the five failing doesn't make it a failure.
 - **Restarts**: a run going when Athena stops carries on when it starts again, starting the task that was going again from its beginning, and a tool that was waiting for your OK, or a question for you, is asked again.
 

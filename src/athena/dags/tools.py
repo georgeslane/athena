@@ -140,9 +140,9 @@ def dag_tools(dags: Dags) -> list[Tool]:
         Tool(
             name="change_context",
             description=(
-                "Change what an agent's DAG keeps for its next run, when the user tells you something in it is "
-                "wrong, done with or missing: give the whole of it as it should be, with that changed and the rest "
-                "as it is. Its next run starts with this."
+                "Change what an agent's next run starts with, what its runs last told the user, when they tell you "
+                "something in it is wrong, done with or missing: give the whole of it as it should be, with that "
+                "changed and the rest as it is."
             ),
             parameters={
                 "type": "object",

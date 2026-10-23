@@ -57,7 +57,9 @@ from athena.dags.reader import (
     as_dict,
     assets,
     read,
+    unlisted,
     webhooks,
+    with_tools,
 )
 from athena.dags.store import AgentStore
 from athena.files import SENT
@@ -73,6 +75,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 KEEP_RUNS = 10  # of each DAG's
+LISTED_TOOLS = "dags-list-tools"  # the upgrade that gives each task of a DAG from before the tools it used
 CONTEXT_CHARS = 12_000  # of a task's data, as the engine renders it: each upstream output, the run log
 RETRY_SECONDS = 60.0  # before a failed task's tried again, unless its DAG says otherwise
 EVENT_GAP = 60.0  # seconds: the same webhook again sooner doesn't start its DAGs again
@@ -108,6 +111,8 @@ class Dags:
         self.backend = Backend(agent, self.working, self.opening, cfg.thinking)
         tools = EngineTools()
         tools.add_provider(Toolbox(agent, self.working, self._source, self._noted))
+        for tool in ends.review_tools(self):  # the end of each run's: proposing changes to its DAG
+            tools.register(tool)
         self.engine = Engine(
             self.backend,
             config=EngineConfig(
@@ -155,6 +160,8 @@ class Dags:
     async def start(self) -> None:
         """Register each agent's DAG, start the engine, carry on with runs Athena stopped during, and ask again
         about tools that were waiting for your OK."""
+        if self.store.once(LISTED_TOOLS):
+            self._list_tools()
         for config in self.store.all():
             if config.dag.strip():
                 try:
@@ -171,6 +178,32 @@ class Dags:
             )
         for approval in self.engine.list_approvals():
             self._spawn(self._ask(approval.to_dict()))
+
+    def _list_tools(self) -> None:
+        """Once, for DAG files written before a task was given only the tools a list names: each task no list
+        covers is given the tools it used in its kept runs that don't ask first, so it carries on as it did. Those
+        that ask, it can find when it needs one, and they ask."""
+        asks = {t.name for t in self.agent.tools.all() if t.needs_confirmation}
+        for config in self.store.all():
+            try:
+                tasks = unlisted(config.dag) if config.dag.strip() else []
+                if not tasks:
+                    continue
+                dag_id = read(config.dag, timezone=self.timezone, hooks=self.hooks).id
+                used: dict[str, list[str]] = {task: [] for task in tasks}
+                for run in self.engine.list_runs(dag_id, limit=KEEP_RUNS):
+                    for inst in run.instances.values():
+                        for call in inst.tool_calls if inst.task_id in used else []:
+                            name = str(call.get("name"))
+                            if call.get("status") == "ok" and name not in asks and name not in used[inst.task_id]:
+                                used[inst.task_id].append(name)
+                file = with_tools(config.dag, {"allowed_tools": {"dag": [], **{t: sorted(n) for t, n in used.items()}}})
+                self.check(config.id, file)
+            except (DagError, SyntaxError) as exc:
+                log.warning("Couldn't list the tools of agent %d's DAG: %s", config.id, exc)
+                continue
+            self.store.update(config.id, dag=file)
+            log.info("Listed the tools each task of agent %d's DAG uses: %s", config.id, used)
 
     async def stop(self) -> None:
         for task in list(self._background):
@@ -530,9 +563,9 @@ class Dags:
         channel = self.channel()
         if channel is None:
             return
-        heading = f"📋 **{name}**" + ("" if what == "summary" else f" · {what}")
+        said = text if agent_id == self.master else f"**{name}:** {text}"  # as a message, not a report
         try:
-            await channel.tell(f"{heading}\n\n{text}", session=agent_id)
+            await channel.tell(said, session=agent_id)
         except Exception as exc:
             log.warning("Couldn't tell you what a DAG run found: %s", exc)
 
