@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from athena.compaction import KEEP_MESSAGES, MIN_MESSAGES, summarise
 from athena.config import AgentConfig
+from athena.files import SENDS, SENT, unsent
 from athena.gate import Gate
 from athena.history import ConversationStore, session_of
 from athena.llm import LLMClient, LLMReply, ToolCall
@@ -653,6 +654,8 @@ class Agent:
         finally:
             end_turn()
         result.notes = turn.notes
+        if background is None and self.tools.get(SENDS) and (named := unsent(turn.notes, result.text)):
+            turn.notes.setdefault(SENT, []).extend(named)  # a file the answer names is no use to you as a path
         if turn.notes.get("skills") and result.text.strip():
             result.transcript = [*messages, {"role": "assistant", "content": result.text}]
         result.elapsed = time.monotonic() - started

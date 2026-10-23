@@ -4,6 +4,9 @@
   write_file   a file, from what the model writes: a .pdf is laid out from Markdown
   send_file    sends one to you with Athena's answer, as a file in Telegram
 
+You can't open the workspace, so a path to a file is no use to you: a file made while answering you that the answer
+names, but that wasn't sent, is sent anyway (unsent, from agent.py).
+
 Files you send Athena, in Telegram or on the dashboard, go into the workspace's inbox/ folder (receive), and the
 message says where. Everything's within the workspace, which Athena opens without ever following a link
 (workspace.py). Reading and making PDFs is done in the code's sandbox (pdfs.py), where a file made to
@@ -14,6 +17,7 @@ but other files can.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Self
 
@@ -33,6 +37,8 @@ READ_CHARS = 5000  # of a file's text, at a time
 MAX_WRITE_CHARS = 500_000
 TEXT = {".md", ".markdown", ".txt", ".text", ".csv", ".tsv", ".json", ".html", ".xml", ".ics", ".log", ".py"}
 SENT = "files"  # what send_file notes for the turn: {"path", "caption"} as JSON, for the channel to send
+SENDS = "send_file"
+NOT_SEEN = "The user can't open your folder: send it with send_file if it's for them."
 
 
 def why_not(cfg: Config, name: str, size: int, most_mb: int) -> str | None:
@@ -141,7 +147,7 @@ class Files(Builtin):
                 description=(
                     "Write a file in your folder, replacing one of that name: Markdown, text, CSV and the like as "
                     "they are, and a .pdf laid out from Markdown you give, with headings, lists and tables. Then "
-                    "send it to the user with send_file if they want it."
+                    "send it to the user with send_file if it's for them."
                 ),
                 parameters={
                     "type": "object",
@@ -155,8 +161,11 @@ class Files(Builtin):
                 handler=write_file,
             ),
             Tool(
-                name="send_file",
-                description="Send the user a file from your folder, in Telegram, with your answer.",
+                name=SENDS,
+                description=(
+                    "Send the user a file from your folder, in Telegram, with your answer. They can't open your "
+                    "folder, so this is how they get a file you made: send it, rather than saying where it is."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {"path": path, "caption": {"type": "string", "description": "A line about it"}},
@@ -207,13 +216,15 @@ class Files(Builtin):
             raise ToolError(f"Your folder holds more than {limit} MB: delete what isn't needed before writing more.")
         if PurePosixPath(rel).suffix.lower() != ".pdf":
             workspace.write(self.workspace, rel, content.encode())
-            return f"Wrote {rel} ({workspace.show_size(len(content.encode()))})."
+            current_turn().note(workspace.MADE, rel)
+            return f"Wrote {rel} ({workspace.show_size(len(content.encode()))}). {NOT_SEEN}"
         workspace.make_folders(self.workspace, rel)
         said = await self._in_sandbox(f"make_pdf({content!r}, {'/workspace/' + rel!r}, {title!r})", 1000)
         found = workspace.kind(self.workspace, rel)
         size = f", {workspace.show_size(found[1])}" if found else ""
         pages = said["pages"]
-        return f"Made {rel} ({pages} page{'' if pages == 1 else 's'}{size})."
+        current_turn().note(workspace.MADE, rel)
+        return f"Made {rel} ({pages} page{'' if pages == 1 else 's'}{size}). {NOT_SEEN}"
 
     def send(self, name: str, caption: str) -> str:
         """What send_file says: the file's noted, for the channel to send with the answer (telegram_bot.py)."""
@@ -245,6 +256,21 @@ class Files(Builtin):
             return f"There's nothing in {shown}."
         lines = [f"{entry}/" if size is None else f"{entry} ({workspace.show_size(size)})" for entry, size in entries]
         return f"In {shown}:\n" + "\n".join(lines)
+
+
+def unsent(notes: dict[str, list[str]], text: str) -> list[str]:
+    """Files made while answering, as ``notes`` has them, that the answer ``text`` names by their path or name but
+    that weren't sent: noted as send_file notes them, to be sent all the same."""
+    sent = {json.loads(noted)["path"] for noted in notes.get(SENT, [])}
+    named = [rel for rel in dict.fromkeys(notes.get(workspace.MADE, [])) if rel not in sent and _names(text, rel)]
+    return [json.dumps({"path": rel, "caption": ""}) for rel in named]
+
+
+def _names(text: str, rel: str) -> bool:
+    """Whether ``text`` names the file ``rel``, by its path, or by its name if it has an extension (not "report",
+    which could be any word), and not as part of a longer one."""
+    names = {rel, PurePosixPath(rel).name} if PurePosixPath(rel).suffix else {rel}
+    return any(re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text) for name in names)
 
 
 def _part(label: str, text: str, start: int, total: int, cut: bool = False) -> str:

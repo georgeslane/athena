@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from athena.sandbox import WORKSPACE
 from athena.tools import ToolError
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
 INBOX = "inbox"  # where files you send Athena go
 MAX_NAME = 120  # characters in a file's name
+MADE = "made"  # what write_file and run_python note for a turn: the files they wrote (files.unsent)
 
 
 def workspace_of(cfg: Config) -> Path:
@@ -38,8 +40,11 @@ def clear_workspace(cfg: Config) -> None:
 
 
 def parts(name: str) -> tuple[str, ...]:
-    """A path within the workspace, as its parts. ToolError if it isn't one: absolute, with .., or empty."""
+    """A path within the workspace, as its parts. ToolError if it isn't one: absolute, with .., or empty. One from
+    /workspace, where code sees it (run_code.py), is taken as it's meant."""
     text = name.strip()
+    if text.startswith(WORKSPACE + "/"):
+        text = text[len(WORKSPACE) + 1 :]
     while text.startswith("./"):
         text = text[2:]
     path = PurePosixPath(text)

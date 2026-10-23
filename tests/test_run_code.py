@@ -14,8 +14,8 @@ from test_sandbox import REAL, needs_bwrap
 from athena.builtin import Unavailable
 from athena.run_code import CodeConfig, CodeRunner, Ran, SandboxedPython
 from athena.sandbox import Sandbox
-from athena.tools import ToolError
-from athena.workspace import clear_workspace, workspace_of
+from athena.tools import ToolError, Turn, begin_turn
+from athena.workspace import MADE, clear_workspace, workspace_of
 
 
 def runner(tmp_path, **settings) -> CodeRunner:
@@ -48,10 +48,22 @@ async def test_athenas_packages_are_there_within_the_memory_limit(tmp_path):
 @needs_bwrap
 async def test_its_folder_keeps_files_between_runs_and_says_what_changed(tmp_path):
     first = await ran(tmp_path, "open('sums.csv', 'w').write('a,b\\n1,2\\n')\nimport os\nos.makedirs('out')")
-    assert first.changed == ["sums.csv (8 bytes, new)"]
+    assert first.changed == ["sums.csv (8 bytes, new)"] and first.made == ["sums.csv"]
     second = await ran(tmp_path, "print(open('sums.csv').read().splitlines()[1])\nimport os\nos.remove('sums.csv')")
-    assert second.output == "1,2\n" and second.changed == ["sums.csv (deleted)"]
+    assert second.output == "1,2\n" and second.changed == ["sums.csv (deleted)"] and second.made == []
     assert (tmp_path / "workspace").stat().st_mode & 0o777 == 0o700
+
+
+@needs_bwrap
+async def test_the_files_its_code_writes_are_noted_to_be_sent_if_the_answer_names_them(tmp_path):
+    code = "import os\nopen('chart.csv', 'w').write('a')\nos.mkdir('out')\nopen('out/t.txt', 'w').write('b')"
+    turn = Turn()
+    end = begin_turn(turn)
+    try:
+        await runner(tmp_path).tools()[0].handler({"code": code})
+    finally:
+        end()
+    assert turn.notes[MADE] == ["chart.csv", "out/t.txt"]
 
 
 # -- what it can't ----------------------------------------------------------------------------------------
