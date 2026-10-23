@@ -398,10 +398,10 @@ with Dag(
     "emails",
     prompt="Keep on top of my emails.",
     schedule=["0 8 * * *", Webhook("new-email")],  # cron, in your time zone; and a webhook
-    hidden_tools=["news_*"],                         # found only when needed
 ):
-    emails = AgenticTask("emails", prompt="Which of my emails need a reply? One item for each.", return_type="list")
-    with TaskGroup("each_email", allowed_tools=["read_email", "draft_email"]) as each_email:
+    emails = AgenticTask("emails", prompt="Which of my emails need a reply? One item for each.", return_type="list",
+                         enabled=["read_email"])  # the tools it can use: no others
+    with TaskGroup("each_email", enabled=["draft_email"], automated=["draft_email"]) as each_email:
         urgent = AgenticBranch("urgent", prompt="Is this one urgent?", allow_none=True)
         draft = AgenticTask("draft", prompt="Draft a reply to it.", follow_mapping=True, on_complete=alert)
         urgent >> draft
@@ -426,7 +426,8 @@ function reference() {
       rows([
         ["id, prompt", 'Dag("emails", prompt="..."): its id, unique among your agents\' DAGs, and what it\'s for, which every task is told.'],
         ["schedule", 'What starts it: cron, in your time zone ("30 7 * * 1-5" for 07:30 on weekdays, "@hourly", "@daily"; at most every 15 minutes); Webhook("arrive-home"), from an iPhone Shortcut or a webhook; Asset("job-emails"), when another DAG\'s task updates it; DagTrigger("other_dag"), when that DAG\'s run finishes. Asset("claude-done") is when Claude finishes a project you handed it.'],
-        ["allowed_tools", "All the tools its tasks may use without asking: patterns such as news_* work. Unset, they may use any tool, asking you first for those that ask. Naming a tool that asks first lets it run without asking; one that isn't named waits for your OK. A task group or a task can have its own, which replaces the DAG's."],
+        ["enabled", 'The tools its tasks can use, and no others: patterns such as news_* work, and "*" is every tool. Unset, none. A task group or a task can have its own, which replaces the DAG\'s: give each task only what it needs.'],
+        ["automated", "Of the enabled tools that ask you first, those that run without asking. Unset, they all ask; tools that don't ask first never do, and a few always ask. Automating a tool doesn't enable it."],
         ["hidden_tools", "Tools its tasks find when they need them, rather than in every prompt, which keeps prompts short."],
         ["model, thinking, skills", "The model its tasks use (the agent's, unless it says), thinking \"on\" or \"off\", and skills to read into every prompt."],
       ]),
@@ -443,7 +444,7 @@ function reference() {
       ]),
       h("h3", { text: "Task groups, and what comes after what" }),
       h("ul.help-list", {}, [
-        h("li", { text: 'with TaskGroup("each", allowed_tools=[...]) as each: its tasks share its settings; in >>, a group stands for its first tasks, after something, and its last, before something.' }),
+        h("li", { text: 'with TaskGroup("each", enabled=[...]) as each: its tasks share its settings; in >>, a group stands for its first tasks, after something, and its last, before something.' }),
         h("li", { text: "a >> b runs b after a; a << b runs a after b; [a, b] >> c runs c after both; chains such as a >> b >> c work too." }),
         h("li", { text: "A task runs once those before it have: it's skipped if one of them failed, or all of them were skipped, or a branch before it didn't pick it." }),
       ]),

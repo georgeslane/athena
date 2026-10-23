@@ -14,14 +14,14 @@ with Dag(
     "emails",
     prompt="Keep on top of my emails.",
     schedule=["0 8 * * *", Webhook("new-email")],  # every day at 08:00, and when the webhook new-email comes in
-    hidden_tools=["news_*"],  # tools its tasks find when they need them
 ):
     emails = AgenticTask(
         "emails",
         prompt="Which of my emails since the last run need a reply? One item for each.",
         return_type="list",  # a list: what's after it runs once for each item
+        enabled=["read_email"],  # the tools it can use, and no others
     )
-    with TaskGroup("each_email", allowed_tools=["read_email", "draft_email"]) as each_email:
+    with TaskGroup("each_email", enabled=["draft_email"], automated=["draft_email"]) as each_email:
         urgent = AgenticBranch("urgent", prompt="Is this one urgent?", allow_none=True)  # draft, or none
         draft = AgenticTask("draft", prompt="Draft a reply to it.", follow_mapping=True, on_complete=alert)
         urgent >> draft
@@ -52,9 +52,9 @@ Values are written out as they are: strings, numbers, `True`, `False`, `None`, a
 | `id` | Its id, such as `"emails"`: unique among your agents' DAGs. Its runs are kept by it, so renaming it starts its history afresh. |
 | `prompt` | What it's for. Every task is told it, with the agent's guidance. |
 | `schedule` | What starts it, a list of any of: cron, such as `"30 7 * * 1-5"` (see [Schedules](#schedules)); `Webhook("arrive-home")`; `Asset("job-emails")`; `DagTrigger("other_dag")`. Empty, or left out, runs it only when you do. See [What starts a DAG](#what-starts-a-dag). |
-| `allowed_tools` | The tools its tasks are given, and may use without asking: see [Tools](#tools). Left out, they're given none. |
+| `enabled` | The tools its tasks can use, and no others: see [Tools](#tools). Left out, none; `"*"` is every tool. |
+| `automated` | Of the enabled tools that ask you first, those that run without asking. Left out, they all ask. |
 | `hidden_tools` | Tools its tasks find when they need them, rather than having them in every prompt, which keeps prompts shorter. |
-| `denied_tools` | Tools its tasks are never offered: calling one waits for your OK. |
 | `model` | The model its tasks use: the agent's, unless it says. |
 | `thinking` | `"on"` or `"off"`: whether its tasks think before answering. `[tasks] thinking` otherwise. |
 | `skills` | Skills to read into every task's prompt, by name. |
@@ -76,7 +76,7 @@ Patterns such as `"news_*"` work in all of the tool lists. A task group or a tas
 
 An id is a letter then letters, digits, `_`, `.`, `:` or `-`, unique in the DAG, and none can start `end.`, which is for the tasks every DAG ends with.
 
-Give each task one job, with a prompt saying exactly what to look at and with what: "Read today's calendar events", not "Look for events". A task sees only its own prompt and what the tasks before it found, so a vague one may do their work again. `denied_tools` keeps the tools it shouldn't use from it, such as `denied_tools=["*mail*"]`.
+Give each task one job, with a prompt saying exactly what to look at and with what: "Read today's calendar events", not "Look for events". A task sees only its own prompt and what the tasks before it found, so a vague one may do their work again. Give it only the tools it needs, in `enabled`: one that works from what came before needs none.
 
 Each task can also have:
 
@@ -88,7 +88,7 @@ Each task can also have:
 | `context` | The tasks whose outputs it's given, such as `context=[find, check]`: those right before it, unless it says. |
 | `on_complete=alert` | What it finds is told to you, in Telegram and on your devices, and in the agent's chat and the master agent's. For a task that ran for each item, once, with what each found. |
 | `outlets` | Assets it updates with what it finds, such as `[Asset("job-emails")]`. See [Other agents' DAGs](#other-agents-dags-assets). |
-| `allowed_tools`, `hidden_tools`, `denied_tools`, `model`, `thinking`, `skills` | As the DAG's, for this task alone. |
+| `enabled`, `automated`, `hidden_tools`, `model`, `thinking`, `skills` | As the DAG's, for this task alone. |
 | `max_tool_steps` | The most steps that use tools it takes: `[tasks] max_tool_rounds` (25) otherwise. |
 | `skip_if=found_nothing` | Skipped if nothing before it found anything. |
 | `trigger_rule` | `"none_failed"`, the default: it's skipped if all those before it were, and not run if one failed. `"all_done"`: it runs whatever happened before it. |
@@ -147,22 +147,25 @@ draft >> check >> send
 ## Task groups
 
 ```python
-with TaskGroup("each_email", allowed_tools=["read_email", "draft_email"]) as each_email:
+with TaskGroup("each_email", enabled=["read_email", "draft_email"]) as each_email:
     urgent = AgenticBranch("urgent", prompt="Is this one urgent?", allow_none=True)
     draft = AgenticTask("draft", prompt="Draft a reply to it.", follow_mapping=True)
     urgent >> draft
 ```
 
-A group's tasks share its settings: `allowed_tools`, `hidden_tools`, `denied_tools`, `model`, `thinking`, `skills` and `max_tool_steps`, which a task can override. In `>>`, a group stands for its first tasks, after something, or its last, before something. Groups can be inside groups.
+A group's tasks share its settings: `enabled`, `automated`, `hidden_tools`, `model`, `thinking`, `skills` and `max_tool_steps`, which a task can override. In `>>`, a group stands for its first tasks, after something, or its last, before something. Groups can be inside groups.
 
 ## Tools
 
-- **`allowed_tools`** is the whole list of tools a task is given: the DAG's, or a group's or the task's own, which replaces it. Left out, it's given none. They run without asking, so naming a tool that asks first lets it run without asking. List each task's own, and only what it needs, so it doesn't reach for others: an email task given only the email tools can't go looking through your messages.
-- **Asking first**: a tool that asks you first, such as one that sends an email, and isn't on the task's list, isn't in its prompt: the task can find it with `search_tools` when it needs one, and it asks in Telegram and in the agent's chat, saying which task wants it. The task waits, without holding the model, for up to `[tasks] confirm_minutes` (60), and then it's declined. What you've allowed in the agent's chat doesn't count for its DAG. A tool that doesn't ask first and isn't on the list, the task never has.
-- **Always asking**: changing a DAG (`change_dag`) and handing work to Claude always ask, whatever `allowed_tools` says.
+Two lists say what a task can do with tools, each set on the DAG, a task group or a task, the nearest one deciding: a group's or a task's own replaces the DAG's. Both are empty unless set; `"*"` is every tool, and patterns such as `"news_*"` work.
+
+- **`enabled`**: the tools the task can use, and no others. A tool that isn't enabled isn't in its prompt, can't be found, and if the model calls it anyway, it's told it can't, and carries on: you're never asked. So a notify task that works from what the email and messages tasks found, enabled for none, can't check your email again. Give each task its own list, of only what it needs, and `"*"` to one that's open-ended. Changing a DAG, starting one and changing what's kept can't be done from a run, so no task has them, even with `"*"`.
+- **`automated`**: of the enabled tools that ask you first, such as one that sends an email, those that run without asking. Unset, each asks, in Telegram and in the agent's chat, saying which task wants it; the task waits, without holding the model, for up to `[tasks] confirm_minutes` (60), and then it's declined. What you've allowed in the agent's chat doesn't count for its DAG. Automating a tool doesn't enable it, so `automated="*"` on the DAG gives no task more tools.
+- **The system's**: the Tools tab says which tools ask first. Those that don't, such as reading the news, run without asking wherever they're enabled.
+- **Always asking**: changing a DAG (`change_dag`), handing work to Claude, and placing or cancelling a Trading 212 order always ask, whatever `automated` says.
 - **Hidden**: a tool in `hidden_tools`, or `[tools] on_demand`, isn't in the prompt: the model finds it with `search_tools` when it needs it.
 - **The review**, at the end of each run, can propose each task's list from what it used and needed, and what you allowed: you approve or reject it, and the file's changed where it's written.
-- **DAGs from before** tasks were given only what their lists name have each task's list written in once, as the tools it used in its last runs that don't ask first, so they carry on as they did. Check them on the DAG view, and take out what a task shouldn't use. A change that would let a tool that asks first run without asking says so, plainly, wherever you're asked: in the run's summary, on the dashboard, and when Athena asks to change the file with `change_dag`.
+- **DAGs from before** `enabled` and `automated` are written with them once: `allowed_tools` becomes `enabled`, and those of them that ask first `automated`, as they ran; a task no list covered is enabled for the tools it used in its last runs. Check them on the DAG view, and take out what a task shouldn't use. What was waiting to be approved for them is withdrawn, as it was written the old way. A change that would let a tool that asks first run without asking says so, plainly, wherever you're asked: in the run's summary, on the dashboard, and when Athena asks to change the file with `change_dag`.
 
 Allowing a task to fetch or search without asking lets it send what it's read to those sites unseen, so allow only what it needs, where it needs it.
 

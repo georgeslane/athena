@@ -335,7 +335,11 @@ async def test_a_dag_task_sends_the_files_it_made(config, memory):
     channel = FakeChannel()
     dags = Dags(TasksConfig(), AgentStore(config.db_path), agent, timezone="Europe/London",
                 channel=lambda: channel, state=config.db_path.with_name("dags.db"))  # fmt: skip
-    dags.save(1, "with Dag('files', prompt='p'):\n    AgenticTask('summary_file', prompt='Write and send it.')\n")
+    dags.save(
+        1,
+        "with Dag('files', prompt='p'):\n"
+        "    AgenticTask('summary_file', prompt='Write and send it.', enabled=['write_file', 'send_file'])\n",
+    )
     await dags.start()
     try:
         run = await dags.run_now(1)

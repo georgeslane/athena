@@ -29,6 +29,7 @@ import openai
 from agentic_airflow import GenerationRequest, GenerationResponse, Message, PermanentError, ToolCall, ToolContext
 from agentic_airflow import Tool as EngineTool
 
+from athena.dags.tools import CHAT_ONLY
 from athena.stats import QueryRecord
 from athena.tool_search import NAMES as SEARCH_NAMES
 from athena.tools import NEVER_UNASKED, Tool, matches_any
@@ -167,7 +168,7 @@ class Toolbox:
 
     def __call__(self) -> Iterable[EngineTool]:
         """The tools there are now, as the engine's: made again only for those that have changed."""
-        tools = [t for t in self.agent.tools.all() if t.name not in SEARCH_NAMES]
+        tools = [t for t in self.agent.tools.all() if t.name not in SEARCH_NAMES and t.name not in CHAT_ONLY]
         made = {}
         for tool in tools:
             kept = self._made.get(tool.name)

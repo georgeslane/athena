@@ -446,7 +446,7 @@ async def test_files_that_come_with_an_agents_guidance(chat):
 async def test_deleting_an_agent_while_its_dag_runs_stops_the_run_first(chat):
     agent = chat.history.new_session("Doomed").id
     dag = (
-        "with Dag('doomed', prompt='p', allowed_tools=['wait_here']):\n"
+        "with Dag('doomed', prompt='p', enabled=['wait_here']):\n"
         "    a = AgenticTask('a', prompt='Please use wait_here')\n    a >> AgenticTask('b', prompt='b')\n"
     )
     chat.dags.save(agent, dag)
