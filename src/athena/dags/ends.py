@@ -2,6 +2,7 @@
 
   review_workflow  looks back at how well the run did what it's for, and can propose a new DAG file
   review_tools     looks at the tools the run used, and can propose which to hide, and which may run unasked
+                   (both proposed through proposals.py, for you to approve)
   review_skills    looks at the skills it read, and can suggest improvements, for you to approve
   save_context     keeps what the next run should know: the agent's context
   summary          tells you what the run did and found, and what it recommends: you're notified only when
@@ -25,7 +26,8 @@ from typing import Any, Protocol
 
 from agentic_airflow import AgenticTask, DagRun, OutputValidationError, TaskGroup, TaskStatus, found_nothing
 
-from athena.dags.reader import END_GROUP, REFERENCE, DagError, read
+from athena.dags.proposals import TOOLS, WORKFLOW, Proposals, describe_tools, listed, same
+from athena.dags.reader import END_GROUP, REFERENCE, DagError, read, with_tools
 from athena.dags.store import AgentStore
 from athena.skills import READ_SKILL, REVIEW, SAVE_SKILL
 
@@ -50,6 +52,7 @@ class Ends(Protocol):
     """What the end tasks need of the service that runs agents' DAGs (service.Dags)."""
 
     store: AgentStore
+    proposals: Proposals
     timezone: str
 
     @property
@@ -101,7 +104,7 @@ def group(source: str, task_ids: Sequence[str], ends: Ends) -> TaskGroup:
             f"{END_GROUP}.review_tools",
             prompt=lambda engine, run: tools(_uses(run, ends), engine.dag_for(run), ends),
             validator=lambda answer: _check_tools(answer, ends, task_ids),
-            on_complete=lambda engine, run, inst: _proposed_tools(ends, run, source, task_ids, inst.output),
+            on_complete=lambda engine, run, inst: _proposed_tools(ends, run, task_ids, inst.output),
             skip_if=skip(no_tools),
             **common,
         ),
@@ -176,16 +179,20 @@ def _proposed_dag(ends: Ends, run: DagRun, source: str, answer: str) -> None:
         proposed = proposed_dag(answer, ends.timezone)
     except DagError:
         return
-    if proposed and not same(proposed[0], source):
-        new, why = proposed
-        agent_id = ends.agent_of(run)
-        p = ends.store.propose(agent_id, run.run_id, "workflow", why, source, source=new)
-        ends.notes(run).recommendations.append(f"A change to the DAG (proposal #{p.id}): {_short(why, 300)}")
+    agent_id = ends.agent_of(run)
+    if not proposed or not same(source, ends.store.get(agent_id).dag):  # nothing, or the DAG changed as it ran
+        return
+    new, why = proposed
+    if p := ends.proposals.propose(agent_id, run.run_id, WORKFLOW, why, new):
+        _recommend(ends, run, p, f"A change to the DAG: {_short(why, 300)}")
 
 
-def same(a: str, b: str) -> bool:
-    """Whether two DAG files say the same, whatever their spacing."""
-    return " ".join(a.split()) == " ".join(b.split())
+def _recommend(ends: Ends, run: DagRun, proposal: dict[str, Any], said: str) -> None:
+    """For the summary to mention: what's proposed, and which tools it would let run without asking."""
+    payload = proposal["payload"]
+    if unasked := ends.proposals.unasked(payload["base"], payload["definition"]):
+        said += f" ⚠️ It would let these run without asking you: {', '.join(unasked)}."
+    ends.notes(run).recommendations.append(said)
 
 
 # -- the tool review -----------------------------------------------------------------------------------
@@ -233,8 +240,9 @@ def tools(uses: dict[str, ToolUse], dag: Any, ends: Ends) -> str:
             if count:
                 parts.append(f"{count} {said}")
         lines.append(f"- {name}: {', '.join(parts)}")
-    lists = [f"the DAG's: {_list(dag.scope.allowed_tools)}"]
-    lists += [f"{t.id}'s: {_list(t.scope.allowed_tools)}" for t in dag.own_tasks() if t.scope.allowed_tools is not None]
+    lists = [f"the DAG's: {listed(dag.scope.allowed_tools)}"]
+    own = [t for t in dag.own_tasks() if t.scope.allowed_tools is not None]
+    lists += [f"{t.id}'s: {listed(t.scope.allowed_tools)}" for t in own]
     first = dag.own_tasks()[0].id if dag.own_tasks() else "find_jobs"
     return (
         "Look at the tools this run used, to make the next run quicker and smoother:\n"
@@ -244,7 +252,7 @@ def tools(uses: dict[str, ToolUse], dag: Any, ends: Ends) -> str:
         "use only those, and each other tool they call waits for the user's OK. A task's own list replaces the "
         f"DAG's. allowed_tools now: {'; '.join(lists)}. Tools that ask first: {', '.join(asks) or 'none'}; these "
         f"always ask, whatever allowed_tools says: {', '.join(always) or 'none'}. hidden_tools are found when "
-        f"they're needed, rather than in every prompt: {_list(dag.scope.hidden_tools)} now.\n\n"
+        f"they're needed, rather than in every prompt: {listed(dag.scope.hidden_tools)} now.\n\n"
         "Recommend lists that would make the next run smoother: hide tools it's unlikely to need, and let a task "
         "use without asking the tools the user allowed and would want to again, that only read or are low-risk. "
         'Reply with a ```json block of only the lists to change, whole, like {"hidden_tools": [...], '
@@ -299,33 +307,26 @@ def _check_tools(answer: str, ends: Ends, task_ids: Sequence[str]) -> None:
         raise OutputValidationError(f"{exc} Reply with a corrected ```json block, or just {NO_CHANGES}.") from None
 
 
-def _proposed_tools(ends: Ends, run: DagRun, source: str, task_ids: Sequence[str], answer: str) -> None:
+def _proposed_tools(ends: Ends, run: DagRun, task_ids: Sequence[str], answer: str) -> None:
     known, _, always = ends.tool_names()
     try:
         proposed = proposed_tools(answer, known, always, task_ids)
     except ValueError:  # the tools changed since it was checked
         return
-    if proposed:
-        changes, why = proposed
-        p = ends.store.propose(ends.agent_of(run), run.run_id, "tools", why, source, changes=changes)
-        ends.notes(run).recommendations.append(f"Tools (proposal #{p.id}): {describe_tools(changes)}")
-
-
-def describe_tools(changes: dict[str, Any]) -> str:
-    parts = []
-    if "hidden_tools" in changes:
-        parts.append(f"Find when needed: {_list(changes['hidden_tools'])}")
-    for where, names in (changes.get("allowed_tools") or {}).items():
-        parts.append(f"Use without asking {'in every task' if where == 'dag' else f'in {where}'}: {_list(names)}")
-    return "; ".join(parts)
+    if not proposed:
+        return
+    changes, why = proposed
+    agent_id = ends.agent_of(run)
+    try:
+        file = with_tools(ends.store.get(agent_id).dag, changes)
+    except (DagError, SyntaxError):  # the DAG changed as it ran, and they don't fit it now
+        return
+    if p := ends.proposals.propose(agent_id, run.run_id, TOOLS, why, file, changes):
+        _recommend(ends, run, p, f"Tools: {describe_tools(changes)}")
 
 
 def _fits(name: str, tool: str) -> bool:
     return fnmatch.fnmatchcase(tool, name)
-
-
-def _list(names: Sequence[str] | None) -> str:
-    return "None" if names is None else ", ".join(names) or "[] (none)"
 
 
 # -- the skill review -------------------------------------------------------------------------------------

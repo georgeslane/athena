@@ -14,6 +14,7 @@ from athena.config import TasksConfig
 from athena.dags.service import Dags
 from athena.dags.store import AgentStore
 from athena.history import ConversationStore
+from athena.skill_reviews import SkillReviews
 from athena.skills import NO_CHANGE, Skills, SkillStore, check, diff
 from athena.tools import ToolError, ToolRegistry, Turn, begin_turn
 
@@ -211,15 +212,16 @@ def athena(config, memory, skills):
             state=config.db_path.with_name("dags.db"),
         )
         agent.directory = scheduler
-        agent.on_answered = scheduler.after_answer
-        return agent, scheduler, server, channel
+        reviews = SkillReviews(TasksConfig(), agent, channel=lambda: channel)
+        agent.on_answered = reviews.after_answer
+        return agent, reviews, server, channel
 
     return make
 
 
 async def test_skills_are_listed_in_the_prompt_and_read_when_needed(athena, skills):
     skills.save(None, *TRIP, by="you")
-    agent, scheduler, server, _ = athena(
+    agent, reviews, server, _ = athena(
         [completion(None, [("read_skill", {"name": "Trip plans"})]), completion("Here's your trip to Bath.")]
     )
     result = await agent.respond("111", "Plan a weekend in Bath")
@@ -229,7 +231,7 @@ async def test_skills_are_listed_in_the_prompt_and_read_when_needed(athena, skil
     assert result.transcript[-1] == {"role": "assistant", "content": "Here's your trip to Bath."}
     assert result.transcript[-2]["content"].startswith("# Trip plans")  # what read_skill said
     assert skills.history.exchanges_since("2000-01-01")[0].tools == ["read_skill"]
-    (review,) = scheduler.reviews  # to look back on how it went, once you've finished chatting
+    (review,) = reviews.reviews  # to look back on how it went, once you've finished chatting
     assert (review.skills, review.what) == (["Trip plans"], "our chat")
 
     plain, *_ = athena([completion("Hi!")])
@@ -238,7 +240,7 @@ async def test_skills_are_listed_in_the_prompt_and_read_when_needed(athena, skil
 
 async def test_looking_back_suggests_a_better_skill(athena, skills):
     skill = skills.save(None, *TRIP, by="you")
-    agent, scheduler, server, channel = athena(
+    agent, reviews, server, channel = athena(
         [
             completion(None, [("read_skill", {"name": "Trip plans"})]),
             completion("Here's your trip. You said you prefer hotels near the station."),
@@ -261,8 +263,8 @@ async def test_looking_back_suggests_a_better_skill(athena, skills):
         ]
     )
     await agent.respond("111", "Plan a weekend in Bath")
-    review = scheduler.reviews.pop(0)
-    await scheduler.review(review)
+    review = reviews.reviews.pop(0)
+    await reviews.review(review)
 
     asked = server.requests[2]
     assert asked["messages"][: len(review.transcript)] == review.transcript  # what it did, read from the cache
@@ -284,38 +286,38 @@ async def test_looking_back_suggests_a_better_skill(athena, skills):
         )
     ]
     assert skills.history.load("111")[-1]["content"].startswith("Here's your trip")  # the review isn't in your chat
-    assert scheduler.reviews == []  # and it isn't looked back on itself
+    assert reviews.reviews == []  # and it isn't looked back on itself
 
 
 async def test_a_review_that_changes_nothing_says_nothing(athena, skills):
     skills.save(None, *TRIP, by="you")
-    agent, scheduler, _, channel = athena(
+    agent, reviews, _, channel = athena(
         [completion(None, [("read_skill", {"name": "Trip plans"})]), completion("Trip."), completion(NO_CHANGE)]
     )
     await agent.respond("111", "Plan a trip")
-    await scheduler.review(scheduler.reviews.pop(0))
+    await reviews.review(reviews.reviews.pop(0))
     assert channel.said == [] and skills.store.suggestions() == []
 
 
 async def test_reviews_wait_until_youve_finished_chatting(athena, skills, config):
     skills.save(None, *TRIP, by="you")
-    agent, scheduler, server, _ = athena(
+    agent, reviews, server, _ = athena(
         [completion(None, [("read_skill", {"name": "Trip plans"})]), completion("Trip."), completion(NO_CHANGE)]
     )
     await agent.respond("111", "Plan a trip")  # you've just had a reply
-    await scheduler.start()
+    reviews.start()
     try:
         await asyncio.sleep(0.2)
-        assert len(server.requests) == 2 and len(scheduler.reviews) == 1  # still waiting for you
-        scheduler.reviews[0].at = time.monotonic() - 61  # a minute later
-        scheduler._wake.set()
+        assert len(server.requests) == 2 and len(reviews.reviews) == 1  # still waiting for you
+        reviews.reviews[0].at = time.monotonic() - 61  # a minute later
+        reviews._wake.set()
         for _ in range(500):
             if len(server.requests) == 3:
                 break
             await asyncio.sleep(0.02)
-        assert len(server.requests) == 3 and scheduler.reviews == []
+        assert len(server.requests) == 3 and reviews.reviews == []
     finally:
-        await scheduler.stop()
+        await reviews.stop()
 
 
 async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills, memory):
@@ -333,7 +335,8 @@ async def test_a_dag_run_suggests_memories_and_skills_and_says_so(athena, skills
             return completion("The 7:52 is on time. I suggested a memory and a skill.")
         return completion("NO CHANGES")
 
-    agent, scheduler, server, channel = athena(model)
+    agent, _, server, channel = athena(model)
+    scheduler = agent.directory
     scheduler.history.rename(1, "Commute")
     scheduler.save(1, "with Dag('commute', prompt='p'):\n    AgenticTask('commute', prompt='Check my train.')\n")
     await scheduler.start()

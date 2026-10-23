@@ -35,6 +35,7 @@ from athena.sandbox import Sandbox
 from athena.server_envs import ServerEnvs
 from athena.server_security import ServerSecurity
 from athena.settings import PROTECTED_SECRETS, Settings
+from athena.skill_reviews import SkillReviews
 from athena.skills import Skills, SkillStore
 from athena.stats import UsageStats
 from athena.status import StatusTracker
@@ -126,7 +127,9 @@ class Services:
         for tool in self.dags.tools():
             self.tools.add(tool)
         self.agent.directory = self.dags
-        self.agent.on_answered = self.dags.after_answer  # it looks back at how skills went
+        # After a skill's used in a chat, looking back at how it went (skill_reviews.py).
+        self.skill_reviews = SkillReviews(self.config.tasks, self.agent, channel=lambda: self.reach)
+        self.agent.on_answered = self.skill_reviews.after_answer
         # How to do things your way, which Athena reads before doing them (skills.py).
         self.skills = Skills(
             SkillStore(self.config.db_path),
@@ -195,6 +198,7 @@ class Services:
         self.index_conversations()  # anything said while the embeddings server was down
         if self.config.tasks.enabled:
             await self.dags.start()
+        self.skill_reviews.start()
         if self.alerts:
             self.alerts.start()
         self._projects = asyncio.create_task(self._watch_projects(), name="claude-projects")
@@ -323,6 +327,7 @@ class Services:
                     await task
         if self.alerts:
             await self.alerts.stop()
+        await self.skill_reviews.stop()
         await self.dags.stop()
         self.dags.store.close()
         self.skills.store.close()
@@ -426,8 +431,8 @@ class Services:
     async def forget_everything(self) -> Session:
         """Delete every memory, the conversation history, the code's workspace, with agents' files, and what DAG
         runs found. Returns the master agent. Usage statistics, and the agents and their DAGs, stay."""
-        await self.dags.halt()  # it would save what it's doing after everything's deleted
-        self.dags.reviews.clear()  # they hold what was said
+        await self.dags.stop_running()  # it would save what it's doing after everything's deleted
+        self.skill_reviews.reviews.clear()  # they hold what was said
         async with self.agent.paused():
             if self._indexer:
                 self._indexer.cancel()

@@ -45,14 +45,16 @@ def dag_tools(dags: Dags) -> list[Tool]:
         return agent_id, source, dag
 
     async def preview(args: dict[str, Any]) -> str:
-        from athena.dags.service import diff
+        from athena.dags.proposals import diff
 
         agent_id, source, dag = checked(args)
         before = dags.store.get(agent_id).dag
         why = str(args.get("why") or "").strip()
         name = dags.history.title(agent_id) or "this agent"
         changes = diff(before, source) if before else source
-        return f"A new DAG for {name}, which runs {when(dag)}.{f' {why}' if why else ''}\n{changes}"
+        unasked = dags.proposals.unasked(before, source)
+        warn = f"\n⚠️ It would let these run without asking you: {', '.join(unasked)}." if unasked else ""
+        return f"A new DAG for {name}, which runs {when(dag)}.{f' {why}' if why else ''}{warn}\n{changes}"
 
     async def change_dag(args: dict[str, Any]) -> str:
         agent_id, source, _ = checked(args)

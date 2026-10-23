@@ -232,23 +232,23 @@ class AgentsAPI:
                 **runs.detail(found),
                 "agent": dags.agent_of(found),
                 "dag": dag,
-                "doing": dags._doing(found) if not found.is_terminal else "",
-                "proposals": [dags.show(p) for p in dags.store.proposals(run_id=found.run_id)],
+                "doing": dags.doing(found) if not found.is_terminal else "",
+                "proposals": [dags.proposals.show(p) for p in dags.proposals.of_run(found.run_id)],
             }
         )
 
-    def _decide(self, request: Request, method: str, proposal: str) -> Response:
-        """{"approve": true or false}: what to do with a run's proposal."""
+    async def _decide(self, request: Request, method: str, proposal: str) -> Response:
+        """{"approve": true or false}: what to do with a proposal for an agent's DAG."""
         approve = _body(request).get("approve")
         if not isinstance(approve, bool):
             raise HTTPError(400, 'Send {"approve": true} or {"approve": false}.')
         try:
-            decided = self.s.dags.decide(int(proposal), approve)
+            agent_id = await self.s.dags.proposals.decide(proposal, approve)
         except ValueError as exc:
             raise HTTPError(409, str(exc)) from None
         if approve:
             self.s.rewarm.set()
-        return _json(self.dag(decided.agent))
+        return _json(self.dag(agent_id))
 
     # -- an agent's files ----------------------------------------------------------------------------
 

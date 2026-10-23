@@ -251,7 +251,6 @@ def athena(config, memory):
         for tool in dags.tools():
             tools.add(tool)
         agent.directory = dags
-        agent.on_answered = dags.after_answer
         jobs = history.new_session("Job hunting").id
         made.append(dags)
         return dict(
@@ -496,33 +495,43 @@ async def test_the_reviews_propose_changes_you_approve_or_reject(athena):
             "Find new jobs": [calls(("look", {"what": "boards"})), "Acme."],
             "run's own tasks have finished": f"The report should link each job.\n```python\n{better}```",
             "Look at the tools this run used": (
-                'Hide publish.\n```json\n{"hidden_tools": ["publish"], "why": "unused"}\n```'
+                'Hide publish, and let apply publish.\n```json\n{"hidden_tools": ["publish"], '
+                '"allowed_tools": {"apply": ["look", "publish"]}, "why": "unused"}\n```'
             ),
             "Write George a short summary": "Applied to Acme. I've proposed two changes.",
         }
     )
     a["dags"].save(a["jobs"], THREE)
+    proposals = a["dags"].proposals
     await a["dags"].start()
     try:
-        await run_once(a, a["jobs"])
+        run = await run_once(a, a["jobs"])
         shown = a["dags"].describe(a["jobs"])["proposals"]
+        workflow, tools = proposals.waiting(a["jobs"])
+        assert workflow["payload"]["what"] == "workflow" and workflow["payload"]["definition"] == better
+        assert workflow["kind"] == "definition" and workflow["run_id"] == run.run_id
+        changes = {"hidden_tools": ["publish"], "allowed_tools": {"apply": ["look", "publish"]}}
+        assert tools["payload"]["what"] == "tools" and tools["payload"]["changes"] == changes
+        summary = next(t for t in a["model"].asked if "Write George a short summary" in t)
+        assert "A change to the DAG: The report should link each job." in summary
+        assert "Tools: Find when needed: publish; Use without asking in apply: look, publish" in summary
+        assert "⚠️ It would let these run without asking you: publish (in apply)." in summary
+        assert '+    report = AgenticTask("report", prompt="List what was applied for' in shown[0]["diff"]
+        assert shown[0]["unasked"] == [] and shown[1]["unasked"] == ["publish (in apply)"]
+        assert shown[1]["summary"].startswith("Find when needed: publish") and shown[1]["by"] == "a run"
+        # Approving the tools change changes the file where it's written, and the workflow change still applies.
+        assert await proposals.decide(tools["id"], True) == a["jobs"]
+        assert read(a["store"].get(a["jobs"]).dag).scope.hidden_tools == ["publish"]
+        waiting = proposals.waiting(a["jobs"])[0]
+        assert waiting["id"] == workflow["id"] and 'hidden_tools=["publish"]' in waiting["payload"]["definition"]
+        await proposals.decide(workflow["id"], True)
+        dag = read(a["store"].get(a["jobs"]).dag)
+        assert dag.scope.hidden_tools == ["publish"] and "with links" in dag.get("report").prompt
+        with pytest.raises(ValueError, match="isn't waiting"):
+            await proposals.decide(workflow["id"], False)
+        assert [p["state"] for p in map(proposals.show, proposals.of_run(run.run_id))] == ["approved", "approved"]
     finally:
         await a["dags"].stop()
-    workflow, tools = a["store"].proposals(a["jobs"])
-    assert workflow.kind == "workflow" and workflow.source == better
-    assert tools.kind == "tools" and tools.changes == {"hidden_tools": ["publish"]}
-    summary = next(t for t in a["model"].asked if "Write George a short summary" in t)
-    assert f"proposal #{workflow.id}" in summary and f"proposal #{tools.id}" in summary
-    assert '+    report = AgenticTask("report", prompt="List what was applied for' in shown[0]["diff"]
-    assert shown[1]["summary"] == "Find when needed: publish"
-    # Approving the tools change changes the file where it's written, and the workflow change still applies.
-    a["dags"].decide(tools.id, True)
-    assert read(a["store"].get(a["jobs"]).dag).scope.hidden_tools == ["publish"]
-    a["dags"].decide(workflow.id, True)
-    dag = read(a["store"].get(a["jobs"]).dag)
-    assert dag.scope.hidden_tools == ["publish"] and "with links" in dag.get("report").prompt
-    with pytest.raises(ValueError, match="isn't waiting"):
-        a["dags"].decide(workflow.id, False)
 
 
 @pytest.mark.asyncio
@@ -537,10 +546,10 @@ async def test_a_proposed_dag_that_wont_read_is_sent_back_once(athena):
     await a["dags"].start()
     try:
         run = await run_once(a, a["jobs"])
+        assert a["dags"].proposals.waiting(a["jobs"]) == [] and run.status == RunStatus.SUCCESS
     finally:
         await a["dags"].stop()
     assert any("That DAG file won't do: Line 1: Dag needs id, prompt" in t for t in a["model"].asked)
-    assert a["store"].proposals(a["jobs"]) == [] and run.status == RunStatus.SUCCESS
 
 
 @pytest.mark.asyncio
@@ -672,6 +681,10 @@ async def test_change_dag_shows_what_changes_and_checks_the_file(athena):
     said = await change.preview({"source": new, "agent": "Job hunting", "why": "Fewer, better applications."})
     assert said.startswith("A new DAG for Job hunting, which runs only when it's run by hand. Fewer, better")
     assert '+    apply = AgenticTask("apply", prompt="Apply to the best one.", on_complete=alert)' in said
+    assert "without asking" not in said
+    wider = THREE.replace('allowed_tools=["look"]', 'allowed_tools=["look", "pub*"]')  # publish asks first
+    said = await change.preview({"source": wider, "agent": "Job hunting"})
+    assert "⚠️ It would let these run without asking you: publish (in find_jobs, apply, report)." in said
     with pytest.raises(Exception, match="That DAG file won't do"):
         await change.handler({"source": "with Dag('x'):\n    pass\n", "agent": "Job hunting"})
     assert (
@@ -773,18 +786,103 @@ async def test_a_quiet_summary_doesnt_disturb_you_and_nor_does_a_muted_agent(ath
         assert a["history"].messages(a["jobs"])[0][-1].text == said.removeprefix("[quiet] ")  # in its chat, though
 
 
-def test_a_proposal_from_before_the_dag_changed_is_out_of_date(athena):
+async def test_a_proposal_from_before_the_dag_changed_is_out_of_date(athena):
     a = athena()
-    dags, store, jobs = a["dags"], a["store"], a["jobs"]
+    dags, jobs = a["dags"], a["jobs"]
+    proposals, state = dags.proposals, dags.engine.state
     dags.save(jobs, EMAILS)
-    proposal = store.propose(jobs, None, "workflow", "Better.", EMAILS, source=EMAILS.replace("my emails", "my mail"))
+    proposal = proposals.propose(jobs, None, "workflow", "Better.", EMAILS.replace("my emails", "my mail"))
+    assert proposals.propose(jobs, None, "workflow", "Nothing.", EMAILS) is None  # the file already
     dags.save(jobs, EMAILS.replace("0 8 * * *", "0 9 * * *"))
     with pytest.raises(ValueError, match="out of date"):
-        dags.decide(proposal.id, True)
-    assert store.proposal(proposal.id).state == "stale"
-    other = store.propose(jobs, None, "tools", "", EMAILS, changes={"hidden_tools": ["look"]})
-    dags.decide(other.id, False)
-    assert store.proposal(other.id).state == "rejected"
+        await proposals.decide(proposal["id"], True)
+    assert state.get_recommendation(proposal["id"])["status"] == "stale"
+    now = a["store"].get(jobs).dag
+    other = proposals.propose(
+        jobs, None, "tools", "", with_tools(now, {"hidden_tools": ["look"]}), {"hidden_tools": ["look"]}
+    )
+    assert other["rationale"] == "The tool review recommends it."
+    both = {"hidden_tools": ["look", "publish"]}
+    newer = proposals.propose(jobs, None, "tools", "", with_tools(now, both), both)
+    assert state.get_recommendation(other["id"])["status"] == "withdrawn"  # the newer one's waiting instead
+    await proposals.decide(newer["id"], False)
+    assert state.get_recommendation(newer["id"])["status"] == "rejected"
+    dags.engine.state.close()
+
+
+async def test_one_queue_whatever_proposes_a_change(athena):
+    """Something besides a run's reviews, such as an MCP client, proposes through agentic-airflow's queue: only
+    whole DAG files, read as they're proposed, which wait for you as the runs' do."""
+    from agentic_airflow import proposals as queue
+    from agentic_airflow.errors import ConfigurationError
+
+    a = athena()
+    dags, jobs = a["dags"], a["jobs"]
+    dags.save(jobs, THREE)
+    with pytest.raises(ConfigurationError, match="doesn't take 'topology'"):
+        queue.propose_prompt_change(dags.engine, "jobs", "apply", "Apply carefully.", "r")
+    with pytest.raises(ConfigurationError, match="won't do: Line 1"):
+        queue.propose_definition(dags.engine, "jobs", "with Dag('jobs'):\n    pass\n", "r", source="mcp")
+    better = THREE.replace("Apply to them.", "Apply to them carefully.")
+    made = queue.propose_definition(dags.engine, "jobs", better, "Be careful.", source="mcp", proposed_by="claude")
+    shown = dags.describe(jobs)["proposals"]
+    assert [(p["id"], p["agent"], p["kind"], p["by"]) for p in shown] == [(made["id"], jobs, "workflow", "claude")]
+    assert await dags.proposals.decide(made["id"], True) == jobs and "carefully" in a["store"].get(jobs).dag
+    dags.engine.state.close()
+
+
+async def test_whats_proposed_is_forgotten_with_its_runs_and_agent(athena):
+    a = athena()
+    dags, jobs = a["dags"], a["jobs"]
+    dags.save(jobs, THREE)
+    for n in range(2):
+        dags.engine.state.save_run({"run_id": f"run_{n}", "dag_id": "jobs", "status": "success"})
+    hide = {"hidden_tools": ["look"]}
+    kept = dags.proposals.propose(jobs, "run_0", "tools", "", with_tools(THREE, hide), hide)
+    gone = dags.proposals.propose(jobs, "run_1", "workflow", "w", THREE.replace("Apply to", "Apply for"))
+    await dags.proposals.decide(gone["id"], False)
+    dags.engine.state.delete_run("run_1")
+    dags.proposals.prune()  # decided, and its run's not kept: forgotten
+    assert [r["id"] for r in dags.engine.list_recommendations()] == [kept["id"]]
+    await dags.delete(jobs)
+    assert dags.engine.list_recommendations() == []
+    dags.engine.state.close()
+
+
+async def test_proposals_from_before_the_queue_are_carried_over(athena):
+    a = athena()
+    dags, store, jobs = a["dags"], a["store"], a["jobs"]
+    dags.save(jobs, THREE)
+    better = THREE.replace("Apply to them.", "Apply to them carefully.")
+    store._conn.executescript(
+        """
+        CREATE TABLE dag_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent INTEGER NOT NULL, run TEXT,
+            kind TEXT NOT NULL, why TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+            changes TEXT NOT NULL DEFAULT '{}', base TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'pending',
+            created REAL NOT NULL, decided REAL);
+        """
+    )
+    rows = [
+        ("workflow", "Careful.", better, "{}", THREE, "pending"),
+        ("workflow", "Old.", better, "{}", "with Dag('old', prompt='p'): ...", "pending"),  # against another file
+        ("tools", "Hide it.", "", '{"hidden_tools": ["look"]}', "", "pending"),
+        ("tools", "Rejected.", "", '{"hidden_tools": ["look"]}', "", "rejected"),
+    ]
+    store._conn.executemany(
+        "INSERT INTO dag_proposals (agent, kind, why, source, changes, base, state, created) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        [(jobs, *row) for row in rows],
+    )
+    await dags.start()
+    try:
+        waiting = dags.proposals.waiting(jobs)
+        assert [(r["payload"]["what"], r["rationale"]) for r in waiting] == [
+            ("workflow", "Careful."),
+            ("tools", "Hide it."),
+        ]
+        assert store.take_old_proposals() == []  # and they're not there any more
+    finally:
+        await dags.stop()
 
 
 @pytest.mark.asyncio
@@ -1072,7 +1170,7 @@ def test_runs_become_the_engines_once(config):
     store = AgentStore(config.db_path)
     agent = store.get(2)
     assert (agent.guidance, agent.dag, agent.runs) == ("Jobs in London.", "with DAG(): ...", 0)  # kept, as it was
-    assert store.next_number(2) == 1 and store.proposals(2) == []  # the proposal's out of date
+    assert store.next_number(2) == 1 and store.take_old_proposals() == []  # the proposal's out of date
     tables = {row[0] for row in sqlite3.connect(config.db_path).execute("SELECT name FROM sqlite_master")}
     assert not tables & {"dag_runs", "dag_task_runs"}
     assert upgrade(config.db_path) is False  # once

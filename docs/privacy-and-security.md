@@ -30,7 +30,7 @@ What it finds decides what happens:
 - Text from tools, such as web pages, is untrusted: it can tell the model to send your data somewhere. The approval is what stops that.
 - A server's tools that are new or have changed since you approved them are held back until you approve them again.
 - What Athena remembers, and skills it writes or changes, while working by itself are suggestions until you approve them, so a web page can't plant a memory or rewrite a skill unseen.
-- Tasks can't do more than you could approve: one Athena suggests needs your OK, any tool that asks first still asks unless you've allowed that task to use it, and a task can't schedule others without asking.
+- Tasks can't do more than you could approve: one Athena suggests needs your OK, any tool that asks first still asks unless you've allowed that task to use it, and a task can't schedule others without asking. A proposed change to a DAG that would let a tool that asks first run without asking says so, plainly, not only in the diff.
 - On the dashboard you can allow a tool without asking for one message or a session, as you can a task. Scheduling tasks and pushing to GitHub always ask.
 
 **Everything runs in a box.**
