@@ -11,13 +11,13 @@ uv uses its own Python build for this project (`[tool.uv]` in `pyproject.toml`),
 
 To run Athena from a checkout, use `uv run athena`, with its files somewhere of their own: `ATHENA_HOME=~/athena-dev uv run athena setup`.
 
+Agents' DAGs run on [agentic-airflow](https://github.com/georgeslane/agentic-airflow), which isn't on PyPI: `pyproject.toml` installs it from its repository at a pinned commit, so nothing else of that name can be installed instead. To move to a newer one, change the commit there and run `uv lock`. To work on both at once, `uv pip install -e ../agentic-airflow` puts your checkout in the environment, until the next `uv sync`.
+
 Some tests need more than the rest, and are skipped where it isn't there. CI, on an ARM64 Linux machine like the Pi, has all of it:
 
 - **Linux and bubblewrap:** the sandboxes, for running code and MCP servers.
 - **systemd and sudo:** the service's hardening, and the alert when Athena stops.
 - **A browser:** the dashboard, in headless Chromium through Playwright (`tests/test_dashboard_browser.py`). Install one with `uv run playwright install --only-shell chromium`, or point `ATHENA_TEST_BROWSER` at a Chromium you have.
-
-Tasks are tested over days in a moment (`tests/test_tasks_over_time.py`): the scheduler reads the time from a `Clock` (`src/athena/clock.py`), and the tests' clock jumps ahead whenever the scheduler waits.
 
 ## Keeping secrets out of GitHub
 
@@ -62,8 +62,7 @@ uv run python -m athena.server_envs
 | `src/athena/news.py`, `markets.py`, `trading212.py`, `databases.py`, `run_code.py`, `files.py`, `workspace.py`, `pdfs.py`, `mcp_registry.py` | The built-in tools |
 | `src/athena/memory/` | Memory: the store, embeddings, searching by words, text and the service with its tools |
 | `src/athena/documents.py`, `mac_documents.py` | Indexing your documents, and the read-only server on your Mac |
-| `src/athena/tasks/`, `clock.py` | Tasks: schedules, the store, the scheduler and the model's tools; the time it goes by |
-| `src/athena/dags/` | Agents and their DAGs: the DAG language (`spec.py`), what's kept (`store.py`), running one (`runner.py`) and the tasks every DAG ends with (`ends.py`), when they run and what events start them (`scheduler.py`), the model's tools for them (`tools.py`), agents' files (`files.py`), the dashboard's API (`api.py`), and upgrades to what's kept (`migrate.py`) |
+| `src/athena/dags/` | Agents and their DAGs, run by [agentic-airflow](https://github.com/georgeslane/agentic-airflow)'s engine: reading a DAG file into the engine's objects without running it (`reader.py`), the service that registers and runs them, asks you about tools and tells you what they found (`service.py`), the engine's model and tools, which are Athena's (`backend.py`), the tasks every DAG ends with (`ends.py`), how runs are shown (`runs.py`), what's kept (`store.py`), the model's tools for them (`tools.py`), agents' files (`files.py`), the dashboard's API (`api.py`), and upgrades to what's kept (`migrate.py`) |
 | `src/athena/gate.py` | Your messages first, between the tasks Athena does by itself |
 | `src/athena/cron.py`, `triggers.py` | Cron schedules, and events from outside that start DAGs |
 | `src/athena/skills.py`, `claude_projects.py`, `project_files.py`, `github_repo.py` | Skills, and projects handed to Claude |
