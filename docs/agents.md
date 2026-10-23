@@ -71,6 +71,7 @@ The History view shows each agent's last 10 runs: what started each, and what ca
 - **Tools that ask first** still ask you, in Telegram and in the agent's chat, saying which task wants it, unless the DAG allows it (`allowed_tools`, on the DAG, a task group or a task: the whole list of tools that may run without asking). Unanswered after `[tasks] confirm_minutes` (60), it's declined. What you've allowed when talking to the agent doesn't count for its DAG.
 - **Some always ask**, whatever the DAG says: changing a DAG (`change_dag`), and handing work to Claude.
 - **Athena changes an agent's DAG** with `change_dag`, which shows you exactly what changes, and asks first. A run can't change its own DAG: its reviews propose changes instead.
+- **If Athena writes out a DAG file in its answer without saving it,** as a model may while saying it has, it's saved anyway, asking you first like any change. It goes to the agent whose DAG has that id, or the one you're talking to. The answer ends by saying whether it was saved.
 - **What a task remembers, and skills it writes,** are suggestions for you to approve on the Memory and Skills tabs, and the summary says so.
 - **Longer work:** a task gets more steps than a reply (`max_tool_rounds`, 25), up to `max_minutes` (30) of work, not counting time it waits for your OK, and thinks before answering. If the model server can't be reached, a task tries again after 30 seconds, then 2 minutes, and if it still can't, the rest of the run doesn't try.
 

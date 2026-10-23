@@ -719,6 +719,77 @@ async def test_change_dag_shows_what_changes_and_checks_the_file(athena):
     )
 
 
+CHECKIN = """from agentic_airflow import AgenticTask, Dag
+
+with Dag("daily_checkin", prompt="Check in with me.", schedule=["0 7,13,19 * * *"]):
+    check = AgenticTask("check", prompt="Is there anything I need to act on?")
+"""
+SAID_SAVED = f"Here it is:\n\n```python\n{CHECKIN}```\n\nSaved as your daily_checkin agent."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("allow", "said"), [
+    (True, "_Saved. It runs every day at 07:00, 13:00 and 19:00, with 1 task._"),
+    (False, "_You declined it, so it wasn't done._"),
+])  # fmt: skip
+async def test_a_dag_the_answer_writes_out_but_didnt_save_is_saved_asking_first(athena, allow, said):
+    a = athena({"Change your DAG": SAID_SAVED})
+    master = a["dags"].master
+    asked = []
+
+    async def confirm(tool, args, summary=None):
+        asked.append((tool, summary))
+        return allow
+
+    result = await a["agent"].respond(f"session:{master}", "Change your DAG to check in with me", confirm=confirm)
+    assert [tool for tool, _ in asked] == ["change_dag"]
+    assert asked[0][1].startswith("A new DAG for Master, which runs every day at 07:00, 13:00 and 19:00.")
+    assert result.text.startswith("Here it is:") and result.text.endswith(said)
+    assert result.tools_used == ["change_dag"]
+    assert (a["store"].get(master).dag == CHECKIN) is allow
+    assert a["history"].messages(master)[0][-1].text.endswith(said)  # as the conversation keeps it
+
+
+@pytest.mark.asyncio
+async def test_a_dag_in_an_answer_is_only_saved_if_the_model_didnt_and_its_new(athena):
+    a = athena(
+        {
+            "Save it": [calls(("change_dag", {"source": CHECKIN})), SAID_SAVED],
+            "Show me": SAID_SAVED,
+            "Two ideas": f"```python\n{CHECKIN}```\nor\n```python\n{CHECKIN.replace('check in', 'see')}```",
+            "Jobs": f"```python\n{THREE}```",
+        }
+    )
+    asked = []
+
+    async def confirm(tool, args, summary=None):
+        asked.append(summary)
+        return True
+
+    master = f"session:{a['dags'].master}"
+    await a["agent"].respond(master, "Save it", confirm=confirm)
+    assert len(asked) == 1  # the model's own call: not asked again
+    for text in ("Show me", "Two ideas"):  # the file as it's saved; or more than one, to choose from
+        await a["agent"].respond(master, text, confirm=confirm)
+    assert len(asked) == 1
+    a["dags"].save(a["jobs"], THREE.replace("Apply to them.", "Apply."))
+    await a["agent"].respond(master, "Jobs", confirm=confirm)  # the DAG with that id is Job hunting's
+    assert asked[-1].startswith("A new DAG for Job hunting") and a["store"].get(a["jobs"]).dag == THREE
+
+
+def test_an_agent_with_no_dag_is_told_change_dag_gives_it_one(athena):
+    a = athena()
+    for agent_id in (a["dags"].master, a["jobs"]):
+        assert "It has no DAG yet, so it does nothing by itself: change_dag gives it one" in a["dags"].intro_for(
+            agent_id
+        )
+    assert "change_dag and run_dag act on this agent, or on one of them by name." in a["dags"].intro_for(
+        a["dags"].master
+    )
+    a["dags"].save(a["dags"].master, CHECKIN)
+    assert "It has no DAG yet" not in a["dags"].intro_for(a["dags"].master)
+
+
 def test_agents_files_are_listed_in_what_their_conversations_start_with(athena):
     a = athena()
     agent_files.keep(a["workspace"], a["jobs"], "cv.pdf", b"%PDF-1.4 x")

@@ -6,21 +6,24 @@
 
 change_dag and run_dag act on the agent of the conversation they're used in, or another, by name: so the master
 agent, which Telegram talks to, can act on the others. A run can't change or start a DAG: its reviews propose
-changes instead.
+changes instead. An answer that writes out a DAG file without having saved it, as a model may when it says it has,
+is saved by change_dag all the same, asking first (Tool.implied).
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from athena.dags import runs
-from athena.dags.reader import REFERENCE, DagError, when
+from athena.dags.reader import REFERENCE, DagError, read, when
 from athena.tools import Tool, ToolError, current_turn
 
 if TYPE_CHECKING:
     from athena.dags.service import Dags
 
 OUTPUT_CHARS = 1500  # of what a task said, in a run's
+CODE = re.compile(r"```[\w+-]*\n(.*?)```", re.DOTALL)  # a block of code in an answer
 
 
 def dag_tools(dags: Dags) -> list[Tool]:
@@ -62,6 +65,23 @@ def dag_tools(dags: Dags) -> list[Tool]:
         tasks = len(dag.own_tasks())
         return f"Saved. It runs {when(dag)}, with {tasks} task{'s' if tasks != 1 else ''}."
 
+    def written_out(text: str) -> dict[str, Any] | None:
+        """change_dag's arguments for the one DAG file an answer writes out, if it's not that agent's already: the
+        agent whose DAG has its id, or this conversation's."""
+        files = [block for block in CODE.findall(text) if "Dag(" in block]
+        if len(files) != 1:
+            return None
+        source = files[0].strip() + "\n"
+        try:
+            dag = read(source, timezone=dags.timezone, hooks=dags.hooks)
+        except DagError:
+            return None
+        here = dags.agent_here()
+        agent_id = dags.owner(dag.id) or here
+        if dags.store.get(agent_id).dag.strip() == source.strip():
+            return None
+        return {"source": source} if agent_id == here else {"source": source, "agent": f"#{agent_id}"}
+
     async def run_dag(args: dict[str, Any]) -> str:
         agent_id = which(args)
         try:
@@ -102,6 +122,7 @@ def dag_tools(dags: Dags) -> list[Tool]:
             handler=change_dag,
             needs_confirmation=True,
             preview=preview,
+            implied=written_out,
         ),
         Tool(
             name="run_dag",

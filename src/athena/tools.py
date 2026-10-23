@@ -65,6 +65,9 @@ class Tool:
     # For tools that ask first: checks the arguments and says in plain words what the call
     # will do, for the approval message. Raising ToolError stops the call before you're asked.
     preview: ToolHandler | None = None
+    # The arguments of a call an answer implies, such as a DAG file written out in it, or None: if the model
+    # answers without having called the tool, it's called then, asking as it would (agent.py).
+    implied: Callable[[str], dict[str, Any] | None] | None = None
 
     def schema(self) -> dict[str, Any]:
         return {

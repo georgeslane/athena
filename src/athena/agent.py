@@ -289,6 +289,31 @@ class Agent:
         outcome = FAILED if result.startswith("Error:") else RAN
         return ToolEvent(tool.name, args, result or "(no output)", outcome, approval, flagged)
 
+    async def _implied(
+        self,
+        result: AgentResult,
+        record: QueryRecord,
+        confirm: ConfirmFn,
+        task: Task,
+        allowed: frozenset[str],
+        hidden: Sequence[str],
+        on_tool: ToolEventFn | None,
+    ) -> None:
+        """Make the calls the answer implies that the model didn't, such as saving a DAG file it wrote out and said
+        it saved (Tool.implied), asking as they would; and say how each went, after the answer."""
+        for tool in self.tools.all():
+            if not tool.implied or tool.name in result.tools_used or not (args := tool.implied(result.text)):
+                continue
+            event = await self._run_tool(ToolCall("implied", tool.name, args, json.dumps(args)), confirm, task,
+                                         allowed=allowed, hidden=hidden)  # fmt: skip
+            result.tools_used.append(event.tool)
+            record.tools.append((event.tool, event.outcome))
+            log.info("tool %s, as the answer implied: %s", event.tool, event.outcome)
+            if on_tool:
+                await on_tool(event)
+            said = "You declined it, so it wasn't done." if event.outcome == DECLINED else event.output
+            result.text = f"{result.text.rstrip()}\n\n_{said.removeprefix('Error: ')}_"
+
     def _tool_error(self, name: str, exc: Exception) -> str:
         """What the model is told when a tool fails. Call it from the `except` block."""
         if isinstance(exc, TimeoutError):
@@ -651,6 +676,8 @@ class Agent:
                 reply = await step(None)
                 result.model_calls += 1
                 result.text = reply.content
+            if background is None and confirm is not None:
+                await self._implied(result, record, confirm, task, allowed, hidden, on_tool)
         finally:
             end_turn()
         result.notes = turn.notes
