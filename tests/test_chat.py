@@ -373,17 +373,20 @@ async def test_an_agents_dag_from_the_dashboard(chat):
         assert (await http.get("/api/runs/run_nope")).status_code == 404
 
         better = DAG.replace("Find jobs.", "Find roles.")
-        proposal = chat.dags.store.propose(1, run.run_id, "workflow", "Better.", DAG, source=better)
+        proposal = chat.dags.proposals.propose(1, run.run_id, "workflow", "Better.", better)
         shown = (await http.get("/api/agents/1/dag")).json()["proposals"]
         assert (
-            shown[0]["id"] == proposal.id
+            shown[0]["id"] == proposal["id"]
             and "+    find = AgenticTask('find', prompt='Find roles.')" in shown[0]["diff"]
         )
-        assert (await http.get(f"/api/runs/{run.run_id}")).json()["proposals"][0]["id"] == proposal.id
-        assert (await http.post(f"/api/proposals/{proposal.id}", json={"approve": "yes"})).status_code == 400
-        approved = (await http.post(f"/api/proposals/{proposal.id}", json={"approve": True})).json()
+        assert next(s for s in (await http.get("/api/agents")).json()["sessions"] if s["id"] == 1)["proposals"] == 1
+        assert (await http.get(f"/api/runs/{run.run_id}")).json()["proposals"][0]["id"] == proposal["id"]
+        url = f"/api/proposals/{proposal['id']}"
+        assert (await http.post(url, json={"approve": "yes"})).status_code == 400
+        assert (await http.post("/api/proposals/12", json={"approve": True})).status_code == 405  # not an id
+        approved = (await http.post(url, json={"approve": True})).json()
         assert "Find roles." in approved["source"] and approved["proposals"] == []
-        assert (await http.post(f"/api/proposals/{proposal.id}", json={"approve": True})).status_code == 409
+        assert (await http.post(url, json={"approve": True})).status_code == 409
 
 
 async def test_files_that_come_with_an_agents_guidance(chat):

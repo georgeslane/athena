@@ -95,6 +95,8 @@ def seed(services):
     last run kept, a DAG that's run for two jobs, with its steps, and two proposals; and another that's paused."""
     from agentic_airflow import DagRun, RunStatus, TaskInstance, TaskStatus
 
+    from athena.dags.reader import with_tools
+
     dags, history = services.dags, services.history
     dags.save(history.master.id, MASTER)
     jobs = history.new_session("Job hunting").id
@@ -133,8 +135,9 @@ def seed(services):
         add(f"end.{end}", f"end.{end}", "skipped" if end == "review_skills" else "success", f"{end} said.")
     dags.engine.state.save_run(run.to_dict())
     better = JOBS.replace("Say what was applied for.", "List what was applied for, with links.")
-    dags.store.propose(jobs, run.run_id, "workflow", "The report should link to each job.", JOBS, source=better)
-    dags.store.propose(jobs, run.run_id, "tools", "fetch timed out.", JOBS, changes={"hidden_tools": ["read_news"]})
+    dags.proposals.propose(jobs, run.run_id, "workflow", "The report should link to each job.", better)
+    tools = {"hidden_tools": ["read_news"], "allowed_tools": {"report": ["forget_memory"]}}  # which asks first
+    dags.proposals.propose(jobs, run.run_id, "tools", "fetch timed out.", with_tools(JOBS, tools), tools)
     other = history.new_session("Briefing").id
     dags.save(
         other, "with Dag('briefing', prompt='p', schedule=['30 7 * * 1-5']):\n    AgenticTask('brief', prompt='x')\n"
@@ -222,9 +225,11 @@ async def test_approving_and_rejecting_what_a_run_proposes(athena, browser):  # 
     await page.wait_for_selector("#toast >> text=Approved")
     assert "with links" in athena.dags.store.get(jobs).dag
     assert "with links" in await page.input_value(".code-text")  # the file shown is the file saved
-    await page.locator(".proposal", has_text="Its tools").locator("text=Reject").click()
+    tools = page.locator(".proposal", has_text="Its tools")
+    await tools.locator(".proposal-unasked >> text=without asking you: forget_memory (in report)").wait_for()
+    await tools.locator("text=Reject").click()
     await page.wait_for_selector(".proposal", state="detached")
-    assert athena.dags.store.proposals(jobs) == []
+    assert athena.dags.proposals.waiting(jobs) == []
     assert errors == []
 
 

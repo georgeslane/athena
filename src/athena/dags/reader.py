@@ -196,7 +196,9 @@ def read(source: str, *, timezone: str = "UTC", hooks: Mapping[str, Callable[...
     if block is None:
         raise DagError('There\'s no `with Dag("dag_id", prompt="..."):` block.', 1)
     reader = _Reader(timezone, {name: Hook(name, (hooks or {}).get(name)) for name in HOOKS})
-    return reader.dag(block)
+    dag = reader.dag(block)
+    dag.definition = source  # what a proposal for it replaces (proposals.py)
+    return dag
 
 
 def check(source: str, timezone: str = "UTC") -> Dag | None:

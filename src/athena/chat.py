@@ -298,8 +298,9 @@ class DashboardChat:
         dags = self.s.dags
         configs = {c.id: c for c in dags.store.all()}
         waiting: dict[int, int] = {}
-        for proposal in dags.store.proposals():
-            waiting[proposal.agent] = waiting.get(proposal.agent, 0) + 1
+        for proposal in dags.proposals.waiting():
+            agent_id = dags.proposals.agent(proposal)
+            waiting[agent_id] = waiting.get(agent_id, 0) + 1
         return {
             "master": history.master.id,
             "sessions": [

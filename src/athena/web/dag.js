@@ -203,12 +203,16 @@ export function proposalCard(p, then) {
           h("button.button.small", { type: "button", text: "Reject", onclick: (event) => decide(event, p, false, then) }),
           h("button.button.small.primary", { type: "button", text: "Approve", onclick: (event) => decide(event, p, true, then) })
         )
-      : h("p.hint", { text: { approved: "Approved.", rejected: "Rejected.", stale: "Out of date: the DAG changed since." }[p.state] || p.state });
+      : h("p.hint", { text: { approved: "Approved.", rejected: "Rejected.", stale: "Out of date: the DAG changed since.", withdrawn: "Withdrawn: a newer one took its place." }[p.state] || p.state });
+  const when = p.created ? `, ${clock(p.created, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+  // Tools that ask you first, which it would let run without asking: said plainly, not only in the diff.
+  const unasked = p.unasked && p.unasked.length ? h("p.proposal-unasked", { text: `It would let these run without asking you: ${p.unasked.join(", ")}.` }) : null;
   return h(
     "section.card.proposal",
     { "data-state": p.state },
-    h("div.card-head", {}, h("h2", { text: title }), h("span.aside", { text: p.run ? `Proposed by a run, ${clock(p.created, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "" })),
+    h("div.card-head", {}, h("h2", { text: title }), h("span.aside", { text: `Proposed by ${p.by || "a run"}${when}` })),
     p.why ? h("p", { text: p.why }) : null,
+    unasked,
     body,
     actions
   );

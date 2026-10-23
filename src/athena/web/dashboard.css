@@ -1050,6 +1050,8 @@ dl.reference dd { margin: 0; color: var(--muted); }
 .diff-line.removed { background: color-mix(in srgb, var(--failed) 14%, transparent); }
 .diff-line.where { color: var(--faint); }
 .proposal-tools { font-family: var(--font-mono); font-size: 13px; }
+.proposal-unasked { color: var(--failed); font-weight: 600; }
+.proposal-unasked::before { content: "⚠️ "; }
 
 /* A DAG, drawn (graph.js). */
 .graph-scroll { overflow-x: auto; padding: 10px 2px 4px; }

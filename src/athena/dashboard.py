@@ -166,7 +166,7 @@ ROUTES = (
     ("POST", r"/api/agents/(?P<agent>\d+)/dag/(?P<action>run|pause|resume|stop)", "_dag_action"),
     ("GET", r"/api/agents/(?P<agent>\d+)/runs", "_get_runs"),
     ("GET", r"/api/runs/(?P<run>run_[0-9A-Za-z_]{1,60})", "_get_run"),
-    ("POST", r"/api/proposals/(?P<proposal>\d+)", "_decide"),
+    ("POST", r"/api/proposals/(?P<proposal>rec_[0-9a-f]{12})", "_decide"),
     ("GET", r"/api/models", "_get_models"),
     ("POST", r"/api/thinking", "_set_thinking"),
     ("POST", r"/api/forget", "_forget"),
